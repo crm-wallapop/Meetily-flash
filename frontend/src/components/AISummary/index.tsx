@@ -25,21 +25,28 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
   };
 
   const ensureUniqueBlockIds = (summary: Summary): Summary => {
-    const updatedSummary = { ...summary };
-    
-    Object.entries(updatedSummary).forEach(([sectionKey, section]) => {
+    // Deep clone to avoid mutating readonly props
+    const updatedSummary: Summary = {};
+
+    Object.entries(summary).forEach(([sectionKey, section]) => {
       // Ensure section has blocks array before mapping
       if (section && Array.isArray(section.blocks)) {
-        section.blocks = section.blocks.map(block => ({
-          ...block,
-          id: block.id.includes(sectionKey) ? block.id : generateUniqueId(sectionKey)
-        }));
+        updatedSummary[sectionKey] = {
+          ...section,
+          blocks: section.blocks.map(block => ({
+            ...block,
+            id: block.id.includes(sectionKey) ? block.id : generateUniqueId(sectionKey)
+          }))
+        };
       } else {
         // Initialize empty blocks array if missing or invalid
-        section.blocks = [];
+        updatedSummary[sectionKey] = {
+          title: section?.title || sectionKey,
+          blocks: []
+        };
       }
     });
-    
+
     return updatedSummary;
   };
 
@@ -690,7 +697,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
         </div>
       )}
 
-      <div className="flex items-center justify-between mb-4">
+      {/* <div className="flex items-center justify-between mb-4">
         <div className="flex items-center space-x-2">
           <span className="text-2xl">✨</span>
           <h2 className="text-2xl font-semibold bg-gradient-to-r from-purple-600 to-blue-500 bg-clip-text text-transparent">
@@ -781,7 +788,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
             <span className="ml-1">Regenerate</span>
           </button>
         </div>
-      </div>
+      </div> */}
 
       {Object.keys(currentSummary)
         .filter(key => currentSummary[key]?.blocks?.length > 0)

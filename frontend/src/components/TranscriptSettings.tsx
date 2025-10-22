@@ -1,10 +1,16 @@
 import { useState, useEffect } from 'react';
-import { useSidebar } from './Sidebar/SidebarProvider';
 import { invoke } from '@tauri-apps/api/core';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
+import { Input } from './ui/input';
+import { Button } from './ui/button';
+import { Label } from './ui/label';
+import { Eye, EyeOff, Lock, Unlock } from 'lucide-react';
+import { ModelManager } from './WhisperModelManager';
+import { ParakeetModelManager } from './ParakeetModelManager';
 
 
 export interface TranscriptModelProps {
-    provider: 'localWhisper' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+    provider: 'localWhisper' | 'parakeet' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
     model: string;
     apiKey?: string | null;
 }
@@ -12,36 +18,19 @@ export interface TranscriptModelProps {
 export interface TranscriptSettingsProps {
     transcriptModelConfig: TranscriptModelProps;
     setTranscriptModelConfig: (config: TranscriptModelProps) => void;
-    onSave: (config: TranscriptModelProps) => void;
+    onModelSelect?: () => void;
 }
 
-export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelConfig, onSave }: TranscriptSettingsProps) {
+export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelConfig, onModelSelect }: TranscriptSettingsProps) {
     const [apiKey, setApiKey] = useState<string | null>(transcriptModelConfig.apiKey || null);
     const [showApiKey, setShowApiKey] = useState<boolean>(false);
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
-    const { serverAddress } = useSidebar();
-    // useEffect(() => {
-    //     const fetchTranscriptSettings = async () => {
-    //         try {
-    //             const response = await fetch(`${serverAddress}/get-transcript-config`);
-    //             if (!response.ok) {
-    //                 throw new Error(`HTTP error! status: ${response.status}`);
-    //             }
-    //             const data = await response.json();
-    //             if (data.provider !== null) {
-    //                 setTranscriptModelConfig(data);
-    //                 setApiKey(data.apiKey || null);
-    //             }
-    //         } catch (error) {
-    //             console.error('Failed to fetch transcript settings:', error);
-    //         }
-    //     };
-    //     fetchTranscriptSettings();
-    // }, []);
+    const [selectedWhisperModel, setSelectedWhisperModel] = useState<string>(transcriptModelConfig.provider === 'localWhisper' ? transcriptModelConfig.model : 'small');
+    const [selectedParakeetModel, setSelectedParakeetModel] = useState<string>(transcriptModelConfig.provider === 'parakeet' ? transcriptModelConfig.model : 'parakeet-tdt-0.6b-v3-int8');
 
     useEffect(() => {
-        if (transcriptModelConfig.provider === 'localWhisper') {
+        if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet') {
             setApiKey(null);
         }
     }, [transcriptModelConfig.provider]);
@@ -58,20 +47,14 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         }
     };
     const modelOptions = {
-        localWhisper: ['large-v3'],
+        localWhisper: [selectedWhisperModel],
+        parakeet: [selectedParakeetModel],
         deepgram: ['nova-2-phonecall'],
         elevenLabs: ['eleven_multilingual_v2'],
         groq: ['llama-3.3-70b-versatile'],
         openai: ['gpt-4o'],
     };
-    const requiresApiKey = transcriptModelConfig.provider === 'deepgram' || transcriptModelConfig.provider === 'elevenLabs' || transcriptModelConfig.provider === 'openai' || transcriptModelConfig.provider === 'groq'|| transcriptModelConfig.provider === 'localWhisper';
-    const isDoneDisabled = requiresApiKey && (!apiKey || (typeof apiKey === 'string' && !apiKey.trim()));
-
-    const handleSave = () => {
-        const updatedConfig = { ...transcriptModelConfig, apiKey: typeof apiKey === 'string' ? apiKey.trim() || null : null };
-        setTranscriptModelConfig(updatedConfig);
-        onSave(updatedConfig);
-    };
+    const requiresApiKey = transcriptModelConfig.provider === 'deepgram' || transcriptModelConfig.provider === 'elevenLabs' || transcriptModelConfig.provider === 'openai' || transcriptModelConfig.provider === 'groq';
 
     const handleInputClick = () => {
         if (isApiKeyLocked) {
@@ -79,130 +62,164 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             setTimeout(() => setIsLockButtonVibrating(false), 500);
         }
     };
+
+    const handleWhisperModelSelect = (modelName: string) => {
+        setSelectedWhisperModel(modelName);
+        if (transcriptModelConfig.provider === 'localWhisper') {
+            setTranscriptModelConfig({
+                ...transcriptModelConfig,
+                model: modelName
+            });
+            // Close modal after selection
+            if (onModelSelect) {
+                onModelSelect();
+            }
+        }
+    };
+
+    const handleParakeetModelSelect = (modelName: string) => {
+        setSelectedParakeetModel(modelName);
+        if (transcriptModelConfig.provider === 'parakeet') {
+            setTranscriptModelConfig({
+                ...transcriptModelConfig,
+                model: modelName
+            });
+            // Close modal after selection
+            if (onModelSelect) {
+                onModelSelect();
+            }
+        }
+    };
+
     return (
-        <div>
-            <div className="flex justify-between items-center mb-4">
-                <h3 className="text-lg font-semibold text-gray-900">Transcript Settings</h3>
-            </div>
-            <div className="space-y-4">
-                <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Transcript Model
-                    </label>
-                    <div className="flex space-x-2">
-                        <select
-                            className="px-3 py-2 text-sm bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                            value={transcriptModelConfig.provider}
-                            onChange={(e) => {
-                                const provider = e.target.value as TranscriptModelProps['provider'];
-                                setTranscriptModelConfig({ ...transcriptModelConfig, provider, model: modelOptions[provider][0] });
-                                fetchApiKey(provider);
-                            }}
-                        >
-                            <option value="localWhisper">Local Whisper</option>
-                            <option value="deepgram">Deepgram</option>
-                            <option value="elevenLabs">ElevenLabs</option>
-                            <option value="groq">Groq</option>
-                            <option value="openai">OpenAI</option>
-                        </select>
-                        
-                   
-                        <select
-                            className="px-3 py-2 text-sm bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                            value={transcriptModelConfig.model}
-                            onChange={(e) => {
-                                const model = e.target.value as TranscriptModelProps['model'];
-                                setTranscriptModelConfig({ ...transcriptModelConfig, model });
-                            }}
-                        >
-                            {modelOptions[transcriptModelConfig.provider].map((model) => (
-                                <option key={model} value={model}>{model}</option>
-                            ))}
-                        </select>
-                   
+        <div className='max-h-[calc(100vh-200px)]'>
+            <div>
+                {/* <div className="flex justify-between items-center mb-4">
+                    <h3 className="text-lg font-semibold text-gray-900">Transcript Settings</h3>
+                </div> */}
+                <div className="space-y-4 pb-6">
+                    <div>
+                        <Label className="block text-sm font-medium text-gray-700 mb-1">
+                            Transcript Model
+                        </Label>
+                        <div className="flex space-x-2 mx-1">
+                            <Select
+                                value={transcriptModelConfig.provider}
+                                onValueChange={(value) => {
+                                    const provider = value as TranscriptModelProps['provider'];
+                                    const newModel = provider === 'localWhisper' ? selectedWhisperModel : modelOptions[provider][0];
+                                    setTranscriptModelConfig({ ...transcriptModelConfig, provider, model: newModel });
+                                    if (provider !== 'localWhisper') {
+                                        fetchApiKey(provider);
+                                    }
+                                }}
+                            >
+                                <SelectTrigger className='focus:ring-1 focus:ring-blue-500 focus:border-blue-500'>
+                                    <SelectValue placeholder="Select provider" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="parakeet">⚡ Parakeet (Recommended - Real-time / Accurate)</SelectItem>
+                                    <SelectItem value="localWhisper">🏠 Local Whisper (High Accuracy)</SelectItem>
+                                    {/* <SelectItem value="deepgram">☁️ Deepgram (Backup)</SelectItem>
+                                    <SelectItem value="elevenLabs">☁️ ElevenLabs</SelectItem>
+                                    <SelectItem value="groq">☁️ Groq</SelectItem>
+                                    <SelectItem value="openai">☁️ OpenAI</SelectItem> */}
+                                </SelectContent>
+                            </Select>
+
+                            {transcriptModelConfig.provider !== 'localWhisper' && transcriptModelConfig.provider !== 'parakeet' && (
+                                <Select
+                                    value={transcriptModelConfig.model}
+                                    onValueChange={(value) => {
+                                        const model = value as TranscriptModelProps['model'];
+                                        setTranscriptModelConfig({ ...transcriptModelConfig, model });
+                                    }}
+                                >
+                                    <SelectTrigger className='focus:ring-1 focus:ring-blue-500 focus:border-blue-500'>
+                                        <SelectValue placeholder="Select model" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        {modelOptions[transcriptModelConfig.provider].map((model) => (
+                                            <SelectItem key={model} value={model}>{model}</SelectItem>
+                                        ))}
+                                    </SelectContent>
+                                </Select>
+                            )}
+
+                        </div>
                     </div>
-                </div>
-                
-                    
-                
-                {requiresApiKey && (
-                <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                        API Key
-                    </label>
-                    <div className="relative">
-                        <input
-                            type={showApiKey ? "text" : "password"}
-                            className={`w-full px-3 py-2 text-sm bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 pr-24 ${
-                                isApiKeyLocked ? 'bg-gray-100 cursor-not-allowed' : ''
-                              }`}
-                            value={apiKey || ''}
-                            onChange={(e) => setApiKey(e.target.value)}
-                            disabled={isApiKeyLocked}
-                            onClick={handleInputClick}
-                            placeholder="Enter your API key"
-                        />
-                        {isApiKeyLocked && (
-                            <div 
-                                onClick={handleInputClick}
-                                className="absolute inset-0 flex items-center justify-center bg-gray-100 bg-opacity-50 rounded-md cursor-not-allowed"
+
+                    {transcriptModelConfig.provider === 'localWhisper' && (
+                        <div className="mt-6">
+                            <ModelManager
+                                selectedModel={selectedWhisperModel}
+                                onModelSelect={handleWhisperModelSelect}
+                                autoSave={true}
                             />
-                        )}
-                       <div className="absolute inset-y-0 right-0 pr-3 flex items-center space-x-2">
-                       <button
-                    type="button"
-                    onClick={() => setIsApiKeyLocked(!isApiKeyLocked)}
-                    className={`text-gray-500 hover:text-gray-700 transition-colors duration-200 ${
-                      isLockButtonVibrating ? 'animate-vibrate text-red-500' : ''
-                    }`}
-                    title={isApiKeyLocked ? "Unlock to edit" : "Lock to prevent editing"}
-                  >
-                    {isApiKeyLocked ? (
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                      </svg>
-                    ) : (
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z" />
-                      </svg>
+                        </div>
                     )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowApiKey(!showApiKey)}
-                    className="text-gray-500 hover:text-gray-700"
-                  >
-                    {showApiKey ? (
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-                      </svg>
-                    ) : (
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                      </svg>
+
+                    {transcriptModelConfig.provider === 'parakeet' && (
+                        <div className="mt-6">
+                            <ParakeetModelManager
+                                selectedModel={selectedParakeetModel}
+                                onModelSelect={handleParakeetModelSelect}
+                                autoSave={true}
+                            />
+                        </div>
                     )}
-                  </button>
-                       </div>
-                    </div>
+
+
+                    {requiresApiKey && (
+                        <div>
+                            <Label className="block text-sm font-medium text-gray-700 mb-1">
+                                API Key
+                            </Label>
+                            <div className="relative mx-1">
+                                <Input
+                                    type={showApiKey ? "text" : "password"}
+                                    className={`pr-24 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 ${isApiKeyLocked ? 'bg-gray-100 cursor-not-allowed' : ''
+                                        }`}
+                                    value={apiKey || ''}
+                                    onChange={(e) => setApiKey(e.target.value)}
+                                    disabled={isApiKeyLocked}
+                                    onClick={handleInputClick}
+                                    placeholder="Enter your API key"
+                                />
+                                {isApiKeyLocked && (
+                                    <div
+                                        onClick={handleInputClick}
+                                        className="absolute inset-0 flex items-center justify-center bg-gray-100 bg-opacity-50 rounded-md cursor-not-allowed"
+                                    />
+                                )}
+                                <div className="absolute inset-y-0 right-0 pr-1 flex items-center">
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon"
+                                        onClick={() => setIsApiKeyLocked(!isApiKeyLocked)}
+                                        className={`transition-colors duration-200 ${isLockButtonVibrating ? 'animate-vibrate text-red-500' : ''
+                                            }`}
+                                        title={isApiKeyLocked ? "Unlock to edit" : "Lock to prevent editing"}
+                                    >
+                                        {isApiKeyLocked ? <Lock className="h-4 w-4" /> : <Unlock className="h-4 w-4" />}
+                                    </Button>
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon"
+                                        onClick={() => setShowApiKey(!showApiKey)}
+                                    >
+                                        {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                    </Button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
-                )}
-               <div className="mt-6 flex justify-end">
-          <button
-            onClick={handleSave}
-            disabled={isDoneDisabled}
-            className={`px-4 py-2 text-sm font-medium text-white rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 ${
-              isDoneDisabled 
-                ? 'bg-gray-400 cursor-not-allowed' 
-                : 'bg-blue-600 hover:bg-blue-700'
-            }`}
-          >
-            Done
-          </button>
-        </div>
             </div>
         </div>
-    );
+    )
 }
 
 

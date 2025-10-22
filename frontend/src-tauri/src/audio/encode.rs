@@ -21,9 +21,19 @@ pub fn encode_single_audio(
     channels: u16,
     output_path: &PathBuf,
 ) -> anyhow::Result<()> {
-    debug!("Starting FFmpeg process");
+    debug!("Starting FFmpeg process for {} bytes of audio data", data.len());
 
-    let mut command = Command::new(find_ffmpeg_path().unwrap());
+    if data.is_empty() {
+        return Err(anyhow::anyhow!("No audio data provided for encoding"));
+    }
+
+    let ffmpeg_path = find_ffmpeg_path().ok_or_else(|| {
+        anyhow::anyhow!("FFmpeg not found. Please install FFmpeg to save recordings.")
+    })?;
+
+    debug!("Using FFmpeg at: {:?}", ffmpeg_path);
+
+    let mut command = Command::new(ffmpeg_path);
     command
         .args([
             "-f",
@@ -37,7 +47,7 @@ pub fn encode_single_audio(
             "-c:a",
             "aac",
             "-b:a",
-            "64k", // Reduced bitrate for higher compression
+            "192k", // Increased from 64k for better audio quality (especially for speech)
             "-profile:a",
             "aac_low", // Use AAC-LC profile for better compatibility
             "-movflags",
@@ -49,6 +59,14 @@ pub fn encode_single_audio(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // Hide console window on Windows to prevent CMD popup during recording
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
 
     debug!("FFmpeg command: {:?}", command);
 
