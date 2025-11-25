@@ -115,7 +115,7 @@ if %USE_PNPM% equ 0 (
 )
 
 REM Run tauri dev using npm scripts (which handle GPU detection automatically)
-echo    Starting complete Tauri application with automatic GPU detection...
+echo    Starting complete Tauri application with Vulkan acceleration...
 echo.
 
 if %USE_PNPM% equ 1 (

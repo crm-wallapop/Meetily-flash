@@ -40,13 +40,13 @@ try {
         exit 1
     }
 
-    Write-Host "Starting complete Tauri application with automatic GPU detection..." -ForegroundColor Cyan
+    Write-Host "Starting complete Tauri application with Vulkan acceleration..." -ForegroundColor Cyan
     Write-Host ""
 
     if ($usePnpm) {
-        pnpm run tauri:dev
+        pnpm run tauri:dev:vulkan
     } else {
-        npm run tauri:dev
+        npm run tauri:dev:vulkan
     }
 
     if ($LASTEXITCODE -eq 0) {
