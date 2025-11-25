@@ -91,37 +91,90 @@ impl SidecarManager {
             }
         }
 
-        // 2. Check bundled resources (production builds via Tauri sidecar)
         // In production, Tauri bundles the binary with target triple suffix
+        // 2. Check relative to current executable (most reliable for AppImage/bundled apps)
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                log::info!("Searching for llama-helper relative to executable: {}", exe_dir.display());
+                
+                // Get the target triple (same logic as before)
+                let target_triple = std::env::var("TARGET")
+                    .unwrap_or_else(|_| {
+                        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                        { "x86_64-unknown-linux-gnu".to_string() }
+                        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+                        { "aarch64-unknown-linux-gnu".to_string() }
+                        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+                        { "x86_64-apple-darwin".to_string() }
+                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        { "aarch64-apple-darwin".to_string() }
+                        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+                        { "x86_64-pc-windows-msvc".to_string() }
+                        #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+                        { "aarch64-pc-windows-msvc".to_string() }
+                        #[cfg(not(any(
+                            all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")),
+                            all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64")),
+                            all(target_os = "windows", any(target_arch = "x86_64", target_arch = "aarch64"))
+                        )))]
+                        { "unknown".to_string() }
+                    });
+
+                let binary_name = if cfg!(windows) {
+                    format!("llama-helper-{}.exe", target_triple)
+                } else {
+                    format!("llama-helper-{}", target_triple)
+                };
+
+                // Try exact match in exe dir
+                let bundled = exe_dir.join(&binary_name);
+                if bundled.exists() {
+                    log::info!("Found exact match next to executable: {}", bundled.display());
+                    return Ok(bundled);
+                }
+
+                // Fuzzy match in exe dir
+                log::info!("Attempting fuzzy match in exe dir: {}", exe_dir.display());
+                if let Ok(entries) = std::fs::read_dir(exe_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.starts_with("llama-helper") {
+                                log::info!("Found fuzzy match next to executable: {}", path.display());
+                                return Ok(path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Check bundled resources (RESOURCE_DIR) - Fallback
         if let Ok(resource_dir) = std::env::var("RESOURCE_DIR") {
-            // Get the target triple for the current platform
+            log::info!("Searching for llama-helper in RESOURCE_DIR: {}", resource_dir);
+            let resource_path = PathBuf::from(&resource_dir);
+             // Get the target triple again (or we could have shared it, but code duplication is safer for this tool usage)
             let target_triple = std::env::var("TARGET")
                 .unwrap_or_else(|_| {
-                    // Fallback: construct target triple from cfg macros
-                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     { "x86_64-unknown-linux-gnu".to_string() }
-
-                    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+                    // ... (abbreviated for brevity in thought, but must be full in tool)
+                     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
                     { "aarch64-unknown-linux-gnu".to_string() }
-
                     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
                     { "x86_64-apple-darwin".to_string() }
-
                     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                     { "aarch64-apple-darwin".to_string() }
-
                     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
                     { "x86_64-pc-windows-msvc".to_string() }
-
                     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
                     { "aarch64-pc-windows-msvc".to_string() }
-
                     #[cfg(not(any(
                         all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")),
                         all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64")),
                         all(target_os = "windows", any(target_arch = "x86_64", target_arch = "aarch64"))
                     )))]
-                    { panic!("Unsupported platform/architecture combination") }
+                    { "unknown".to_string() }
                 });
 
             let binary_name = if cfg!(windows) {
@@ -130,13 +183,26 @@ impl SidecarManager {
                 format!("llama-helper-{}", target_triple)
             };
 
-            let bundled = PathBuf::from(&resource_dir).join(&binary_name);
+            let bundled = resource_path.join(&binary_name);
             if bundled.exists() {
-                log::info!("Using bundled llama-helper: {}", bundled.display());
+                log::info!("Found exact match in RESOURCE_DIR: {}", bundled.display());
                 return Ok(bundled);
             }
 
-            log::warn!("Expected bundled binary not found: {}", bundled.display());
+            // Fuzzy match in RESOURCE_DIR
+            if let Ok(entries) = std::fs::read_dir(&resource_path) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if name.starts_with("llama-helper") {
+                            log::info!("Found fuzzy match in RESOURCE_DIR: {}", path.display());
+                            return Ok(path);
+                        }
+                    }
+                }
+            }
+        } else {
+            log::warn!("RESOURCE_DIR environment variable not set");
         }
 
         // 3. Fallback for dev: try relative paths from workspace (no target triple in dev builds)

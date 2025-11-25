@@ -110,6 +110,15 @@ try {
 
 if (fs.existsSync(srcPath)) {
   fs.copyFileSync(srcPath, destPath);
+  // Ensure the binary is executable
+  if (platform !== 'win32') {
+    try {
+      fs.chmodSync(destPath, 0o755);
+      console.log('✅ Set executable permissions for llama-helper');
+    } catch (err) {
+      console.warn('⚠️ Failed to set executable permissions:', err.message);
+    }
+  }
   console.log(`✅ Copied llama-helper to ${destPath}`);
 } else {
   console.error(`❌ llama-helper binary not found at ${srcPath}`);
