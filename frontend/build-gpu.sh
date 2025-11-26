@@ -65,8 +65,94 @@ else
   exit 1
 fi
 
-# Build using npm scripts (which handle GPU detection automatically)
-echo -e "${BLUE}Building complete Tauri application with automatic GPU detection...${NC}"
+# Detect GPU feature if not already set
+if [ -z "$TAURI_GPU_FEATURE" ]; then
+    echo -e "${BLUE}🔍 Detecting GPU features...${NC}"
+    # Run the detection script and capture output
+    # We need to run it from frontend dir
+    if [ "$FRONTEND_DIR" != "." ]; then
+        cd "$FRONTEND_DIR"
+    fi
+    
+    TAURI_GPU_FEATURE=$(node scripts/auto-detect-gpu.js)
+    
+    if [ "$FRONTEND_DIR" != "." ]; then
+        cd ..
+    fi
+fi
+
+if [ -n "$TAURI_GPU_FEATURE" ]; then
+    echo -e "${GREEN}✅ Detected GPU feature: $TAURI_GPU_FEATURE${NC}"
+    export TAURI_GPU_FEATURE
+else
+    echo -e "${YELLOW}⚠️ No specific GPU feature detected or forced${NC}"
+fi
+
+# Build llama-helper
+echo ""
+echo -e "${BLUE}🦙 Building llama-helper sidecar (release)...${NC}"
+
+HELPER_DIR="llama-helper"
+if [ ! -d "$HELPER_DIR" ]; then
+    # Try to find it relative to script location
+    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+    HELPER_DIR="$SCRIPT_DIR/../llama-helper"
+fi
+
+if [ ! -d "$HELPER_DIR" ]; then
+    echo -e "${RED}❌ Could not find llama-helper directory${NC}"
+    exit 1
+fi
+
+HELPER_FEATURES=""
+if [ -n "$TAURI_GPU_FEATURE" ]; then
+    HELPER_FEATURES="--features $TAURI_GPU_FEATURE"
+fi
+
+echo -e "   Building in $HELPER_DIR with features: ${HELPER_FEATURES:-none}"
+(cd "$HELPER_DIR" && cargo build --release $HELPER_FEATURES)
+
+if [ $? -ne 0 ]; then
+    echo -e "${RED}❌ Failed to build llama-helper${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}✅ llama-helper built successfully${NC}"
+
+# Detect target triple
+echo ""
+echo -e "${BLUE}🎯 Detecting target triple...${NC}"
+TARGET_TRIPLE=$(rustc -vV | grep "host:" | awk '{print $2}')
+echo -e "   Target: $TARGET_TRIPLE"
+
+# Copy binary
+BINARIES_DIR="$FRONTEND_DIR/src-tauri/binaries"
+mkdir -p "$BINARIES_DIR"
+
+# Clean old binaries
+find "$BINARIES_DIR" -name "llama-helper*" -delete
+
+BASE_BINARY="llama-helper"
+SIDECAR_BINARY="llama-helper-$TARGET_TRIPLE"
+
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
+    BASE_BINARY="llama-helper.exe"
+    SIDECAR_BINARY="llama-helper-$TARGET_TRIPLE.exe"
+fi
+
+SRC_PATH="$HELPER_DIR/target/release/$BASE_BINARY"
+DEST_PATH="$BINARIES_DIR/$SIDECAR_BINARY"
+
+if [ -f "$SRC_PATH" ]; then
+    cp "$SRC_PATH" "$DEST_PATH"
+    echo -e "${GREEN}✅ Copied binary to $DEST_PATH${NC}"
+else
+    echo -e "${RED}❌ Binary not found at $SRC_PATH${NC}"
+    exit 1
+fi
+
+# Build using npm scripts
+echo -e "${BLUE}Building complete Tauri application...${NC}"
 echo ""
 
 # NO_STRIP true due to issues with bundling appImage

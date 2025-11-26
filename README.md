@@ -30,7 +30,8 @@
 </p>
     <p align="center">
 
- A privacy-first AI meeting assistant that captures, transcribes, and summarizes meetings entirely on your infrastructure. Built by expert AI engineers passionate about data sovereignty and open source solutions. Perfect for enterprises that need advanced meeting intelligence without compromising on privacy, compliance, or control.
+A privacy-first AI meeting assistant that captures, transcribes, and summarizes meetings entirely on your infrastructure. Built by expert AI engineers passionate about data sovereignty and open source solutions. Perfect for enterprises that need advanced meeting intelligence without compromising on privacy, compliance, or control.
+
 </p>
 
 <p align="center">
@@ -135,7 +136,7 @@ Build from source following our detailed guides:
 git clone https://github.com/Zackriya-Solutions/meeting-minutes
 cd meeting-minutes/frontend
 pnpm install
-pnpm run tauri:build
+./build-gpu.sh
 ```
 
 ## Key Features in Action
@@ -143,6 +144,7 @@ pnpm run tauri:build
 ### 🎯 Local Transcription
 
 Transcribe meetings entirely on your device using **Whisper** or **Parakeet** models. No cloud required.
+
 <p align="center">
     <img src="docs/home.png" width="650" style="border-radius: 10px;" alt="Meetily Demo" />
 </p>
@@ -235,4 +237,3 @@ We welcome contributions from the community! If you have any questions or sugges
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=Zackriya-Solutions/meeting-minutes&type=Date)](https://star-history.com/#Zackriya-Solutions/meeting-minutes&Date)
-
