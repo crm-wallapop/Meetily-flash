@@ -140,14 +140,25 @@ if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
     SIDECAR_BINARY="llama-helper-$TARGET_TRIPLE.exe"
 fi
 
-SRC_PATH="$HELPER_DIR/target/release/$BASE_BINARY"
+# The binary is in the workspace target directory, which is one level up from frontend
+# if we are in frontend dir.
+WORKSPACE_ROOT="$FRONTEND_DIR/.."
+SRC_PATH="$WORKSPACE_ROOT/target/release/$BASE_BINARY"
 DEST_PATH="$BINARIES_DIR/$SIDECAR_BINARY"
+
+if [ ! -f "$SRC_PATH" ]; then
+    # Fallback: check if we are running from root and target is in root
+    SRC_PATH="target/release/$BASE_BINARY"
+fi
 
 if [ -f "$SRC_PATH" ]; then
     cp "$SRC_PATH" "$DEST_PATH"
     echo -e "${GREEN}✅ Copied binary to $DEST_PATH${NC}"
 else
     echo -e "${RED}❌ Binary not found at $SRC_PATH${NC}"
+    # List contents of target/release to help debugging
+    echo -e "${YELLOW}Contents of target/release:${NC}"
+    ls -la "$WORKSPACE_ROOT/target/release/" || ls -la "target/release/"
     exit 1
 fi
 

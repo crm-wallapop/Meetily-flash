@@ -139,7 +139,7 @@ impl SidecarManager {
                     for entry in entries.flatten() {
                         let path = entry.path();
                         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if name.starts_with("llama-helper") {
+                            if name.starts_with("llama-helper") && !name.ends_with(".d") {
                                 log::info!("Found fuzzy match next to executable: {}", path.display());
                                 return Ok(path);
                             }
@@ -194,7 +194,7 @@ impl SidecarManager {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with("llama-helper") {
+                        if name.starts_with("llama-helper") && !name.ends_with(".d") {
                             log::info!("Found fuzzy match in RESOURCE_DIR: {}", path.display());
                             return Ok(path);
                         }
