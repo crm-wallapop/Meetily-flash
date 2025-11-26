@@ -536,6 +536,13 @@ pub async fn api_save_model_config<R: Runtime>(
         }
     }
 
+    // Trigger graceful shutdown of built-in AI sidecar if it's running
+    // This ensures that if the user switched models/providers, the old one is cleaned up
+    // The shutdown happens in the background, so it won't block the UI
+    if let Err(e) = crate::summary::summary_engine::client::shutdown_sidecar_gracefully().await {
+        log_warn!("Failed to initiate graceful sidecar shutdown: {}", e);
+    }
+
     log_info!("✅ Successfully saved model configuration to database");
     Ok(
         serde_json::json!({ "status": "success", "message": "Model configuration saved successfully" }),

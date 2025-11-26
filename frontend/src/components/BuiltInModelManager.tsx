@@ -6,7 +6,7 @@ import { listen } from '@tauri-apps/api/event';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { cn } from '@/lib/utils';
-import { Download, RefreshCw, BadgeAlert, ExternalLink } from 'lucide-react';
+import { Download, RefreshCw, BadgeAlert } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface ModelInfo {
@@ -133,15 +133,6 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
     }
   };
 
-  const openModelsFolder = async () => {
-    try {
-      await invoke('builtin_ai_open_models_folder');
-    } catch (error) {
-      console.error('Failed to open models folder:', error);
-      toast.error('Failed to open models folder');
-    }
-  };
-
   if (isLoading) {
     return (
       <div className="text-center py-8 text-muted-foreground">
@@ -165,10 +156,6 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
     <div>
       <div className="flex items-center justify-between mb-4">
         <h4 className="text-sm font-bold">Built-in AI Models</h4>
-        <Button variant="outline" size="sm" onClick={openModelsFolder} className="text-xs">
-          <ExternalLink className="mr-2 h-3 w-3" />
-          Open Folder
-        </Button>
       </div>
 
       <div className="grid gap-4">

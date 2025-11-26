@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -43,6 +43,9 @@ pub struct SidecarManager {
     /// Shutdown flag
     should_shutdown: Arc<AtomicBool>,
 
+    /// Active request count (for graceful shutdown)
+    active_request_count: Arc<AtomicUsize>,
+
     /// Path to llama-helper binary
     helper_binary_path: PathBuf,
 
@@ -51,6 +54,25 @@ pub struct SidecarManager {
 
     /// Idle timeout in seconds (configurable via env var)
     idle_timeout_secs: u64,
+}
+
+/// RAII guard for tracking active requests
+/// Decrements the active request count when dropped
+struct RequestGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl RequestGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self { counter }
+    }
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl SidecarManager {
@@ -77,6 +99,7 @@ impl SidecarManager {
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(false)),
             should_shutdown: Arc::new(AtomicBool::new(false)),
+            active_request_count: Arc::new(AtomicUsize::new(0)),
             helper_binary_path,
             current_model_path: Arc::new(RwLock::new(None)),
             idle_timeout_secs,
@@ -318,6 +341,9 @@ impl SidecarManager {
 
     /// Send a request to the sidecar and wait for response
     pub async fn send_request(&self, request_json: String, timeout: Duration) -> Result<String> {
+        // Track active request
+        let _guard = RequestGuard::new(self.active_request_count.clone());
+
         // Write request to stdin
         {
             let mut stdin_lock = self.stdin_writer.lock().await;
@@ -369,24 +395,65 @@ impl SidecarManager {
         let request = serde_json::json!({"type": "ping"}).to_string();
         let timeout = Duration::from_secs(5);
 
-        match self.send_request(request, timeout).await {
-            Ok(response) => {
-                let resp: serde_json::Value = serde_json::from_str(&response)?;
-                if resp.get("type").and_then(|t| t.as_str()) == Some("pong") {
-                    Ok(())
-                } else {
-                    Err(anyhow!("Unexpected ping response: {}", response))
-                }
+        // Note: We don't use send_request here to avoid incrementing active_request_count
+        // for internal health checks, as that would prevent graceful shutdown
+        
+        // Write request
+        {
+            let mut stdin_lock = self.stdin_writer.lock().await;
+            if let Some(stdin) = stdin_lock.as_mut() {
+                stdin.write_all(request.as_bytes()).await?;
+                stdin.write_all(b"\n").await?;
+                stdin.flush().await?;
+            } else {
+                return Err(anyhow!("Sidecar not running"));
             }
-            Err(e) => {
-                log::warn!("Ping failed: {}", e);
-                self.is_healthy.store(false, Ordering::SeqCst);
-                Err(e)
-            }
+        }
+
+        // Read response
+        let response = tokio::time::timeout(timeout, self.read_response()).await??;
+
+        let resp: serde_json::Value = serde_json::from_str(&response)?;
+        if resp.get("type").and_then(|t| t.as_str()) == Some("pong") {
+            Ok(())
+        } else {
+            Err(anyhow!("Unexpected ping response: {}", response))
         }
     }
 
     /// Gracefully shutdown the sidecar
+    /// Waits for active requests to complete before killing the process
+    pub async fn shutdown_gracefully(&self) -> Result<()> {
+        log::info!("Initiating graceful shutdown of sidecar");
+        
+        // Set shutdown flag to prevent new internal tasks
+        self.should_shutdown.store(true, Ordering::SeqCst);
+        
+        // Wait for active requests to complete
+        // We poll every 500ms
+        let start = Instant::now();
+        let max_wait = Duration::from_secs(600); // Wait up to 10 minutes for long generations
+        
+        loop {
+            let count = self.active_request_count.load(Ordering::SeqCst);
+            if count == 0 {
+                log::info!("No active requests, proceeding with shutdown");
+                break;
+            }
+            
+            if start.elapsed() > max_wait {
+                log::warn!("Timed out waiting for active requests ({} active), forcing shutdown", count);
+                break;
+            }
+            
+            log::debug!("Waiting for {} active requests to complete...", count);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        
+        self.shutdown().await
+    }
+
+    /// Force shutdown the sidecar
     pub async fn shutdown(&self) -> Result<()> {
         // Set shutdown flag
         self.should_shutdown.store(true, Ordering::SeqCst);
@@ -396,9 +463,17 @@ impl SidecarManager {
             let request = serde_json::json!({"type": "shutdown"}).to_string();
             let timeout = Duration::from_secs(5);
 
-            if let Err(e) = self.send_request(request, timeout).await {
-                log::warn!("Failed to send shutdown command: {}", e);
-            }
+            // Try to send shutdown command, but ignore errors
+            // We don't use send_request to avoid incrementing counter
+            let _ = async {
+                let mut stdin_lock = self.stdin_writer.lock().await;
+                if let Some(stdin) = stdin_lock.as_mut() {
+                    stdin.write_all(request.as_bytes()).await?;
+                    stdin.write_all(b"\n").await?;
+                    stdin.flush().await?;
+                }
+                Ok::<(), anyhow::Error>(())
+            }.await;
         }
 
         // Kill process if still running
@@ -468,6 +543,7 @@ impl SidecarManager {
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             should_shutdown: self.should_shutdown.clone(),
+            active_request_count: self.active_request_count.clone(),
             helper_binary_path: self.helper_binary_path.clone(),
             current_model_path: self.current_model_path.clone(),
             idle_timeout_secs: self.idle_timeout_secs,
@@ -487,6 +563,11 @@ impl SidecarManager {
 
                 if !manager.is_healthy() {
                     log::debug!("Health check loop: sidecar unhealthy, skipping ping");
+                    continue;
+                }
+
+                // Don't ping if we are busy with a request
+                if manager.active_request_count.load(Ordering::SeqCst) > 0 {
                     continue;
                 }
 
@@ -510,6 +591,7 @@ impl SidecarManager {
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             should_shutdown: self.should_shutdown.clone(),
+            active_request_count: self.active_request_count.clone(),
             helper_binary_path: self.helper_binary_path.clone(),
             current_model_path: self.current_model_path.clone(),
             idle_timeout_secs: self.idle_timeout_secs,
@@ -525,6 +607,13 @@ impl SidecarManager {
                 if manager.should_shutdown.load(Ordering::SeqCst) {
                     log::debug!("Idle check loop: shutdown flag set, exiting");
                     break;
+                }
+
+                // Don't shutdown if we are busy
+                if manager.active_request_count.load(Ordering::SeqCst) > 0 {
+                    // Update activity to prevent timeout immediately after request finishes
+                    manager.update_activity().await;
+                    continue;
                 }
 
                 let idle_secs = manager.seconds_since_activity().await;

@@ -591,29 +591,31 @@ export function ModelSettingsModal({
               </SelectContent>
             </Select>
 
-            <Select
-              value={modelConfig.model}
-              onValueChange={(value) =>
-                setModelConfig((prev: ModelConfig) => ({ ...prev, model: value }))
-              }
-            >
-              <SelectTrigger className="flex-1">
-                <SelectValue placeholder="Select model" />
-              </SelectTrigger>
-              <SelectContent className="max-h-48 overflow-y-auto">
-                {modelConfig.provider === 'openrouter' && isLoadingOpenRouter ? (
-                  <SelectItem value="loading" disabled>
-                    Loading models...
-                  </SelectItem>
-                ) : (
-                  modelOptions[modelConfig.provider].map((model) => (
-                    <SelectItem key={model} value={model}>
-                      {model}
+            {modelConfig.provider !== 'builtin-ai' && (
+              <Select
+                value={modelConfig.model}
+                onValueChange={(value) =>
+                  setModelConfig((prev: ModelConfig) => ({ ...prev, model: value }))
+                }
+              >
+                <SelectTrigger className="flex-1">
+                  <SelectValue placeholder="Select model" />
+                </SelectTrigger>
+                <SelectContent className="max-h-48 overflow-y-auto">
+                  {modelConfig.provider === 'openrouter' && isLoadingOpenRouter ? (
+                    <SelectItem value="loading" disabled>
+                      Loading models...
                     </SelectItem>
-                  ))
-                )}
-              </SelectContent>
-            </Select>
+                  ) : (
+                    modelOptions[modelConfig.provider].map((model) => (
+                      <SelectItem key={model} value={model}>
+                        {model}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+            )}
           </div>
         </div>
 

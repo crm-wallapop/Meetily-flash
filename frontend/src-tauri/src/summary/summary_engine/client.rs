@@ -180,15 +180,22 @@ pub async fn generate_with_builtin(
 }
 
 /// Shutdown the global sidecar (graceful cleanup)
-pub async fn shutdown_sidecar() -> Result<()> {
+/// Detaches the current manager and spawns a background task to drain active requests
+pub async fn shutdown_sidecar_gracefully() -> Result<()> {
     let manager_opt = {
         let mut global_manager = SIDECAR_MANAGER.lock().await;
         global_manager.take()
     };
 
     if let Some(manager) = manager_opt {
-        log::info!("Shutting down sidecar manager");
-        manager.shutdown().await?;
+        log::info!("Detaching sidecar manager for graceful shutdown");
+        
+        // Spawn background task to wait for active requests and then kill
+        tokio::spawn(async move {
+            if let Err(e) = manager.shutdown_gracefully().await {
+                log::error!("Error during graceful shutdown: {}", e);
+            }
+        });
     }
 
     Ok(())
