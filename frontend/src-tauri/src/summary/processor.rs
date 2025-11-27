@@ -1,17 +1,25 @@
 use crate::summary::llm_client::{generate_summary, LLMProvider};
 use crate::summary::templates;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::Client;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-/// Rough token count estimation (4 characters ≈ 1 token)
+// Compile regex once and reuse (significant performance improvement for repeated calls)
+static THINKING_TAG_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?s)<think(?:ing)?>.*?</think(?:ing)?>").unwrap()
+});
+
+/// Rough token count estimation (4 bytes ≈ 1 token)
+/// Optimized to use byte length (O(1)) instead of char count (O(n))
 pub fn rough_token_count(s: &str) -> usize {
-    (s.chars().count() as f64 / 4.0).ceil() as usize
+    (s.len() as f64 / 4.0).ceil() as usize
 }
 
 /// Chunks text into overlapping segments based on token count
+/// Optimized to use byte-based slicing instead of char vector allocation
 ///
 /// # Arguments
 /// * `text` - The text to chunk
@@ -30,45 +38,54 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
         return vec![];
     }
 
-    // Convert token-based sizes to character-based sizes (4 chars ≈ 1 token)
-    let chunk_size_chars = chunk_size_tokens * 4;
-    let overlap_chars = overlap_tokens * 4;
+    // Convert token-based sizes to byte-based sizes (4 bytes ≈ 1 token)
+    let chunk_size_bytes = chunk_size_tokens * 4;
+    let overlap_bytes = overlap_tokens * 4;
 
-    let chars: Vec<char> = text.chars().collect();
-    let total_chars = chars.len();
-
-    if total_chars <= chunk_size_chars {
+    if text.len() <= chunk_size_bytes {
         info!("Text is shorter than chunk size, returning as a single chunk.");
         return vec![text.to_string()];
     }
 
     let mut chunks = Vec::new();
-    let mut current_pos = 0;
+    let mut start = 0;
     // Step is the size of the non-overlapping part of the window
-    let step = chunk_size_chars.saturating_sub(overlap_chars).max(1);
+    let step = chunk_size_bytes.saturating_sub(overlap_bytes).max(1);
 
-    while current_pos < total_chars {
-        let mut end_pos = std::cmp::min(current_pos + chunk_size_chars, total_chars);
+    while start < text.len() {
+        let mut end = (start + chunk_size_bytes).min(text.len());
 
-        // Try to find a whitespace boundary to avoid splitting words
-        if end_pos < total_chars {
-            let mut boundary = end_pos;
-            while boundary > current_pos && !chars[boundary].is_whitespace() {
-                boundary -= 1;
-            }
-            if boundary > current_pos {
-                end_pos = boundary;
+        // Find a safe UTF-8 boundary
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+
+        // Try to break at sentence or word boundary for cleaner chunks
+        if end < text.len() {
+            // Look for sentence boundary (period followed by space)
+            if let Some(last_period) = text[start..end].rfind(". ") {
+                let boundary = start + last_period + 2;
+                if text.is_char_boundary(boundary) {
+                    end = boundary;
+                }
+            } else if let Some(last_space) = text[start..end].rfind(' ') {
+                // Fall back to word boundary (space)
+                let boundary = start + last_space + 1;
+                if text.is_char_boundary(boundary) {
+                    end = boundary;
+                }
             }
         }
 
-        let chunk: String = chars[current_pos..end_pos].iter().collect();
-        chunks.push(chunk);
+        // Extract chunk using byte slicing (single allocation per chunk)
+        chunks.push(text[start..end].to_string());
 
-        if end_pos == total_chars {
+        if end == text.len() {
             break;
         }
 
-        current_pos += step;
+        // Move to next chunk with overlap
+        start += step;
     }
 
     info!("Created {} chunks from text", chunks.len());
@@ -83,9 +100,8 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
 /// # Returns
 /// Cleaned markdown string
 pub fn clean_llm_markdown_output(markdown: &str) -> String {
-    // Remove <think>...</think> or <thinking>...</thinking> blocks
-    let re = Regex::new(r"(?s)<think(?:ing)?>.*?</think(?:ing)?>").unwrap();
-    let without_thinking = re.replace_all(markdown, "");
+    // Remove <think>...</think> or <thinking>...</thinking> blocks using cached regex
+    let without_thinking = THINKING_TAG_REGEX.replace_all(markdown, "");
 
     let trimmed = without_thinking.trim();
 
