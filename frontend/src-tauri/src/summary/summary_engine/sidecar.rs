@@ -12,6 +12,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, RwLock};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 use super::models;
 
 // ============================================================================
@@ -257,11 +262,19 @@ impl SidecarManager {
         log::info!("Spawning llama-helper sidecar");
         log::info!("Model path: {}", model_path.display());
 
-        let mut child = tokio::process::Command::new(&self.helper_binary_path)
+        let mut command = tokio::process::Command::new(&self.helper_binary_path);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit()) // Log stderr to main process
-            .env("LLAMA_IDLE_TIMEOUT", self.idle_timeout_secs.to_string())
+            .env("LLAMA_IDLE_TIMEOUT", self.idle_timeout_secs.to_string());
+
+        #[cfg(target_os = "windows")]
+        {
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let mut child = command
             .spawn()
             .with_context(|| format!("Failed to spawn llama-helper at {:?}", self.helper_binary_path))?;
 
