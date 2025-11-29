@@ -416,7 +416,22 @@ export function useSummaryGeneration({
       }
     }
 
-    const fullTranscript = transcripts.map(t => t.text).join('\n');
+    // Format timestamps as recording-relative [MM:SS] instead of wall-clock time
+    const formatTime = (seconds: number | undefined, fallbackTimestamp: string): string => {
+      if (seconds === undefined) {
+        // For old transcripts without audio_start_time, use wall-clock time
+        return fallbackTimestamp;
+      }
+      const totalSecs = Math.floor(seconds);
+      const mins = Math.floor(totalSecs / 60);
+      const secs = totalSecs % 60;
+      return `[${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}]`;
+    };
+
+    const fullTranscript = transcripts
+      .map(t => `${formatTime(t.audio_start_time, t.timestamp)} ${t.text}`)
+      .join('\n');
+
     await processSummary({ transcriptText: fullTranscript, customPrompt });
   }, [transcripts, processSummary, modelConfig, isModelConfigLoading, selectedTemplate]);
 
