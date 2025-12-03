@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-const REQUEST_TIMEOUT_DURATION: Duration = Duration::from_secs(120);
+const REQUEST_TIMEOUT_DURATION: Duration = Duration::from_secs(300);
 
 // Generic structure for OpenAI-compatible API chat messages
 #[derive(Debug, Serialize)]

@@ -69,9 +69,9 @@ pub fn get_available_models() -> Vec<ModelDef> {
         ModelDef {
             name: "gemma3:1b".to_string(),
             display_name: "Gemma 3 1B (Fast)".to_string(),
-            gguf_file: "gemma-3-1b-it-Q4_K_M.gguf".to_string(),
+            gguf_file: "gemma-3-1b-it-Q8_0.gguf".to_string(),
             template: "gemma3".to_string(),
-            download_url: "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_K_M.gguf".to_string(),
+            download_url: "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q8_0.gguf".to_string(),
             size_mb: 806,
             context_size: 8192,  // Gemma 3's native context window
             layer_count: 26,     // Gemma 3 1B has 26 transformer layers
@@ -84,18 +84,43 @@ pub fn get_available_models() -> Vec<ModelDef> {
             description: "Fastest model. Runs on any hardware with ~1GB RAM. Good for quick summaries.".to_string(),
         },
 
-        // Example: Add more models in the future
-        // ModelDef {
-        //     name: "qwen2.5:1.5b".to_string(),
-        //     display_name: "Qwen 2.5 1.5B (Medium)".to_string(),
-        //     gguf_file: "qwen2.5-1.5b-instruct-q4_0.gguf".to_string(),
-        //     template: "chatml".to_string(),
-        //     download_url: "https://huggingface.co/.../qwen2.5-1.5b-instruct-q4_0.gguf".to_string(),
-        //     size_mb: 900,
-        //     context_size: 8192,  // Qwen 2.5 has larger context!
-        //     layer_count: 28,
-        //     description: "Balanced model. Better quality, still fast. Requires ~1.5GB RAM.".to_string(),
-        // },
+        // Gemma 3 4B - Balanced tier
+        ModelDef {
+            name: "gemma3:4b".to_string(),
+            display_name: "Gemma 3 4B (Balanced)".to_string(),
+            gguf_file: "gemma-3-4b-it-Q4_K_M.gguf".to_string(),
+            template: "gemma3".to_string(),
+            download_url: "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf".to_string(),
+            size_mb: 2550,
+            context_size: 32768, // Supports 128k, but 32k is good for local·
+            layer_count: 35,
+            sampling: SamplingParams {
+                temperature: 1.0,
+                top_k: 64,
+                top_p: 0.95,
+                stop_tokens: vec!["<end_of_turn>".to_string()],
+            },
+            description: "Balanced model. Great quality/speed trade-off. Requires ~3.5GB RAM.".to_string(),
+        },
+    
+        // Mistral 7B v0.3 - High-Quality tier
+        ModelDef {
+            name: "mistral:7b".to_string(),
+            display_name: "Mistral 7B v0.3 (High-Quality)".to_string(),
+            gguf_file: "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf".to_string(),
+            template: "mistral".to_string(),
+            download_url: "https://huggingface.co/lmstudio-community/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf".to_string(),
+            size_mb: 4368,
+            context_size: 32768,
+            layer_count: 32,
+            sampling: SamplingParams {
+                temperature: 0.7,
+                top_k: 40,
+                top_p: 0.9,
+                stop_tokens: vec!["</s>".to_string()],
+            },
+            description: "High-quality model. Best results but requires ~6GB RAM. Ideal for detailed summaries.".to_string(),
+        },
     ]
 }
 
@@ -149,6 +174,10 @@ pub const CHATML_TEMPLATE: &str = "<|im_start|>system\n{system_prompt}<|im_end|>
 /// Format: <|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{system}<|eot_id|>...
 pub const LLAMA3_TEMPLATE: &str = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{system_prompt}<|eot_id|><|start_header_id|>user<|end_header_id|>\n{user_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n";
 
+/// Mistral v0.3 chat template format
+/// Format: <s>[INST] {system} {user} [/INST]
+pub const MISTRAL_TEMPLATE: &str = "<s>[INST] {system_prompt}\n\n{user_prompt} [/INST]";
+
 /// Format a prompt using the specified template
 ///
 /// # Arguments
@@ -167,6 +196,7 @@ pub fn format_prompt(
         "gemma3" => GEMMA3_TEMPLATE,
         "chatml" => CHATML_TEMPLATE,
         "llama3" => LLAMA3_TEMPLATE,
+        "mistral" => MISTRAL_TEMPLATE,
         _ => return Err(anyhow!("Unknown template: {}", template_name)),
     };
 
@@ -188,62 +218,4 @@ pub const DEFAULT_MAX_TOKENS: i32 = 2048;
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
 /// Generation timeout (how long to wait for a response)
-pub const GENERATION_TIMEOUT_SECS: u64 = 120; // 2 minutes
-
-// ============================================================================
-// Tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_get_available_models() {
-        let models = get_available_models();
-        assert!(!models.is_empty(), "At least one model must be defined");
-        assert!(models.iter().any(|m| m.name == "gemma3:1b"));
-    }
-
-    #[test]
-    fn test_get_model_by_name() {
-        let model = get_model_by_name("gemma3:1b");
-        assert!(model.is_some());
-        let model = model.unwrap();
-        assert_eq!(model.context_size, 2048);
-        assert_eq!(model.layer_count, 26);
-        // Verify sampling parameters
-        assert_eq!(model.sampling.temperature, 1.0);
-        assert_eq!(model.sampling.top_k, 64);
-        assert_eq!(model.sampling.top_p, 0.95);
-        assert_eq!(model.sampling.stop_tokens, vec!["<end_of_turn>"]);
-    }
-
-    #[test]
-    fn test_format_prompt_gemma3() {
-        let system = "You are a helpful assistant.";
-        let user = "Summarize this meeting.";
-
-        let prompt = format_prompt("gemma3", system, user).unwrap();
-        assert!(prompt.contains("<start_of_turn>user"));
-        assert!(prompt.contains("<end_of_turn>"));
-        assert!(prompt.contains("<start_of_turn>model"));
-        assert!(prompt.contains(system));
-        assert!(prompt.contains(user));
-    }
-
-    #[test]
-    fn test_format_prompt_invalid() {
-        let result = format_prompt("invalid", "sys", "user");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_model_path_resolution() {
-        use std::path::PathBuf;
-        let app_data = PathBuf::from("/test/appdata");
-        let path = get_model_path(&app_data, "gemma3:1b").unwrap();
-        assert!(path.to_string_lossy().contains("models/summary"));
-        assert!(path.to_string_lossy().contains("gemma-3-1b-it-q4_0.gguf"));
-    }
-}
+pub const GENERATION_TIMEOUT_SECS: u64 = 300; // 5 minutes

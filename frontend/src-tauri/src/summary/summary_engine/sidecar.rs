@@ -15,8 +15,6 @@ use tokio::sync::{Mutex, RwLock};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
 use super::models;
 
 // ============================================================================
@@ -285,7 +283,15 @@ impl SidecarManager {
         log::info!("Spawning llama-helper sidecar");
         log::info!("Model path: {}", model_path.display());
 
+        #[cfg(unix)]
+        let mut command = tokio::process::Command::new("nice");
+        
+        #[cfg(not(unix))]
         let mut command = tokio::process::Command::new(&self.helper_binary_path);
+
+        #[cfg(unix)]
+        command.arg("-n").arg("10").arg(&self.helper_binary_path);
+
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -294,7 +300,10 @@ impl SidecarManager {
 
         #[cfg(target_os = "windows")]
         {
-            command.creation_flags(CREATE_NO_WINDOW);
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x00004000;
+
+            command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
         }
 
         let mut child = command
@@ -363,11 +372,21 @@ impl SidecarManager {
         }
 
         // Read response from stdout with timeout
-        let response =
-            tokio::time::timeout(timeout, self.read_response()).await??;
-
-        self.update_activity().await;
-        Ok(response)
+        match tokio::time::timeout(timeout, self.read_response()).await {
+            Ok(Ok(response)) => {
+                self.update_activity().await;
+                Ok(response)
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                // Timeout reached - shutdown sidecar to stop generation
+                log::error!("Request timeout after {:?}, shutting down sidecar", timeout);
+                if let Err(shutdown_err) = self.shutdown().await {
+                    log::error!("Failed to shutdown sidecar after timeout: {}", shutdown_err);
+                }
+                Err(anyhow!("Request timed out after {:?}", timeout))
+            }
+        }
     }
 
     /// Read a single line response from stdout

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use encoding_rs;
@@ -56,7 +56,7 @@ fn detect_vram_gb() -> f32 {
     {
         // macOS Metal: Query recommended max working set size
         if let Some(vram) = detect_metal_vram() {
-            eprintln!("🍎 Metal VRAM detected: {:.2} GB", vram);
+            eprintln!("Metal VRAM detected: {:.2} GB", vram);
             return vram;
         }
     }
@@ -65,29 +65,19 @@ fn detect_vram_gb() -> f32 {
     {
         // NVIDIA CUDA: Query device memory
         if let Some(vram) = detect_cuda_vram() {
-            eprintln!("🟢 CUDA VRAM detected: {:.2} GB", vram);
+            eprintln!("CUDA VRAM detected: {:.2} GB", vram);
             return vram;
         }
     }
 
-    #[cfg(feature = "vulkan")]
-    {
-        // Vulkan: Query device memory
-        if let Some(vram) = detect_vulkan_vram() {
-            eprintln!("🔵 Vulkan VRAM detected: {:.2} GB", vram);
-            return vram;
-        }
-    }
+    /// TODO: Vulkan VRAM detection
 
-    eprintln!("💻 VRAM detection not available, using conservative estimate");
+    eprintln!("VRAM detection not available, using conservative estimate");
     4.0 // Conservative fallback
 }
 
 #[cfg(feature = "metal")]
 fn detect_metal_vram() -> Option<f32> {
-    // Note: Actual Metal VRAM detection would require Objective-C bindings
-    // For now, use heuristics based on system memory
-    // Production code should use MTLDevice.recommendedMaxWorkingSetSize
     if let Ok(output) = std::process::Command::new("sysctl")
         .arg("hw.memsize")
         .output()
@@ -109,10 +99,7 @@ fn detect_metal_vram() -> Option<f32> {
 fn detect_cuda_vram() -> Option<f32> {
     // Use nvidia-smi to query VRAM
     if let Ok(output) = std::process::Command::new("nvidia-smi")
-        .args(&[
-            "--query-gpu=memory.total",
-            "--format=csv,noheader,nounits",
-        ])
+        .args(&["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
         .output()
     {
         if let Ok(stdout) = String::from_utf8(output.stdout) {
@@ -124,37 +111,90 @@ fn detect_cuda_vram() -> Option<f32> {
     None
 }
 
-#[cfg(feature = "vulkan")]
-fn detect_vulkan_vram() -> Option<f32> {
-    // Vulkan VRAM detection is complex and requires vulkan library
-    // For now, return None to use fallback
-    // Production code should query VkPhysicalDeviceMemoryProperties
-    None
-}
+/// Calculate safe GPU layer count based on VRAM, model file size, and context size
+fn calculate_gpu_layers(
+    model_path: &PathBuf,
+    model_layers: u32,
+    vram_gb: f32,
+    context_size: u32,
+) -> u32 {
+    let file_size_gb = std::fs::metadata(model_path)
+        .map(|m| m.len() as f32 / 1024.0 / 1024.0 / 1024.0)
+        .unwrap_or(0.0);
 
-/// Calculate safe GPU layer count based on VRAM and model layers
-/// Conservative approach to avoid OOM crashes
-fn calculate_gpu_layers(model_layers: u32, vram_gb: f32) -> u32 {
-    // For 1B-3B models, 4GB is usually enough for full offload + context
-    // We leave ~1.5GB headroom for OS/Display on 4GB cards
-    let layers = match vram_gb {
-        v if v >= 8.0 => model_layers,                            // All layers (100%)
-        v if v >= 4.0 => model_layers,                            // All layers (100%) for >4GB
-        v if v >= 3.0 => (model_layers as f32 * 0.8) as u32,      // 80%
-        v if v >= 2.0 => (model_layers as f32 * 0.6) as u32,      // 60%
-        _ => 0,                                                     // CPU only
-    };
+    if file_size_gb == 0.0 {
+        eprintln!("⚠️ Could not determine model file size, using conservative default");
+        return 0;
+    }
 
-    eprintln!("📊 GPU layers: {}/{} ({:.0}% offloaded)", layers, model_layers,
-              (layers as f32 / model_layers as f32) * 100.0);
+    // Heuristic: Estimate KV cache size
+    // 7B models (approx > 2.5GB) usually have 4096 hidden dim -> ~256MB per 1k context
+    // 1B models (approx < 2.5GB) usually have 2048 hidden dim -> ~128MB per 1k context
+    let kv_per_1k_gb = if file_size_gb > 2.5 { 0.25 } else { 0.12 };
+    let total_kv_gb = (context_size as f32 / 1000.0) * kv_per_1k_gb;
+
+    // Safety buffer (500MB) for OS/Display
+    let safe_vram = vram_gb - 0.5;
+
+    // For debugging
+    eprintln!("📊 VRAM Analysis:");
+    eprintln!("   • Available: {:.2} GB", vram_gb);
+    eprintln!("   • Safe Limit: {:.2} GB", safe_vram);
+    eprintln!("   • Model Weights: {:.2} GB", file_size_gb);
+    eprintln!(
+        "   • KV Cache ({} ctx): {:.2} GB",
+        context_size, total_kv_gb
+    );
+
+    if safe_vram <= 0.0 {
+        eprintln!("⚠️ No safe VRAM available, using CPU only");
+        return 0;
+    }
+
+    // Calculate cost per layer
+    let weight_per_layer = file_size_gb / model_layers as f32;
+    let kv_per_layer = total_kv_gb / model_layers as f32;
+    let total_per_layer = weight_per_layer + kv_per_layer;
+
+    // Calculate how many layers fit
+    let safe_layers = (safe_vram / total_per_layer).floor() as u32;
+    let layers = safe_layers.min(model_layers);
+
+    eprintln!(
+        "   • Cost per layer: {:.2} MB (Weights) + {:.2} MB (KV) = {:.2} MB",
+        weight_per_layer * 1024.0,
+        kv_per_layer * 1024.0,
+        total_per_layer * 1024.0
+    );
+
+    if layers < model_layers {
+        eprintln!(
+            "⚠️ Memory constrained. Offloading {}/{} layers ({:.1}%)",
+            layers,
+            model_layers,
+            (layers as f32 / model_layers as f32) * 100.0
+        );
+    } else {
+        eprintln!("✅ Full offload possible ({} layers)", layers);
+    }
+
     layers
 }
 
-/// Get default conservative GPU layer count for auto mode
-fn get_default_gpu_layers() -> u32 {
+/// Get default GPU layer count with smart detection
+fn get_default_gpu_layers(model_path: &PathBuf, context_size: u32) -> u32 {
     let vram = detect_vram_gb();
-    // Assume Gemma 3 1B has ~26 layers (actual value depends on model)
-    calculate_gpu_layers(26, vram)
+    // TODO: Use actual model metadata instead of heuristics
+    // Heuristic: Estimate total layers based on file size
+    // 7B models (Q4) are ~4.1GB and have ~32-35 layers
+    // 1B models (Q4) are ~1.1GB and have ~20-28 layers
+    let file_size_gb = std::fs::metadata(model_path)
+        .map(|m| m.len() as f32 / 1024.0 / 1024.0 / 1024.0)
+        .unwrap_or(0.0);
+
+    let estimated_layers = if file_size_gb > 2.5 { 33 } else { 28 };
+
+    calculate_gpu_layers(model_path, estimated_layers, vram, context_size)
 }
 
 // ============================================================================
@@ -189,7 +229,8 @@ impl ModelState {
     }
 
     fn update_activity(&self) {
-        self.last_activity.store(Self::current_timestamp(), Ordering::SeqCst);
+        self.last_activity
+            .store(Self::current_timestamp(), Ordering::SeqCst);
     }
 
     fn seconds_since_activity(&self) -> u64 {
@@ -209,11 +250,11 @@ impl ModelState {
         eprintln!("📥 Loading model: {}", model_path.display());
 
         // Detect GPU layers
-        let gpu_layers = get_default_gpu_layers();
+        let gpu_layers = get_default_gpu_layers(&model_path, context_size);
 
         // Configure model parameters with GPU offload
         let model_params = LlamaModelParams::default().with_n_gpu_layers(gpu_layers);
-        let mut model_params = pin!(model_params);
+        let model_params = pin!(model_params);
 
         let model = LlamaModel::load_from_file(&self.backend, model_path.clone(), &model_params)
             .with_context(|| format!("unable to load model at {:?}", model_path))?;
@@ -236,17 +277,18 @@ impl ModelState {
         top_p: f32,
         stop_tokens: Vec<String>,
     ) -> Result<String> {
-        let model = self
-            .model
-            .as_ref()
-            .context("Model not loaded")?;
+        let model = self.model.as_ref().context("Model not loaded")?;
 
-        // Calculate thread count (use available parallelism - 1, min 1)
+        // Calculate thread count (conservative default: max(1, (Cores / 2) + 2))
+        // This ensures the UI thread is never starved
         let threads: i32 = std::thread::available_parallelism()
-            .map(|n| (n.get().saturating_sub(1) as i32).max(1))
-            .unwrap_or(4);
+            .map(|n| {
+                let cores = n.get() as i32;
+                ((cores / 2) + 2).max(1)
+            })
+            .unwrap_or(2);
 
-        let mut ctx_params = LlamaContextParams::default()
+        let ctx_params = LlamaContextParams::default()
             .with_n_ctx(Some(
                 NonZeroU32::new(self.context_size).context("Invalid ctx size")?,
             ))
@@ -293,8 +335,8 @@ impl ModelState {
             }
 
             use llama_cpp_2::sampling::LlamaSampler;
-            
-            let mut sampler = if temperature <= 0.0 {
+
+            let sampler = if temperature <= 0.0 {
                 // Greedy sampling for temp <= 0
                 LlamaSampler::chain_simple([LlamaSampler::greedy()])
             } else {
@@ -303,7 +345,7 @@ impl ModelState {
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u32;
-                
+
                 LlamaSampler::chain_simple([
                     LlamaSampler::top_k(top_k),
                     LlamaSampler::top_p(top_p, 1),
@@ -311,13 +353,16 @@ impl ModelState {
                     LlamaSampler::dist(seed),
                 ])
             };
-            
+
             let mut sampler = pin!(sampler);
             let token = sampler.as_mut().sample(&ctx, batch.n_tokens() - 1);
             sampler.as_mut().accept(token);
 
             if model.is_eog_token(token) {
-                eprintln!("✓ End-of-generation token reached (generated {} chars)", output.len());
+                eprintln!(
+                    "✓ End-of-generation token reached (generated {} chars)",
+                    output.len()
+                );
                 break;
             }
 
@@ -333,7 +378,11 @@ impl ModelState {
             let mut should_stop = false;
             for stop_token in &stop_tokens {
                 if output.contains(stop_token) {
-                    eprintln!("✓ Stop token '{}' detected (generated {} chars)", stop_token, output.len());
+                    eprintln!(
+                        "✓ Stop token '{}' detected (generated {} chars)",
+                        stop_token,
+                        output.len()
+                    );
                     // Remove the stop token from output
                     output = output.replace(stop_token, "").trim_end().to_string();
                     should_stop = true;
@@ -375,7 +424,10 @@ fn main() -> Result<()> {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(300); // 5 minutes default
 
-    eprintln!("🦙 llama-helper starting (idle timeout: {}s)", idle_timeout_secs);
+    eprintln!(
+        "🦙 llama-helper starting (idle timeout: {}s)",
+        idle_timeout_secs
+    );
 
     let mut state = ModelState::new()?;
 
@@ -419,7 +471,7 @@ fn main() -> Result<()> {
                     }) => {
                         let max_tokens = max_tokens.unwrap_or(512);
                         let context_size = context_size.unwrap_or(2048);
-                        
+
                         // Sampling parameters with sensible defaults
                         let temperature = temperature.unwrap_or(1.0);
                         let top_k = top_k.unwrap_or(64);
@@ -439,7 +491,14 @@ fn main() -> Result<()> {
                         }
 
                         // Generate response with sampling parameters
-                        match state.generate(prompt, max_tokens, temperature, top_k, top_p, stop_tokens) {
+                        match state.generate(
+                            prompt,
+                            max_tokens,
+                            temperature,
+                            top_k,
+                            top_p,
+                            stop_tokens,
+                        ) {
                             Ok(text) => {
                                 send_response(&Response::Response { text, error: None })?;
                             }

@@ -80,7 +80,11 @@ if [ -z "$TAURI_GPU_FEATURE" ]; then
 fi
 
 if [ -n "$TAURI_GPU_FEATURE" ]; then
-    echo -e "${GREEN}✅ Detected GPU feature: $TAURI_GPU_FEATURE${NC}"
+    if [ "$TAURI_GPU_FEATURE" == "none" ]; then
+        echo -e "${YELLOW}⚠️ GPU feature explicitly set to none. Running in CPU-only mode.${NC}"
+    else
+        echo -e "${GREEN}✅ Detected GPU feature: $TAURI_GPU_FEATURE${NC}"
+    fi
     export TAURI_GPU_FEATURE
 else
     echo -e "${YELLOW}⚠️ No specific GPU feature detected or forced${NC}"
@@ -103,7 +107,7 @@ if [ ! -d "$HELPER_DIR" ]; then
 fi
 
 HELPER_FEATURES=""
-if [ -n "$TAURI_GPU_FEATURE" ]; then
+if [ -n "$TAURI_GPU_FEATURE" ] && [ "$TAURI_GPU_FEATURE" != "none" ]; then
     HELPER_FEATURES="--features $TAURI_GPU_FEATURE"
 fi
 

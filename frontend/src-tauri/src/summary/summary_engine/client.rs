@@ -193,7 +193,25 @@ pub async fn generate_with_builtin(
     let timeout = Duration::from_secs(models::GENERATION_TIMEOUT_SECS);
 
     log::info!("Sending generation request to sidecar");
-    let response_json = manager.send_request(request_json, timeout).await?;
+
+    // Race between send_request and cancellation token
+    let response_json = if let Some(token) = cancellation_token {
+        tokio::select! {
+            result = manager.send_request(request_json, timeout) => {
+                result?
+            }
+            _ = token.cancelled() => {
+                log::warn!("Generation cancelled by user, shutting down sidecar");
+                // Shutdown sidecar to stop generation immediately
+                if let Err(e) = manager.shutdown().await {
+                    log::error!("Failed to shutdown sidecar during cancellation: {}", e);
+                }
+                return Err(anyhow!("Generation cancelled by user"));
+            }
+        }
+    } else {
+        manager.send_request(request_json, timeout).await?
+    };
 
     // Check cancellation before parsing response
     if let Some(token) = cancellation_token {
