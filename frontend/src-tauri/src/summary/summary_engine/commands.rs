@@ -182,6 +182,7 @@ pub async fn builtin_ai_is_model_ready<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, ModelManagerState>,
     model_name: String,
+    refresh: Option<bool>,  // NEW: Optional refresh parameter
 ) -> Result<bool, String> {
     // Ensure manager is initialized
     {
@@ -199,69 +200,133 @@ pub async fn builtin_ai_is_model_ready<R: Runtime>(
         .as_ref()
         .ok_or_else(|| "Model manager not initialized".to_string())?;
 
-    let ready = manager.is_model_ready(&model_name).await;
+    let refresh_scan = refresh.unwrap_or(false);
+    let ready = manager.is_model_ready(&model_name, refresh_scan).await;
+
+    log::info!(
+        "Model '{}' ready check (refresh={}): {}",
+        model_name,
+        refresh_scan,
+        ready
+    );
+
     Ok(ready)
 }
 
-/// Get the models directory path
+/// Check if any summary model is available (for onboarding)
+/// Returns the first available model name by priority, or None if no models exist
 #[tauri::command]
-pub async fn builtin_ai_get_models_directory(
+pub async fn builtin_ai_get_available_summary_model<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, ModelManagerState>,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
+    // Ensure manager is initialized
+    {
+        let manager_lock = state.0.lock().await;
+        if manager_lock.is_none() {
+            drop(manager_lock);
+            init_model_manager(&app)
+                .await
+                .map_err(|e| format!("Failed to initialize model manager: {}", e))?;
+        }
+    }
+
     let manager_lock = state.0.lock().await;
     let manager = manager_lock
         .as_ref()
         .ok_or_else(|| "Model manager not initialized".to_string())?;
 
-    let dir = manager.get_models_directory();
-    Ok(dir.to_string_lossy().to_string())
+    // Force fresh scan to ensure accurate state
+    manager
+        .scan_models()
+        .await
+        .map_err(|e| format!("Failed to scan models: {}", e))?;
+
+    // Get all available models
+    let all_models = manager.list_models().await;
+
+    // Find first available summary model (priority: mistral > gemma)
+    let available = all_models
+        .iter()
+        .filter(|m| matches!(m.status, crate::summary::summary_engine::model_manager::ModelStatus::Available))
+        .max_by_key(|m| {
+            match m.name.as_str() {
+                "mistral:7b" => 3,
+                "gemma3:4b" => 2,
+                "gemma3:1b" => 1,
+                _ => 0,
+            }
+        })
+        .map(|m| m.name.clone());
+
+    log::info!("Available summary model check: {:?}", available);
+    Ok(available)
 }
 
-/// Open the models folder in system file explorer
-#[tauri::command]
-pub async fn builtin_ai_open_models_folder(
-    state: State<'_, ModelManagerState>,
+// ============================================================================
+// Startup Initialization & Utility Commands
+// ============================================================================
+
+pub async fn init_model_manager_at_startup<R: Runtime>(
+    app: &AppHandle<R>,
 ) -> Result<(), String> {
-    let manager_lock = state.0.lock().await;
-    let manager = manager_lock
-        .as_ref()
-        .ok_or_else(|| "Model manager not initialized".to_string())?;
+    let models_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?
+        .join("models")
+        .join("summary");
 
-    let models_dir = manager.get_models_directory();
+    let manager = ModelManager::new_with_models_dir(Some(models_dir))
+        .map_err(|e| format!("Failed to create ModelManager: {}", e))?;
 
-    // Create directory if it doesn't exist
-    if !models_dir.exists() {
-        std::fs::create_dir_all(&models_dir)
-            .map_err(|e| format!("Failed to create models directory: {}", e))?;
-    }
+    manager
+        .init()
+        .await
+        .map_err(|e| format!("Failed to initialize ModelManager: {}", e))?;
 
-    let folder_path = models_dir.to_string_lossy().to_string();
+    let state: State<ModelManagerState> = app.state();
+    let mut manager_lock = state.0.lock().await;
+    *manager_lock = Some(manager);
 
-    // Open in system file explorer using platform-specific commands
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer")
-            .arg(&folder_path)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(&folder_path)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(&folder_path)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
-    }
-
-    log::info!("Opened models folder: {}", folder_path);
+    log::info!("ModelManager initialized at startup");
     Ok(())
+}
+
+
+/// Get recommended summary model based on system RAM
+/// <8GB RAM → gemma3:1b (806 MB, fast)
+/// 8-16GB RAM → gemma3:4b (2.5 GB, balanced)
+/// ≥16GB RAM → mistral:7b (4.3 GB, best quality)
+#[tauri::command]
+pub async fn builtin_ai_get_recommended_model() -> Result<String, String> {
+    // Get system RAM in GB
+    let system_ram_gb = get_system_ram_gb()?;
+
+    log::info!("System RAM detected: {} GB", system_ram_gb);
+
+    // Recommend model based on RAM threshold (3-tier)
+    let recommended = if system_ram_gb >= 16 {
+        "mistral:7b"      // ≥16GB RAM: mistral:7b (4.3 GB, best quality)
+    } else if system_ram_gb >= 8 {
+        "gemma3:4b"       // 8-16GB RAM: gemma3:4b (2.5 GB, balanced)
+    } else {
+        "gemma3:1b"       // <8GB RAM: gemma3:1b (806 MB, fast)
+    };
+
+    log::info!("Recommended summary model: {} ({}GB RAM tier)", recommended, system_ram_gb);
+    Ok(recommended.to_string())
+}
+
+/// Get total system RAM in gigabytes
+fn get_system_ram_gb() -> Result<u64, String> {
+    use sysinfo::System;
+
+    let mut sys = System::new_all();
+    sys.refresh_memory();
+
+    let total_memory_bytes = sys.total_memory();
+    let total_memory_gb = total_memory_bytes / (1024 * 1024 * 1024);
+
+    Ok(total_memory_gb)
 }

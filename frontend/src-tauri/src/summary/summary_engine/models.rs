@@ -71,10 +71,10 @@ pub fn get_available_models() -> Vec<ModelDef> {
             display_name: "Gemma 3 1B (Fast)".to_string(),
             gguf_file: "gemma-3-1b-it-Q8_0.gguf".to_string(),
             template: "gemma3".to_string(),
-            download_url: "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q8_0.gguf".to_string(),
+            download_url: "https://meetily.towardsgeneralintelligence.com/models/gemma-3-1b-it-Q8_0.gguf".to_string(),
             size_mb: 806,
-            context_size: 8192,  // Gemma 3's native context window
-            layer_count: 26,     // Gemma 3 1B has 26 transformer layers
+            context_size: 32768, 
+            layer_count: 26,     
             sampling: SamplingParams {
                 temperature: 1.0,
                 top_k: 64,
@@ -83,14 +83,12 @@ pub fn get_available_models() -> Vec<ModelDef> {
             },
             description: "Fastest model. Runs on any hardware with ~1GB RAM. Good for quick summaries.".to_string(),
         },
-
-        // Gemma 3 4B - Balanced tier
         ModelDef {
             name: "gemma3:4b".to_string(),
             display_name: "Gemma 3 4B (Balanced)".to_string(),
             gguf_file: "gemma-3-4b-it-Q4_K_M.gguf".to_string(),
             template: "gemma3".to_string(),
-            download_url: "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf".to_string(),
+            download_url: "https://meetily.towardsgeneralintelligence.com/models/gemma-3-4b-it-Q4_K_M.gguf".to_string(),
             size_mb: 2550,
             context_size: 32768, // Supports 128k, but 32k is good for local·
             layer_count: 35,
@@ -102,24 +100,24 @@ pub fn get_available_models() -> Vec<ModelDef> {
             },
             description: "Balanced model. Great quality/speed trade-off. Requires ~3.5GB RAM.".to_string(),
         },
-    
-        // Mistral 7B v0.3 - High-Quality tier
+
+        // Mistral 7B - Balanced tier
         ModelDef {
             name: "mistral:7b".to_string(),
-            display_name: "Mistral 7B v0.3 (High-Quality)".to_string(),
-            gguf_file: "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf".to_string(),
+            display_name: "Mistral 7B (Balanced)".to_string(),
+            gguf_file: "Mistral-7B-v0.3.Q4_K_M.gguf".to_string(),
             template: "mistral".to_string(),
-            download_url: "https://huggingface.co/lmstudio-community/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf".to_string(),
-            size_mb: 4368,
-            context_size: 32768,
-            layer_count: 32,
+            download_url: "https://meetily.towardsgeneralintelligence.com/models/Mistral-7B-v0.3.Q4_K_M.gguf".to_string(),
+            size_mb: 4368,  
+            context_size: 32768, 
+            layer_count: 32, 
             sampling: SamplingParams {
-                temperature: 0.7,
-                top_k: 40,
-                top_p: 0.9,
-                stop_tokens: vec!["</s>".to_string()],
+                temperature: 0.7, 
+                top_k: 50,
+                top_p: 0.95,
+                stop_tokens: vec!["[INST]".to_string(), "[/INST]".to_string()],
             },
-            description: "High-quality model. Best results but requires ~6GB RAM. Ideal for detailed summaries.".to_string(),
+            description: "High quality model. Best results but requires ~6GB RAM. Ideal for detailed summaries.".to_string(),
         },
     ]
 }
@@ -166,10 +164,6 @@ pub const GEMMA3_TEMPLATE: &str = "\
 <start_of_turn>model
 ";
 
-/// ChatML template format (used by Qwen, Phi, and many others)
-/// Format: <|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>...
-pub const CHATML_TEMPLATE: &str = "<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n";
-
 /// Llama 3 chat template format
 /// Format: <|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{system}<|eot_id|>...
 pub const LLAMA3_TEMPLATE: &str = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{system_prompt}<|eot_id|><|start_header_id|>user<|end_header_id|>\n{user_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n";
@@ -194,8 +188,6 @@ pub fn format_prompt(
 ) -> Result<String> {
     let template = match template_name {
         "gemma3" => GEMMA3_TEMPLATE,
-        "chatml" => CHATML_TEMPLATE,
-        "llama3" => LLAMA3_TEMPLATE,
         "mistral" => MISTRAL_TEMPLATE,
         _ => return Err(anyhow!("Unknown template: {}", template_name)),
     };
@@ -212,7 +204,7 @@ pub fn format_prompt(
 // ============================================================================
 
 /// Default max tokens for generation (increased for better summary quality)
-pub const DEFAULT_MAX_TOKENS: i32 = 2048;
+pub const DEFAULT_MAX_TOKENS: i32 = 4096;
 
 /// Idle timeout for sidecar (seconds) - can be overridden via LLAMA_IDLE_TIMEOUT env var
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300; // 5 minutes

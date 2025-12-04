@@ -42,6 +42,7 @@ pub mod console_utils;
 pub mod database;
 pub mod notifications;
 pub mod ollama;
+pub mod onboarding;
 pub mod openrouter;
 pub mod parakeet_engine;
 pub mod state;
@@ -453,6 +454,18 @@ pub fn run() {
                 }
             });
 
+            // Initialize ModelManager for summary engine (async, non-blocking)
+            let app_handle_for_model_manager = _app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match summary::summary_engine::commands::init_model_manager_at_startup(&app_handle_for_model_manager).await {
+                    Ok(_) => log::info!("ModelManager initialized successfully at startup"),
+                    Err(e) => {
+                        log::warn!("Failed to initialize ModelManager at startup: {}", e);
+                        log::warn!("ModelManager will be lazy-initialized on first use");
+                    }
+                }
+            });
+
             // Trigger system audio permission request on startup (similar to microphone permission)
             // #[cfg(target_os = "macos")]
             // {
@@ -616,8 +629,8 @@ pub fn run() {
             summary::summary_engine::builtin_ai_cancel_download,
             summary::summary_engine::builtin_ai_delete_model,
             summary::summary_engine::builtin_ai_is_model_ready,
-            summary::summary_engine::builtin_ai_get_models_directory,
-            summary::summary_engine::builtin_ai_open_models_folder,
+            summary::summary_engine::builtin_ai_get_available_summary_model,
+            summary::summary_engine::builtin_ai_get_recommended_model,
             openrouter::get_openrouter_models,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,
@@ -661,6 +674,7 @@ pub fn run() {
             database::commands::check_first_launch,
             database::commands::select_legacy_database_path,
             database::commands::detect_legacy_database,
+            database::commands::check_default_legacy_database,
             database::commands::check_homebrew_database,
             database::commands::import_and_initialize_database,
             database::commands::initialize_fresh_database,
@@ -668,6 +682,11 @@ pub fn run() {
             database::commands::get_database_directory,
             database::commands::open_database_folder,
             whisper_engine::commands::open_models_folder,
+            // Onboarding commands
+            onboarding::get_onboarding_status,
+            onboarding::save_onboarding_status_cmd,
+            onboarding::reset_onboarding_status_cmd,
+            onboarding::complete_onboarding,
             // System settings commands
             #[cfg(target_os = "macos")]
             utils::open_system_settings,

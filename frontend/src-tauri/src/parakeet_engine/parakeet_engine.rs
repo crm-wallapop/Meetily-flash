@@ -448,7 +448,7 @@ impl ParakeetEngine {
             "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main"
         } else {
             // Default to v3 for v3 models
-            "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main"
+            "https://meetily.towardsgeneralintelligence.com/models/parakeet-tdt-0.6b-v3-onnx"
         };
 
         // Determine which files to download based on quantization

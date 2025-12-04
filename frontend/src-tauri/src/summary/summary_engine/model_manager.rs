@@ -143,11 +143,23 @@ impl ModelManager {
 
     /// Scan models directory and update status
     pub async fn scan_models(&self) -> Result<()> {
+        let start = std::time::Instant::now();
+
+        log::info!(
+            "Starting model scan in directory: {}",
+            self.models_dir.display()
+        );
+
         let model_defs = get_available_models();
         let mut models_map = HashMap::new();
 
         for model_def in model_defs {
             let model_path = self.models_dir.join(&model_def.gguf_file);
+            log::debug!(
+                "Checking model '{}' at path: {}",
+                model_def.name,
+                model_path.display()
+            );
 
             let status = if model_path.exists() {
                 // Check if file size matches expected size (basic validation)
@@ -159,11 +171,20 @@ impl ModelManager {
                         let expected_min = (model_def.size_mb as f64 * 0.9) as u64;
                         let expected_max = (model_def.size_mb as f64 * 1.1) as u64;
 
+                        log::info!(
+                            "Model '{}': found {} MB (expected {}-{} MB)",
+                            model_def.name,
+                            file_size_mb,
+                            expected_min,
+                            expected_max
+                        );
+
                         if file_size_mb >= expected_min && file_size_mb <= expected_max {
+                            log::info!("Model '{}': AVAILABLE", model_def.name);
                             ModelStatus::Available
                         } else {
                             log::warn!(
-                                "Model {} has unexpected size: {} MB (expected: {} MB)",
+                                "Model '{}': CORRUPTED (size mismatch: {} MB, expected {} MB)",
                                 model_def.name,
                                 file_size_mb,
                                 model_def.size_mb
@@ -174,9 +195,17 @@ impl ModelManager {
                             }
                         }
                     }
-                    Err(e) => ModelStatus::Error(format!("Failed to read metadata: {}", e)),
+                    Err(e) => {
+                        log::error!(
+                            "Model '{}': Failed to read metadata: {}",
+                            model_def.name,
+                            e
+                        );
+                        ModelStatus::Error(format!("Failed to read metadata: {}", e))
+                    }
                 }
             } else {
+                log::debug!("Model '{}': NOT FOUND", model_def.name);
                 ModelStatus::NotDownloaded
             };
 
@@ -194,9 +223,17 @@ impl ModelManager {
             models_map.insert(model_def.name.clone(), model_info);
         }
 
+        let model_count = models_map.len();
+
         let mut models = self.available_models.write().await;
         *models = models_map;
 
+        let elapsed = start.elapsed();
+        log::info!(
+            "Model scan complete: {} models checked in {:?}",
+            model_count,
+            elapsed
+        );
         Ok(())
     }
 
@@ -220,7 +257,15 @@ impl ModelManager {
     }
 
     /// Check if a model is ready to use
-    pub async fn is_model_ready(&self, model_name: &str) -> bool {
+    /// If refresh=true, scans filesystem before checking (slower but accurate)
+    pub async fn is_model_ready(&self, model_name: &str, refresh: bool) -> bool {
+        if refresh {
+            if let Err(e) = self.scan_models().await {
+                log::error!("Failed to scan models: {}", e);
+                return false;
+            }
+        }
+
         if let Some(info) = self.get_model_info(model_name).await {
             info.status == ModelStatus::Available
         } else {

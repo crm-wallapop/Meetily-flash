@@ -11,12 +11,13 @@ import "sonner/dist/styles.css"
 import { useState, useEffect } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
-import { LegacyDatabaseImport } from '@/components/DatabaseImport/LegacyDatabaseImport'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { RecordingStateProvider } from '@/contexts/RecordingStateContext'
 import { OllamaDownloadProvider } from '@/contexts/OllamaDownloadContext'
 import { TranscriptProvider } from '@/contexts/TranscriptContext'
 import { ConfigProvider } from '@/contexts/ConfigContext'
+import { OnboardingProvider } from '@/contexts/OnboardingContext'
+import { OnboardingFlow } from '@/components/onboarding'
 
 const sourceSans3 = Source_Sans_3({
   subsets: ['latin'],
@@ -31,39 +32,38 @@ export default function RootLayout({
 }: {
   children: React.ReactNode
 }) {
-  const [showImportDialog, setShowImportDialog] = useState(false)
+  const [showOnboarding, setShowOnboarding] = useState(false)
+  const [onboardingCompleted, setOnboardingCompleted] = useState(false)
 
   useEffect(() => {
-    // Check first launch state immediately on mount (reliable)
-    invoke<boolean>('check_first_launch')
-      .then((isFirstLaunch) => {
-        console.log('First launch check result:', isFirstLaunch)
-        if (isFirstLaunch) {
-          console.log('First launch detected - showing import dialog')
-          setShowImportDialog(true)
+    // Check onboarding status first
+    invoke<{ completed: boolean } | null>('get_onboarding_status')
+      .then((status) => {
+        const isComplete = status?.completed ?? false
+        setOnboardingCompleted(isComplete)
+
+        if (!isComplete) {
+          console.log('[Layout] Onboarding not completed, showing onboarding flow')
+          setShowOnboarding(true)
+        } else {
+          console.log('[Layout] Onboarding completed, showing main app')
         }
       })
       .catch((error) => {
-        console.error('Failed to check first launch:', error)
+        console.error('[Layout] Failed to check onboarding status:', error)
+        // Default to showing onboarding if we can't check
+        setShowOnboarding(true)
+        setOnboardingCompleted(false)
       })
-
-    // Also listen for events (fallback for hot reload and edge cases)
-    const unlistenFirstLaunch = listen('first-launch-detected', () => {
-      console.log('First launch event received - showing import dialog')
-      setShowImportDialog(true)
-    })
-
-    // Listen for database initialized event
-    const unlistenDbInit = listen('database-initialized', () => {
-      console.log('Database initialized - hiding import dialog')
-      setShowImportDialog(false)
-    })
-
-    return () => {
-      unlistenFirstLaunch.then((fn) => fn())
-      unlistenDbInit.then((fn) => fn())
-    }
   }, [])
+
+  const handleOnboardingComplete = () => {
+    console.log('[Layout] Onboarding completed, reloading app')
+    setShowOnboarding(false)
+    setOnboardingCompleted(true)
+    // Optionally reload the window to ensure all state is fresh
+    window.location.reload()
+  }
 
   return (
     <html lang="en">
@@ -73,25 +73,27 @@ export default function RootLayout({
             <TranscriptProvider>
               <ConfigProvider>
                 <OllamaDownloadProvider>
-                  <SidebarProvider>
-                    <TooltipProvider>
-                      {/* <div className="titlebar h-8 w-full fixed top-0 left-0 bg-transparent" /> */}
-                      <div className="flex">
-                        <Sidebar />
-                        <MainContent>{children}</MainContent>
-                      </div>
-                    </TooltipProvider>
-                  </SidebarProvider>
+                  <OnboardingProvider>
+                    <SidebarProvider>
+                      <TooltipProvider>
+                        {/* Show onboarding or main app */}
+                        {showOnboarding ? (
+                          <OnboardingFlow onComplete={handleOnboardingComplete} />
+                        ) : (
+                          <div className="flex">
+                            <Sidebar />
+                            <MainContent>{children}</MainContent>
+                          </div>
+                        )}
+                      </TooltipProvider>
+                    </SidebarProvider>
+                  </OnboardingProvider>
                 </OllamaDownloadProvider>
               </ConfigProvider>
             </TranscriptProvider>
           </RecordingStateProvider>
         </AnalyticsProvider>
         <Toaster position="bottom-center" richColors closeButton />
-        <LegacyDatabaseImport
-          isOpen={showImportDialog}
-          onComplete={() => setShowImportDialog(false)}
-        />
       </body>
     </html>
   )
