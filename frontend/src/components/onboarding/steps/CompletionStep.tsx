@@ -1,15 +1,77 @@
-import React, { useState } from 'react';
-import { CheckCircle2, Mic, Sparkles, AlertCircle, Loader2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { CheckCircle2, AlertCircle, Loader2, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { useOnboarding } from '@/contexts/OnboardingContext';
 
+type VerificationStatus = 'checking' | 'ready' | 'missing';
+
+interface ModelVerification {
+  parakeet: VerificationStatus;
+  summary: VerificationStatus;
+}
+
 export function CompletionStep({ isMac }: { isMac: boolean }) {
-  const { completeOnboarding, goNext } = useOnboarding();
+  const { completeOnboarding, goNext, goToStep, setParakeetDownloaded, setSummaryModelDownloaded } = useOnboarding();
   const [isCompleting, setIsCompleting] = useState(false);
   const [completionError, setCompletionError] = useState<string | null>(null);
+  const [verification, setVerification] = useState<ModelVerification>({
+    parakeet: 'checking',
+    summary: 'checking',
+  });
+
+  // Verify models on mount
+  useEffect(() => {
+    verifyModels();
+  }, []);
+
+  const verifyModels = async () => {
+    setVerification({ parakeet: 'checking', summary: 'checking' });
+
+    // Verify Parakeet
+    let parakeetStatus: VerificationStatus = 'missing';
+    try {
+      await invoke('parakeet_init');
+      const exists = await invoke<boolean>('parakeet_has_available_models');
+      parakeetStatus = exists ? 'ready' : 'missing';
+      console.log('[CompletionStep] Parakeet verified:', parakeetStatus);
+    } catch (error) {
+      console.error('[CompletionStep] Failed to verify Parakeet:', error);
+      parakeetStatus = 'missing';
+    }
+
+    // Verify Summary - check if ANY summary model is available
+    let summaryStatus: VerificationStatus = 'missing';
+    try {
+      const availableModel = await invoke<string | null>('builtin_ai_get_available_summary_model');
+      summaryStatus = availableModel ? 'ready' : 'missing';
+      console.log('[CompletionStep] Summary verified:', summaryStatus, 'model:', availableModel);
+    } catch (error) {
+      console.error('[CompletionStep] Failed to verify Summary:', error);
+      summaryStatus = 'missing';
+    }
+
+    setVerification({
+      parakeet: parakeetStatus,
+      summary: summaryStatus,
+    });
+
+    // If any model is missing, show error
+    if (parakeetStatus === 'missing' || summaryStatus === 'missing') {
+      setCompletionError(
+        'Some models are missing. Please go back and complete the download steps.'
+      );
+    }
+  };
 
   const handleDone = async () => {
+    // Don't allow completion if models are missing
+    if (verification.parakeet !== 'ready' || verification.summary !== 'ready') {
+      setCompletionError('Cannot complete setup - required models are missing.');
+      return;
+    }
+
     if (isMac) {
       goNext();
       return;
@@ -33,20 +95,56 @@ export function CompletionStep({ isMac }: { isMac: boolean }) {
     }
   };
 
+  const handleGoBack = (step: number) => {
+    // Update context to reflect missing status BEFORE navigating
+    // This prevents the download step's sync effect from seeing stale 'true' values
+    if (step === 3) {
+      // Going back to fix Parakeet
+      setParakeetDownloaded(false);
+    } else if (step === 4) {
+      // Going back to fix Summary
+      setSummaryModelDownloaded(false);
+    }
+    goToStep(step);
+  };
+
+  const getStatusDisplay = (status: VerificationStatus) => {
+    switch (status) {
+      case 'checking':
+        return { text: 'Checking...', color: 'text-gray-500' };
+      case 'ready':
+        return { text: 'Ready', color: 'text-green-600' };
+      case 'missing':
+        return { text: 'Missing', color: 'text-red-600' };
+    }
+  };
+
+  const getStatusIcon = (status: VerificationStatus) => {
+    switch (status) {
+      case 'checking':
+        return <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />;
+      case 'ready':
+        return <CheckCircle2 className="w-5 h-5 text-green-600" />;
+      case 'missing':
+        return <XCircle className="w-5 h-5 text-red-600" />;
+    }
+  };
+
+  const isVerifying = verification.parakeet === 'checking' || verification.summary === 'checking';
+  const allReady = verification.parakeet === 'ready' && verification.summary === 'ready';
+
   const summaryItems = [
     {
       name: 'Transcription Model',
-      status: 'Ready',
-      statusColor: 'text-green-600',
-      icon: Mic,
-      iconColor: 'text-green-600',
+      status: getStatusDisplay(verification.parakeet),
+      verificationStatus: verification.parakeet,
+      fixStep: 3, // Go to Parakeet download step
     },
     {
       name: 'Summary Model',
-      status: 'Ready',
-      statusColor: 'text-green-600',
-      icon: Sparkles,
-      iconColor: 'text-green-600',
+      status: getStatusDisplay(verification.summary),
+      verificationStatus: verification.summary,
+      fixStep: 4, // Go to Summary download step
     },
   ];
 
@@ -69,14 +167,25 @@ export function CompletionStep({ isMac }: { isMac: boolean }) {
           <h3 className="font-semibold text-neutral-900 mb-4">Configuration Summary</h3>
 
           {summaryItems.map((item, index) => {
-            const Icon = item.icon;
             return (
-              <div key={index} className="flex items-center gap-3">
-                <CheckCircle2 className={`w-5 h-5 ${item.iconColor}`} />
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-neutral-900">{item.name}</p>
-                  <p className={`text-xs ${item.statusColor}`}>{item.status}</p>
+              <div key={index} className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  {getStatusIcon(item.verificationStatus)}
+                  <div>
+                    <p className="text-sm font-medium text-neutral-900">{item.name}</p>
+                    <p className={`text-xs ${item.status.color}`}>{item.status.text}</p>
+                  </div>
                 </div>
+                {item.verificationStatus === 'missing' && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleGoBack(item.fixStep)}
+                    className="text-xs"
+                  >
+                    Fix
+                  </Button>
+                )}
               </div>
             );
           })}
@@ -99,14 +208,21 @@ export function CompletionStep({ isMac }: { isMac: boolean }) {
         <div className="w-full max-w-xs">
           <Button
             onClick={handleDone}
-            disabled={isCompleting}
+            disabled={isCompleting || isVerifying || !allReady}
             className="w-full h-12 text-base font-semibold bg-gray-900 hover:bg-gray-800 text-white disabled:opacity-50"
           >
-            {isCompleting ? (
+            {isVerifying ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Verifying...
+              </>
+            ) : isCompleting ? (
               <>
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                 Saving...
               </>
+            ) : !allReady ? (
+              'Models Missing'
             ) : (
               'Done!'
             )}

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Loader2, CheckCircle2, AlertCircle, Zap, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -16,26 +16,46 @@ export function ParakeetDownloadStep() {
     goNext,
     parakeetDownloaded,
     parakeetProgress,
+    parakeetProgressInfo,
     setParakeetDownloaded,
   } = useOnboarding();
 
   const [status, setStatus] = useState<ModelStatus>('checking');
   const [parakeetError, setParakeetError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
+  // Track if we've verified model is NOT ready (to prevent context race condition)
+  const [verifiedNotReady, setVerifiedNotReady] = useState(false);
+  // Ref to track latest progress (avoids stale closure issues)
+  const progressRef = useRef(parakeetProgress);
+
+  // Keep progress ref updated
+  useEffect(() => {
+    progressRef.current = parakeetProgress;
+  }, [parakeetProgress]);
 
   // Initialization effect
   useEffect(() => {
     initializeStep();
   }, []);
 
-  // Sync status with context
+  // Sync status with context (but respect verification result)
   useEffect(() => {
+    // Don't sync while checking
+    if (status === 'checking') {
+      return;
+    }
+    // Don't sync if we just verified the model is NOT ready
+    // (context update is async and might still have stale true value)
+    if (verifiedNotReady) {
+      return;
+    }
+    // Only sync downloaded state from context if we didn't just verify it's missing
     if (parakeetDownloaded) {
       setStatus('downloaded');
     } else if (parakeetProgress > 0 && status !== 'error') {
       setStatus('downloading');
     }
-  }, [parakeetDownloaded, parakeetProgress]);
+  }, [parakeetDownloaded, parakeetProgress, status, verifiedNotReady]);
 
   // Auto-start download effect
   useEffect(() => {
@@ -44,10 +64,30 @@ export function ParakeetDownloadStep() {
     }
   }, [status, parakeetError]);
 
+  // Reset verifiedNotReady flag when download actually completes
+  useEffect(() => {
+    if (parakeetProgress >= 100 && verifiedNotReady) {
+      console.log('[ParakeetDownloadStep] Download complete, resetting verifiedNotReady flag');
+      setVerifiedNotReady(false);
+      setStatus('downloaded');
+      setParakeetDownloaded(true);
+    }
+  }, [parakeetProgress, verifiedNotReady]);
+
   const initializeStep = async () => {
     try {
       setStatus('checking');
+      setVerifiedNotReady(false); // Reset flag at start of verification
       console.log('[ParakeetDownloadStep] Initializing...');
+
+      // Check if a download is already in progress (e.g., user clicked "Fix" to come back)
+      // Use ref to get latest value (avoids stale closure)
+      const currentProgress = progressRef.current;
+      if (currentProgress > 0 && currentProgress < 100) {
+        console.log('[ParakeetDownloadStep] Download already in progress at', currentProgress, '%, continuing...');
+        setStatus('downloading');
+        return;
+      }
 
       // Initialize Parakeet engine
       await invoke('parakeet_init');
@@ -62,7 +102,11 @@ export function ParakeetDownloadStep() {
         return;
       }
 
-      // Model not found, set to ready (will trigger download)
+      // Model NOT found, set to ready (will trigger download)
+      // IMPORTANT: Set flag BEFORE updating context to prevent race condition
+      // The sync effect will ignore stale context values while this flag is true
+      setVerifiedNotReady(true);
+      setParakeetDownloaded(false);
       setStatus('ready');
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Initialization failed';
@@ -95,7 +139,7 @@ export function ParakeetDownloadStep() {
   };
 
   const retryDownload = async () => {
-    setRetryCount(prev => prev + 1);
+    setRetryCount((prev: number) => prev + 1);
     setParakeetError(null);
     setStatus('ready');
   };
@@ -146,7 +190,20 @@ export function ParakeetDownloadStep() {
               <Loader2 className="w-5 h-5 animate-spin text-gray-900" />
               <div className="flex-1">
                 <h3 className="font-semibold text-gray-900">Downloading Transcription Model</h3>
-                <p className="text-sm text-gray-600">(~670 MB)</p>
+                <p className="text-sm text-gray-600">
+                  {parakeetProgressInfo.totalMb > 0 ? (
+                    <>
+                      {parakeetProgressInfo.downloadedMb.toFixed(1)} MB / {parakeetProgressInfo.totalMb.toFixed(1)} MB
+                      {parakeetProgressInfo.speedMbps > 0 && (
+                        <span className="ml-2 text-gray-500">
+                          ({parakeetProgressInfo.speedMbps.toFixed(1)} MB/s)
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    '~670 MB'
+                  )}
+                </p>
               </div>
               <span className="text-sm font-medium text-gray-900">{Math.round(parakeetProgress)}%</span>
             </div>

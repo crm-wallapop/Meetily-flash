@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Loader2, CheckCircle2, AlertCircle, Sparkles, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -20,6 +20,7 @@ export function SummaryModelDownloadStep() {
     goNext,
     summaryModelDownloaded,
     summaryModelProgress,
+    summaryModelProgressInfo,
     selectedSummaryModel,
     setSummaryModelDownloaded,
     setSelectedSummaryModel,
@@ -31,20 +32,39 @@ export function SummaryModelDownloadStep() {
   const [modelDisplayName, setModelDisplayName] = useState<string>('');
   const [modelSize, setModelSize] = useState<string>('');
   const [retryCount, setRetryCount] = useState(0);
+  // Track if we've verified model is NOT ready (to prevent context race condition)
+  const [verifiedNotReady, setVerifiedNotReady] = useState(false);
+  // Ref to track latest progress (avoids stale closure issues)
+  const progressRef = useRef(summaryModelProgress);
+
+  // Keep progress ref updated
+  useEffect(() => {
+    progressRef.current = summaryModelProgress;
+  }, [summaryModelProgress]);
 
   // Initialization effect
   useEffect(() => {
     initializeStep();
   }, []);
 
-  // Sync status with context
+  // Sync status with context (but respect verification result)
   useEffect(() => {
+    // Don't sync while checking
+    if (status === 'checking') {
+      return;
+    }
+    // Don't sync if we just verified the model is NOT ready
+    // (context update is async and might still have stale true value)
+    if (verifiedNotReady) {
+      return;
+    }
+    // Only sync downloaded state from context if we didn't just verify it's missing
     if (summaryModelDownloaded) {
       setStatus('downloaded');
     } else if (summaryModelProgress > 0 && status !== 'error') {
       setStatus('downloading');
     }
-  }, [summaryModelDownloaded, summaryModelProgress]);
+  }, [summaryModelDownloaded, summaryModelProgress, status, verifiedNotReady]);
 
   // Auto-start download effect
   useEffect(() => {
@@ -52,6 +72,17 @@ export function SummaryModelDownloadStep() {
       downloadSummaryModel();
     }
   }, [status, summaryModelError, recommendedModel]);
+
+  // Reset verifiedNotReady flag when download actually completes
+  // This allows normal sync to resume after successful download
+  useEffect(() => {
+    if (summaryModelProgress >= 100 && verifiedNotReady) {
+      console.log('[SummaryModelDownloadStep] Download complete, resetting verifiedNotReady flag');
+      setVerifiedNotReady(false);
+      setStatus('downloaded');
+      setSummaryModelDownloaded(true);
+    }
+  }, [summaryModelProgress, verifiedNotReady]);
 
   const updateDisplayInfo = (modelName: string) => {
     const info = MODEL_DISPLAY_INFO[modelName];
@@ -68,7 +99,17 @@ export function SummaryModelDownloadStep() {
   const initializeStep = async () => {
     try {
       setStatus('checking');
+      setVerifiedNotReady(false); // Reset flag at start of verification
       console.log('[SummaryModelDownloadStep] Initializing...');
+
+      // Check if a download is already in progress (e.g., user clicked "Fix" to come back)
+      // Use ref to get latest value (avoids stale closure)
+      const currentProgress = progressRef.current;
+      if (currentProgress > 0 && currentProgress < 100) {
+        console.log('[SummaryModelDownloadStep] Download already in progress at', currentProgress, '%, continuing...');
+        setStatus('downloading');
+        return;
+      }
 
       // 1. Get recommended model based on RAM
       let modelToUse = 'gemma3:1b'; // Fallback
@@ -110,7 +151,11 @@ export function SummaryModelDownloadStep() {
         return;
       }
 
-      // Model not ready, set for download
+      // Model NOT ready, set for download
+      // IMPORTANT: Set flag BEFORE updating context to prevent race condition
+      // The sync effect will ignore stale context values while this flag is true
+      setVerifiedNotReady(true);
+      setSummaryModelDownloaded(false);
       setSelectedSummaryModel(modelToUse);
       setStatus('ready');
     } catch (err) {
@@ -147,7 +192,7 @@ export function SummaryModelDownloadStep() {
   };
 
   const retryDownload = async () => {
-    setRetryCount(prev => prev + 1);
+    setRetryCount((prev: number) => prev + 1);
     setSummaryModelError(null);
     setStatus('ready');
   };
@@ -198,7 +243,20 @@ export function SummaryModelDownloadStep() {
               <Loader2 className="w-5 h-5 animate-spin text-gray-900" />
               <div className="flex-1">
                 <h3 className="font-semibold text-gray-900">Downloading Summary Model</h3>
-                <p className="text-sm text-gray-600">({modelSize})</p>
+                <p className="text-sm text-gray-600">
+                  {summaryModelProgressInfo.totalMb > 0 ? (
+                    <>
+                      {summaryModelProgressInfo.downloadedMb.toFixed(1)} MB / {summaryModelProgressInfo.totalMb.toFixed(1)} MB
+                      {summaryModelProgressInfo.speedMbps > 0 && (
+                        <span className="ml-2 text-gray-500">
+                          ({summaryModelProgressInfo.speedMbps.toFixed(1)} MB/s)
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    modelSize
+                  )}
+                </p>
               </div>
               <span className="text-sm font-medium text-gray-900">{Math.round(summaryModelProgress)}%</span>
             </div>

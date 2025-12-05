@@ -1,18 +1,51 @@
 import { useState, useEffect } from 'react';
-import { platform } from '@tauri-apps/plugin-os';
 
 export type Platform = 'macos' | 'windows' | 'linux' | 'unknown';
 
+// Extend Window type to include Tauri internals
+declare global {
+  interface Window {
+    __TAURI_INTERNALS__?: unknown;
+  }
+}
+
 /**
- * Hook to detect the current platform using Tauri's OS plugin
+ * Detect platform from user agent (fallback method)
+ */
+function detectPlatformFromUserAgent(): Platform {
+  if (typeof navigator === 'undefined') return 'unknown';
+
+  const userAgent = navigator.userAgent.toLowerCase();
+  if (userAgent.includes('mac')) {
+    return 'macos';
+  } else if (userAgent.includes('win')) {
+    return 'windows';
+  } else if (userAgent.includes('linux')) {
+    return 'linux';
+  }
+  return 'unknown';
+}
+
+/**
+ * Hook to detect the current platform
+ * Uses Tauri's OS plugin if available, falls back to user agent detection
  * @returns The current platform
  */
 export function usePlatform(): Platform {
-  const [currentPlatform, setCurrentPlatform] = useState<Platform>('unknown');
+  const [currentPlatform, setCurrentPlatform] = useState<Platform>(() => detectPlatformFromUserAgent());
 
   useEffect(() => {
     async function detectPlatform() {
+      // Check if Tauri is available
+      if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+        // Not in Tauri environment, use user agent
+        setCurrentPlatform(detectPlatformFromUserAgent());
+        return;
+      }
+
       try {
+        // Dynamically import to avoid SSR issues
+        const { platform } = await import('@tauri-apps/plugin-os');
         const platformName = await platform();
 
         // Map Tauri's platform names to our simplified types
@@ -32,18 +65,8 @@ export function usePlatform(): Platform {
             setCurrentPlatform('unknown');
         }
       } catch (error) {
-        console.error('Failed to detect platform:', error);
-        // Fallback to navigator.userAgent if Tauri call fails
-        const userAgent = navigator.userAgent.toLowerCase();
-        if (userAgent.includes('mac')) {
-          setCurrentPlatform('macos');
-        } else if (userAgent.includes('win')) {
-          setCurrentPlatform('windows');
-        } else if (userAgent.includes('linux')) {
-          setCurrentPlatform('linux');
-        } else {
-          setCurrentPlatform('unknown');
-        }
+        console.warn('[usePlatform] Tauri platform detection failed, using user agent:', error);
+        setCurrentPlatform(detectPlatformFromUserAgent());
       }
     }
 

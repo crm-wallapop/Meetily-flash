@@ -1,4 +1,4 @@
-use crate::parakeet_engine::{ModelInfo, ParakeetEngine};
+use crate::parakeet_engine::{ModelInfo, ParakeetEngine, DownloadProgress};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::Arc;
@@ -386,19 +386,29 @@ pub async fn parakeet_download_model<R: Runtime>(
     };
 
     if let Some(engine) = engine {
-        // Create progress callback that emits events
+        // Create progress callback that emits detailed events
         let app_handle_clone = app_handle.clone();
         let model_name_clone = model_name.clone();
 
-        let progress_callback = Box::new(move |progress: u8| {
-            log::info!("Parakeet download progress for {}: {}%", model_name_clone, progress);
+        let progress_callback = Box::new(move |progress: DownloadProgress| {
+            log::info!(
+                "Parakeet download progress for {}: {:.1} MB / {:.1} MB ({:.1} MB/s) - {}%",
+                model_name_clone, progress.downloaded_mb, progress.total_mb,
+                progress.speed_mbps, progress.percent
+            );
 
-            // Emit download progress event
+            // Emit download progress event with detailed info
             if let Err(e) = app_handle_clone.emit(
                 "parakeet-model-download-progress",
                 serde_json::json!({
                     "modelName": model_name_clone,
-                    "progress": progress
+                    "progress": progress.percent,
+                    "downloaded_bytes": progress.downloaded_bytes,
+                    "total_bytes": progress.total_bytes,
+                    "downloaded_mb": progress.downloaded_mb,
+                    "total_mb": progress.total_mb,
+                    "speed_mbps": progress.speed_mbps,
+                    "status": if progress.percent == 100 { "completed" } else { "downloading" }
                 }),
             ) {
                 log::error!("Failed to emit parakeet download progress event: {}", e);
@@ -406,7 +416,7 @@ pub async fn parakeet_download_model<R: Runtime>(
         });
 
         let result = engine
-            .download_model(&model_name, Some(progress_callback))
+            .download_model_detailed(&model_name, Some(progress_callback))
             .await;
 
         match result {

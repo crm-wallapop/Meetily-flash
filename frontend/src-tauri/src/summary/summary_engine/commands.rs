@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tokio::sync::Mutex;
 
-use super::model_manager::{ModelInfo, ModelManager};
+use super::model_manager::{DownloadProgress, ModelInfo, ModelManager};
 
 // ============================================================================
 // Global State
@@ -110,22 +110,25 @@ pub async fn builtin_ai_download_model<R: Runtime>(
         .as_ref()
         .ok_or_else(|| "Model manager not initialized".to_string())?;
 
-    // Create progress callback that emits Tauri events
+    // Create progress callback that emits Tauri events with detailed info
     let app_clone = app.clone();
     let model_name_clone = model_name.clone();
-    let progress_callback = Box::new(move |progress: u8| {
+    let progress_callback = Box::new(move |progress: DownloadProgress| {
         let _ = app_clone.emit(
             "builtin-ai-download-progress",
             serde_json::json!({
                 "model": model_name_clone,
-                "progress": progress,
-                "status": if progress == 100 { "completed" } else { "downloading" }
+                "progress": progress.percent,
+                "downloaded_mb": progress.downloaded_mb,
+                "total_mb": progress.total_mb,
+                "speed_mbps": progress.speed_mbps,
+                "status": if progress.percent == 100 { "completed" } else { "downloading" }
             }),
         );
     });
 
     manager
-        .download_model(&model_name, Some(progress_callback))
+        .download_model_detailed(&model_name, Some(progress_callback))
         .await
         .map_err(|e| e.to_string())?;
 

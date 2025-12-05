@@ -66,17 +66,7 @@ fi
 # Detect GPU feature if not already set
 if [ -z "$TAURI_GPU_FEATURE" ]; then
     echo -e "${BLUE}🔍 Detecting GPU features...${NC}"
-    # Run the detection script and capture output
-    # We need to run it from frontend dir
-    if [ "$FRONTEND_DIR" != "." ]; then
-        cd "$FRONTEND_DIR"
-    fi
-    
     TAURI_GPU_FEATURE=$(node scripts/auto-detect-gpu.js)
-    
-    if [ "$FRONTEND_DIR" != "." ]; then
-        cd ..
-    fi
 fi
 
 if [ -n "$TAURI_GPU_FEATURE" ]; then
@@ -106,9 +96,17 @@ if [ ! -d "$HELPER_DIR" ]; then
     exit 1
 fi
 
+# Determine llama-helper features
+# Note: llama-cpp-2 does NOT support coreml, only metal/cuda/vulkan
+# So for macOS Apple Silicon (which returns 'coreml' for Whisper), use 'metal' for llama-helper
 HELPER_FEATURES=""
 if [ -n "$TAURI_GPU_FEATURE" ] && [ "$TAURI_GPU_FEATURE" != "none" ]; then
-    HELPER_FEATURES="--features $TAURI_GPU_FEATURE"
+    LLAMA_FEATURE="$TAURI_GPU_FEATURE"
+    if [ "$LLAMA_FEATURE" = "coreml" ]; then
+        LLAMA_FEATURE="metal"
+        echo -e "${YELLOW}   Note: llama-cpp-2 doesn't support CoreML, using Metal instead${NC}"
+    fi
+    HELPER_FEATURES="--features $LLAMA_FEATURE"
 fi
 
 echo -e "   Building in $HELPER_DIR with features: ${HELPER_FEATURES:-none}"

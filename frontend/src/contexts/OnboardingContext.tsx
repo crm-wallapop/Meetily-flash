@@ -18,12 +18,28 @@ interface OnboardingStatus {
   last_updated: string;
 }
 
+interface SummaryModelProgressInfo {
+  percent: number;
+  downloadedMb: number;
+  totalMb: number;
+  speedMbps: number;
+}
+
+interface ParakeetProgressInfo {
+  percent: number;
+  downloadedMb: number;
+  totalMb: number;
+  speedMbps: number;
+}
+
 interface OnboardingContextType {
   currentStep: number;
   parakeetDownloaded: boolean;
   parakeetProgress: number;
+  parakeetProgressInfo: ParakeetProgressInfo;
   summaryModelDownloaded: boolean;
   summaryModelProgress: number;
+  summaryModelProgressInfo: SummaryModelProgressInfo;
   selectedSummaryModel: string;
   databaseExists: boolean;
   // Permissions
@@ -50,8 +66,20 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   const [completed, setCompleted] = useState(false);
   const [parakeetDownloaded, setParakeetDownloaded] = useState(false);
   const [parakeetProgress, setParakeetProgress] = useState(0);
+  const [parakeetProgressInfo, setParakeetProgressInfo] = useState<ParakeetProgressInfo>({
+    percent: 0,
+    downloadedMb: 0,
+    totalMb: 0,
+    speedMbps: 0,
+  });
   const [summaryModelDownloaded, setSummaryModelDownloaded] = useState(false);
   const [summaryModelProgress, setSummaryModelProgress] = useState(0);
+  const [summaryModelProgressInfo, setSummaryModelProgressInfo] = useState<SummaryModelProgressInfo>({
+    percent: 0,
+    downloadedMb: 0,
+    totalMb: 0,
+    speedMbps: 0,
+  });
   const [selectedSummaryModel, setSelectedSummaryModel] = useState<string>('gemma3:1b');
   const [databaseExists, setDatabaseExists] = useState(false);
 
@@ -89,12 +117,28 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
 
   // Listen to Parakeet download progress
   useEffect(() => {
-    const unlisten = listen<{ modelName: string; progress: number }>(
+    const unlisten = listen<{
+      modelName: string;
+      progress: number;
+      downloaded_mb?: number;
+      total_mb?: number;
+      speed_mbps?: number;
+      status?: string;
+    }>(
       'parakeet-model-download-progress',
       (event) => {
-        const { modelName, progress } = event.payload;
+        const { modelName, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
         if (modelName === PARAKEET_MODEL) {
           setParakeetProgress(progress);
+          setParakeetProgressInfo({
+            percent: progress,
+            downloadedMb: downloaded_mb ?? 0,
+            totalMb: total_mb ?? 0,
+            speedMbps: speed_mbps ?? 0,
+          });
+          if (status === 'completed' || progress >= 100) {
+            setParakeetDownloaded(true);
+          }
         }
       }
     );
@@ -129,13 +173,26 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
 
   // Listen to summary model (Built-in AI) download progress
   useEffect(() => {
-    const unlisten = listen<{ model: string; progress: number; status: string }>(
+    const unlisten = listen<{
+      model: string;
+      progress: number;
+      downloaded_mb?: number;
+      total_mb?: number;
+      speed_mbps?: number;
+      status: string;
+    }>(
       'builtin-ai-download-progress',
       (event) => {
-        const { model, progress, status } = event.payload;
+        const { model, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
         // Check if this is the selected summary model (gemma3:1b or mistral:7b)
         if (model === selectedSummaryModel || model === 'gemma3:1b' || model === 'mistral:7b') {
           setSummaryModelProgress(progress);
+          setSummaryModelProgressInfo({
+            percent: progress,
+            downloadedMb: downloaded_mb ?? 0,
+            totalMb: total_mb ?? 0,
+            speedMbps: speed_mbps ?? 0,
+          });
           if (status === 'completed' || progress >= 100) {
             setSummaryModelDownloaded(true);
           }
@@ -163,15 +220,82 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     try {
       const status = await invoke<OnboardingStatus | null>('get_onboarding_status');
       if (status) {
-        setCurrentStep(status.current_step);
-        setCompleted(status.completed);
-        setParakeetDownloaded(status.model_status.parakeet === 'downloaded');
-        setSummaryModelDownloaded(status.model_status.summary === 'downloaded');
-        console.log('[OnboardingContext] Loaded status:', status);
+        console.log('[OnboardingContext] Loaded saved status:', status);
+
+        // Don't trust saved status - verify actual model status on disk
+        const verifiedStatus = await verifyModelStatus(status);
+
+        setCurrentStep(verifiedStatus.currentStep);
+        setCompleted(verifiedStatus.completed);
+        setParakeetDownloaded(verifiedStatus.parakeetDownloaded);
+        setSummaryModelDownloaded(verifiedStatus.summaryModelDownloaded);
+
+        console.log('[OnboardingContext] Verified status:', verifiedStatus);
       }
     } catch (error) {
       console.error('[OnboardingContext] Failed to load onboarding status:', error);
     }
+  };
+
+  // Verify that models actually exist on disk, not just trust saved JSON
+  const verifyModelStatus = async (savedStatus: OnboardingStatus) => {
+    let parakeetDownloaded = false;
+    let summaryModelDownloaded = false;
+
+    // Verify Parakeet model exists on disk
+    try {
+      await invoke('parakeet_init');
+      parakeetDownloaded = await invoke<boolean>('parakeet_has_available_models');
+      console.log('[OnboardingContext] Parakeet verified on disk:', parakeetDownloaded);
+    } catch (error) {
+      console.warn('[OnboardingContext] Failed to verify Parakeet:', error);
+      parakeetDownloaded = false;
+    }
+
+    // Verify Summary model exists on disk - check if ANY model is available
+    try {
+      const availableModel = await invoke<string | null>('builtin_ai_get_available_summary_model');
+      summaryModelDownloaded = !!availableModel;
+      console.log('[OnboardingContext] Summary model verified on disk:', summaryModelDownloaded, 'model:', availableModel);
+    } catch (error) {
+      console.warn('[OnboardingContext] Failed to verify Summary model:', error);
+      summaryModelDownloaded = false;
+    }
+
+    // Determine the correct step based on verified status
+    // Step 1: Welcome, Step 2: Setup, Step 3: Parakeet, Step 4: Summary, Step 5: Complete, Step 6: Permissions
+    let currentStep = savedStatus.current_step;
+    let completed = savedStatus.completed;
+
+    // If we're past Parakeet step (3) but Parakeet isn't actually downloaded, go back
+    if (currentStep > 3 && !parakeetDownloaded) {
+      console.log('[OnboardingContext] Parakeet missing, resetting to step 3');
+      currentStep = 3;
+      completed = false;
+    }
+    // If we're past Summary step (4) but Summary isn't actually downloaded, go back
+    else if (currentStep > 4 && !summaryModelDownloaded) {
+      console.log('[OnboardingContext] Summary model missing, resetting to step 4');
+      currentStep = 4;
+      completed = false;
+    }
+    // If marked as completed but models are missing, un-complete
+    else if (completed && (!parakeetDownloaded || !summaryModelDownloaded)) {
+      console.log('[OnboardingContext] Marked complete but models missing, un-completing');
+      completed = false;
+      if (!parakeetDownloaded) {
+        currentStep = 3;
+      } else if (!summaryModelDownloaded) {
+        currentStep = 4;
+      }
+    }
+
+    return {
+      currentStep,
+      completed,
+      parakeetDownloaded,
+      summaryModelDownloaded,
+    };
   };
 
   const saveOnboardingStatus = async () => {
@@ -208,7 +332,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   };
 
   const setPermissionStatus = useCallback((permission: keyof OnboardingPermissions, status: PermissionStatus) => {
-    setPermissions(prev => ({
+    setPermissions((prev: OnboardingPermissions) => ({
       ...prev,
       [permission]: status,
     }));
@@ -219,7 +343,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   }, []);
 
   const goNext = useCallback(() => {
-    setCurrentStep(prev => {
+    setCurrentStep((prev: number) => {
       const next = prev + 1;
       // Don't go past step 6
       return Math.min(next, 6);
@@ -227,7 +351,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   }, []);
 
   const goPrevious = useCallback(() => {
-    setCurrentStep(prev => {
+    setCurrentStep((prev: number) => {
       const previous = prev - 1;
       // Don't go below step 1
       return Math.max(previous, 1);
@@ -240,8 +364,10 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         currentStep,
         parakeetDownloaded,
         parakeetProgress,
+        parakeetProgressInfo,
         summaryModelDownloaded,
         summaryModelProgress,
+        summaryModelProgressInfo,
         selectedSummaryModel,
         databaseExists,
         permissions,
