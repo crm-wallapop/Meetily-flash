@@ -27,6 +27,7 @@ export function WelcomeStep() {
       title="Welcome to Meetily"
       description="Record. Transcribe. Summarize. All on your device."
       step={1}
+      hideProgress={true}
     >
       <div className="flex flex-col items-center space-y-10">
         {/* Divider */}
@@ -55,7 +56,7 @@ export function WelcomeStep() {
             onClick={goNext}
             className="w-full h-11 bg-gray-900 hover:bg-gray-800 text-white"
           >
-            Proceed
+            Proceed to Setup
           </Button>
           <p className="text-xs text-center text-gray-500">Takes less than 3 minutes</p>
         </div>

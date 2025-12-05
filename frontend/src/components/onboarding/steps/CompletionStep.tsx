@@ -4,12 +4,17 @@ import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { useOnboarding } from '@/contexts/OnboardingContext';
 
-export function CompletionStep() {
-  const { completeOnboarding, selectedSummaryModel } = useOnboarding();
+export function CompletionStep({ isMac }: { isMac: boolean }) {
+  const { completeOnboarding, goNext } = useOnboarding();
   const [isCompleting, setIsCompleting] = useState(false);
   const [completionError, setCompletionError] = useState<string | null>(null);
 
   const handleDone = async () => {
+    if (isMac) {
+      goNext();
+      return;
+    }
+
     setIsCompleting(true);
     setCompletionError(null);
 
@@ -28,16 +33,20 @@ export function CompletionStep() {
     }
   };
 
-  const installedModels = [
+  const summaryItems = [
     {
       name: 'Transcription Model',
-      status: 'Installed',
+      status: 'Ready',
+      statusColor: 'text-green-600',
       icon: Mic,
+      iconColor: 'text-green-600',
     },
     {
       name: 'Summary Model',
-      status: 'Installed',
+      status: 'Ready',
+      statusColor: 'text-green-600',
       icon: Sparkles,
+      iconColor: 'text-green-600',
     },
   ];
 
@@ -45,31 +54,28 @@ export function CompletionStep() {
     <OnboardingContainer
       title="All Set!"
       description="You're ready to start using Meetily"
-      step={5}
+      step={4}
+      totalSteps={4}
+      stepOffset={1}
     >
-      <div className="flex flex-col items-center space-y-10">
+      <div className="flex flex-col items-center space-y-8">
         {/* Success Icon */}
         <div className="w-20 h-20 rounded-full bg-green-100 flex items-center justify-center">
           <CheckCircle2 className="w-12 h-12 text-green-600" />
         </div>
 
-        {/* Installed Models Summary */}
-        <div className="w-full max-w-md space-y-3">
-          <h3 className="text-lg font-semibold text-gray-900 text-center mb-4">Setup Summary</h3>
-          {installedModels.map((model, index) => {
-            const Icon = model.icon;
+        {/* Configuration Summary */}
+        <div className="w-full max-w-md bg-white rounded-2xl border border-neutral-200 p-6 space-y-4">
+          <h3 className="font-semibold text-neutral-900 mb-4">Configuration Summary</h3>
+
+          {summaryItems.map((item, index) => {
+            const Icon = item.icon;
             return (
-              <div
-                key={index}
-                className="flex items-center justify-between bg-white rounded-lg border border-gray-200 p-4"
-              >
-                <div className="flex items-center gap-3">
-                  <Icon className="w-6 h-6 text-gray-600" />
-                  <span className="font-medium text-gray-900">{model.name}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-green-600" />
-                  <span className="text-sm text-green-600 font-medium">{model.status}</span>
+              <div key={index} className="flex items-center gap-3">
+                <CheckCircle2 className={`w-5 h-5 ${item.iconColor}`} />
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-neutral-900">{item.name}</p>
+                  <p className={`text-xs ${item.statusColor}`}>{item.status}</p>
                 </div>
               </div>
             );
@@ -94,7 +100,7 @@ export function CompletionStep() {
           <Button
             onClick={handleDone}
             disabled={isCompleting}
-            className="w-full h-11 bg-gray-900 hover:bg-gray-800 text-white disabled:opacity-50"
+            className="w-full h-12 text-base font-semibold bg-gray-900 hover:bg-gray-800 text-white disabled:opacity-50"
           >
             {isCompleting ? (
               <>
@@ -102,7 +108,7 @@ export function CompletionStep() {
                 Saving...
               </>
             ) : (
-              'Done'
+              'Done!'
             )}
           </Button>
         </div>

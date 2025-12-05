@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Download, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Loader2, CheckCircle2, AlertCircle, Sparkles, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { OnboardingContainer } from '../OnboardingContainer';
@@ -13,6 +13,8 @@ const MODEL_DISPLAY_INFO: Record<string, { name: string; size: string }> = {
   'mistral:7b': { name: 'Mistral 7B', size: '~4.3 GB' },
 };
 
+type ModelStatus = 'checking' | 'ready' | 'downloading' | 'downloaded' | 'error';
+
 export function SummaryModelDownloadStep() {
   const {
     goNext,
@@ -23,24 +25,33 @@ export function SummaryModelDownloadStep() {
     setSelectedSummaryModel,
   } = useOnboarding();
 
+  const [status, setStatus] = useState<ModelStatus>('checking');
   const [summaryModelError, setSummaryModelError] = useState<string | null>(null);
-  const [isChecking, setIsChecking] = useState(true);
   const [recommendedModel, setRecommendedModel] = useState<string | null>(null);
   const [modelDisplayName, setModelDisplayName] = useState<string>('');
   const [modelSize, setModelSize] = useState<string>('');
+  const [retryCount, setRetryCount] = useState(0);
 
   // Initialization effect
   useEffect(() => {
     initializeStep();
   }, []);
 
+  // Sync status with context
+  useEffect(() => {
+    if (summaryModelDownloaded) {
+      setStatus('downloaded');
+    } else if (summaryModelProgress > 0 && status !== 'error') {
+      setStatus('downloading');
+    }
+  }, [summaryModelDownloaded, summaryModelProgress]);
+
   // Auto-start download effect
   useEffect(() => {
-    if (!isChecking && !summaryModelDownloaded && !summaryModelError && recommendedModel) {
+    if (status === 'ready' && !summaryModelError && recommendedModel) {
       downloadSummaryModel();
     }
-  }, [isChecking, summaryModelDownloaded, summaryModelError, recommendedModel]);
-
+  }, [status, summaryModelError, recommendedModel]);
 
   const updateDisplayInfo = (modelName: string) => {
     const info = MODEL_DISPLAY_INFO[modelName];
@@ -56,7 +67,7 @@ export function SummaryModelDownloadStep() {
 
   const initializeStep = async () => {
     try {
-      setIsChecking(true);
+      setStatus('checking');
       console.log('[SummaryModelDownloadStep] Initializing...');
 
       // 1. Get recommended model based on RAM
@@ -81,7 +92,7 @@ export function SummaryModelDownloadStep() {
         setSelectedSummaryModel(existingModel);
         setSummaryModelDownloaded(true);
         updateDisplayInfo(existingModel);
-        // Will auto-advance via useEffect
+        setStatus('downloaded');
         return;
       }
 
@@ -95,20 +106,18 @@ export function SummaryModelDownloadStep() {
       if (isReady) {
         setSummaryModelDownloaded(true);
         setSelectedSummaryModel(modelToUse);
-        // Will auto-advance via useEffect
+        setStatus('downloaded');
         return;
       }
 
       // Model not ready, set for download
       setSelectedSummaryModel(modelToUse);
-      // Will trigger download via useEffect
-
+      setStatus('ready');
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Initialization failed';
       console.error('[SummaryModelDownloadStep] Init error:', errorMsg);
       setSummaryModelError(errorMsg);
-    } finally {
-      setIsChecking(false);
+      setStatus('error');
     }
   };
 
@@ -117,6 +126,7 @@ export function SummaryModelDownloadStep() {
 
     try {
       setSummaryModelError(null);
+      setStatus('downloading');
       const modelToDownload = selectedSummaryModel || recommendedModel;
       console.log(`[SummaryModelDownloadStep] Starting download: ${modelToDownload}`);
 
@@ -129,74 +139,128 @@ export function SummaryModelDownloadStep() {
       const errorMsg = err instanceof Error ? err.message : 'Download failed';
       console.error(`[SummaryModelDownloadStep] Download error:`, errorMsg);
       setSummaryModelError(errorMsg);
+      setStatus('error');
       toast.error('Failed to download Summary model', {
         description: errorMsg,
       });
     }
   };
 
+  const retryDownload = async () => {
+    setRetryCount(prev => prev + 1);
+    setSummaryModelError(null);
+    setStatus('ready');
+  };
+
+  const isDownloading = status === 'downloading';
+  const isDownloaded = status === 'downloaded';
+  const isError = status === 'error';
+  const isChecking = status === 'checking';
+
   return (
     <OnboardingContainer
       title="Step 2"
-      description="Download Summary AI model (gemma3 / mistral7b - open source by Google / Mistral)"
-      step={4}
+      description={`Download Summary AI Model (${recommendedModel} - open source model by ${recommendedModel?.includes('gemma3') ? 'Google' : 'Mistral'})`}
+      step={3}
+      totalSteps={4}
+      stepOffset={1}
     >
       <div className="flex flex-col items-center space-y-6">
-        {/* Summary Model Download Card */}
-        <div className="w-full max-w-md bg-white rounded-lg border border-gray-200 p-6 space-y-4">
-          <div className="flex items-center justify-between">
+        {/* Success State */}
+        {isDownloaded && (
+          <div className="w-full max-w-md bg-green-50 rounded-lg border border-green-200 p-6 text-center space-y-2">
+            <CheckCircle2 className="w-12 h-12 text-green-600 mx-auto" />
+            <h3 className="font-semibold text-gray-900">Model Ready!</h3>
+            <p className="text-sm text-gray-600">{modelDisplayName} is ready to use</p>
+          </div>
+        )}
+
+        {/* Checking State */}
+        {isChecking && (
+          <div className="w-full max-w-md bg-white rounded-lg border border-gray-200 p-6 space-y-4">
             <div className="flex items-center gap-3">
-              {/* <Download className="w-5 h-5 text-gray-600" /> */}
-              <div>
-                <h3 className="font-medium text-gray-900">{modelDisplayName}</h3>
+              <div className="flex size-12 items-center justify-center rounded-lg bg-gray-100">
+                <Sparkles className="w-6 h-6 text-gray-700" />
+              </div>
+              <div className="flex-1">
+                <h3 className="font-semibold text-gray-900">Summary Model</h3>
+                <p className="text-sm text-gray-600">Checking model status...</p>
+              </div>
+              <Loader2 className="w-5 h-5 animate-spin text-gray-400" />
+            </div>
+          </div>
+        )}
+
+        {/* Downloading State */}
+        {isDownloading && (
+          <div className="w-full max-w-md bg-gray-50 rounded-lg border border-gray-200 p-6 space-y-3">
+            <div className="flex items-center gap-3">
+              <Loader2 className="w-5 h-5 animate-spin text-gray-900" />
+              <div className="flex-1">
+                <h3 className="font-semibold text-gray-900">Downloading Summary Model</h3>
+                <p className="text-sm text-gray-600">({modelSize})</p>
+              </div>
+              <span className="text-sm font-medium text-gray-900">{Math.round(summaryModelProgress)}%</span>
+            </div>
+            <Progress value={summaryModelProgress} className="h-2" />
+          </div>
+        )}
+
+        {/* Error State */}
+        {isError && (
+          <div className="w-full max-w-md bg-white rounded-lg border border-gray-200 p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="flex size-12 items-center justify-center rounded-lg bg-red-50">
+                <AlertCircle className="w-6 h-6 text-red-600" />
+              </div>
+              <div className="flex-1">
+                <h3 className="font-semibold text-gray-900">{modelDisplayName}</h3>
                 <p className="text-sm text-gray-600">{modelSize}</p>
               </div>
             </div>
-            {isChecking ? (
-              <Loader2 className="w-6 h-6 text-gray-400 animate-spin" />
-            ) : summaryModelDownloaded ? (
-              <CheckCircle2 className="w-6 h-6 text-green-600" />
-            ) : summaryModelError ? (
-              <AlertCircle className="w-6 h-6 text-red-600" />
-            ) : (
-              <Loader2 className="w-6 h-6 text-gray-600 animate-spin" />
-            )}
-          </div>
 
-          {!summaryModelDownloaded && summaryModelProgress > 0 && (
-            <div className="space-y-2">
-              <Progress value={summaryModelProgress} className="h-2" />
-              <p className="text-xs text-center text-gray-500">
-                {Math.round(summaryModelProgress)}%
-              </p>
-            </div>
-          )}
-
-          {summaryModelError && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-              <p className="text-sm text-red-800">{summaryModelError}</p>
-              <Button
-                onClick={downloadSummaryModel}
-                variant="outline"
-                size="sm"
-                className="mt-2 w-full border-red-300 text-red-700 hover:bg-red-100"
+            <div className="flex items-start gap-2 text-sm text-red-600 bg-red-50 p-3 rounded-lg">
+              <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+              <div className="flex-1">
+                <p>{summaryModelError}</p>
+                {retryCount > 0 && (
+                  <p className="mt-1 text-xs">Retry attempt: {retryCount}</p>
+                )}
+              </div>
+              <button
+                onClick={retryDownload}
+                className="p-1.5 hover:bg-red-100 rounded transition-colors"
+                title="Retry download"
               >
-                Retry Download
-              </Button>
+                <RefreshCw className="w-4 h-4" />
+              </button>
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* Continue Button */}
         <div className="w-full max-w-xs">
           <Button
             onClick={goNext}
-            disabled={!summaryModelDownloaded}
+            disabled={!isDownloaded}
             className="w-full h-11 bg-gray-900 hover:bg-gray-800 text-white disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Almost there!
+            {isDownloaded ? (
+              <>
+                <CheckCircle2 className="w-4 h-4 mr-2" />
+                Almost there!
+              </>
+            ) : isDownloading ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Downloading...
+              </>
+            ) : (
+              "Waiting for Download"
+            )}
           </Button>
         </div>
+
       </div>
     </OnboardingContainer>
   );

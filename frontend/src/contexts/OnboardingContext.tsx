@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import type { PermissionStatus, OnboardingPermissions } from '@/types/onboarding';
 
 const PARAKEET_MODEL = 'parakeet-tdt-0.6b-v3-int8';
 
@@ -25,13 +26,20 @@ interface OnboardingContextType {
   summaryModelProgress: number;
   selectedSummaryModel: string;
   databaseExists: boolean;
+  // Permissions
+  permissions: OnboardingPermissions;
+  permissionsSkipped: boolean;
+  // Navigation
   goToStep: (step: number) => void;
   goNext: () => void;
   goPrevious: () => void;
+  // Setters
   setParakeetDownloaded: (value: boolean) => void;
   setSummaryModelDownloaded: (value: boolean) => void;
   setSelectedSummaryModel: (value: string) => void;
   setDatabaseExists: (value: boolean) => void;
+  setPermissionStatus: (permission: keyof OnboardingPermissions, status: PermissionStatus) => void;
+  setPermissionsSkipped: (skipped: boolean) => void;
   completeOnboarding: () => Promise<void>;
 }
 
@@ -46,6 +54,14 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   const [summaryModelProgress, setSummaryModelProgress] = useState(0);
   const [selectedSummaryModel, setSelectedSummaryModel] = useState<string>('gemma3:1b');
   const [databaseExists, setDatabaseExists] = useState(false);
+
+  // Permissions state
+  const [permissions, setPermissions] = useState<OnboardingPermissions>({
+    microphone: 'not_determined',
+    systemAudio: 'not_determined',
+    screenRecording: 'not_determined',
+  });
+  const [permissionsSkipped, setPermissionsSkipped] = useState(false);
 
   const saveTimeoutRef = useRef<NodeJS.Timeout>();
 
@@ -191,15 +207,22 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     }
   };
 
+  const setPermissionStatus = useCallback((permission: keyof OnboardingPermissions, status: PermissionStatus) => {
+    setPermissions(prev => ({
+      ...prev,
+      [permission]: status,
+    }));
+  }, []);
+
   const goToStep = useCallback((step: number) => {
-    setCurrentStep(Math.max(1, Math.min(step, 5)));
+    setCurrentStep(Math.max(1, Math.min(step, 6)));
   }, []);
 
   const goNext = useCallback(() => {
     setCurrentStep(prev => {
       const next = prev + 1;
-      // Don't go past step 5
-      return Math.min(next, 5);
+      // Don't go past step 6
+      return Math.min(next, 6);
     });
   }, []);
 
@@ -221,6 +244,8 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         summaryModelProgress,
         selectedSummaryModel,
         databaseExists,
+        permissions,
+        permissionsSkipped,
         goToStep,
         goNext,
         goPrevious,
@@ -228,6 +253,8 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         setSummaryModelDownloaded,
         setSelectedSummaryModel,
         setDatabaseExists,
+        setPermissionStatus,
+        setPermissionsSkipped,
         completeOnboarding,
       }}
     >

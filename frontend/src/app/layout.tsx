@@ -67,7 +67,7 @@ export default function RootLayout({
 
   return (
     <html lang="en">
-      <body className={`${sourceSans3.variable} font-sans`}>
+      <body className={`${sourceSans3.variable} font-sans antialiased`}>
         <AnalyticsProvider>
           <RecordingStateProvider>
             <TranscriptProvider>

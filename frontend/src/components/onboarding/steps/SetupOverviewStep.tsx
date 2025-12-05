@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Sparkles, Mic, AlertCircle, Lock, CheckCircle2 } from 'lucide-react';
+import { Sparkles, Mic, AlertCircle, Lock, Volume2, Download } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { useOnboarding } from '@/contexts/OnboardingContext';
@@ -94,12 +94,14 @@ export function SetupOverviewStep() {
   const steps = [
     {
       number: 1,
-      title: 'Step 1: Download Transcription Model',
+      title: 'Download Transcription Model',
+      description: 'Parakeet v3 (~670 MB)',
       icon: Mic
     },
     {
       number: 2,
-      title: 'Step 2: Download Summary AI Model',
+      title: 'Download Summarization Model',
+      description: 'Gemma 3 or Mistral',
       icon: Sparkles
     },
   ];
@@ -110,9 +112,11 @@ export function SetupOverviewStep() {
       description={
         isInitializing
           ? 'Preparing your workspace...'
-          : "Meetily requires that you download the Transcription & Summarization AI models for the software to work."
+          : "Meeetily requires that you download the Trancription & Summarization AI models for the software to work."
       }
-      step={2}
+      step={1}
+      totalSteps={4}
+      stepOffset={1}
     >
       <div className="flex flex-col items-center space-y-10">
         {/* Database Error Banner */}
@@ -145,13 +149,16 @@ export function SetupOverviewStep() {
                 key={step.number}
                 className="flex items-center gap-4 bg-white rounded-lg border border-gray-200 p-4"
               >
-                <div className="flex-shrink-0 mt-0.5">
-                  <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center">
-                    <Icon className="w-4 h-4 text-gray-600" />
+                <div className="flex-shrink-0">
+                  <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center">
+                    <Icon className="w-5 h-5 text-gray-600" />
                   </div>
                 </div>
                 <div className="flex-1">
-                  <h3 className="font-medium text-gray-900">{step.title}</h3>
+                  <h3 className="font-medium text-gray-900">Step {step.number}: {step.title}</h3>
+                  {step.description && (
+                    <p className="text-sm text-gray-500">{step.description}</p>
+                  )}
                 </div>
               </div>
             );
