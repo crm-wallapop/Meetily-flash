@@ -184,8 +184,8 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
       'builtin-ai-download-progress',
       (event) => {
         const { model, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
-        // Check if this is the selected summary model (gemma3:1b or mistral:7b)
-        if (model === selectedSummaryModel || model === 'gemma3:1b' || model === 'mistral:7b') {
+        // Check if this is the selected summary model (gemma3:1b or gemma3:4b)
+        if (model === selectedSummaryModel || model === 'gemma3:1b' || model === 'gemma3:4b') {
           setSummaryModelProgress(progress);
           setSummaryModelProgressInfo({
             percent: progress,

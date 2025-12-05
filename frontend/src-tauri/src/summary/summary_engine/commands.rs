@@ -248,13 +248,12 @@ pub async fn builtin_ai_get_available_summary_model<R: Runtime>(
     // Get all available models
     let all_models = manager.list_models().await;
 
-    // Find first available summary model (priority: mistral > gemma)
+    // Find first available summary model
     let available = all_models
         .iter()
         .filter(|m| matches!(m.status, crate::summary::summary_engine::model_manager::ModelStatus::Available))
         .max_by_key(|m| {
             match m.name.as_str() {
-                "mistral:7b" => 3,
                 "gemma3:4b" => 2,
                 "gemma3:1b" => 1,
                 _ => 0,
@@ -299,8 +298,7 @@ pub async fn init_model_manager_at_startup<R: Runtime>(
 
 /// Get recommended summary model based on system RAM
 /// <8GB RAM → gemma3:1b (806 MB, fast)
-/// 8-16GB RAM → gemma3:4b (2.5 GB, balanced)
-/// ≥16GB RAM → mistral:7b (4.3 GB, best quality)
+/// >8GB RAM → gemma3:4b (2.5 GB, balanced)
 #[tauri::command]
 pub async fn builtin_ai_get_recommended_model() -> Result<String, String> {
     // Get system RAM in GB
@@ -308,11 +306,9 @@ pub async fn builtin_ai_get_recommended_model() -> Result<String, String> {
 
     log::info!("System RAM detected: {} GB", system_ram_gb);
 
-    // Recommend model based on RAM threshold (3-tier)
-    let recommended = if system_ram_gb >= 16 {
-        "mistral:7b"      // ≥16GB RAM: mistral:7b (4.3 GB, best quality)
-    } else if system_ram_gb >= 8 {
-        "gemma3:4b"       // 8-16GB RAM: gemma3:4b (2.5 GB, balanced)
+    // Recommend model based on RAM threshold (2-tier)
+    let recommended = if system_ram_gb >= 8 {
+        "gemma3:4b"       // >8GB RAM: gemma3:4b (2.5 GB, balanced)
     } else {
         "gemma3:1b"       // <8GB RAM: gemma3:1b (806 MB, fast)
     };

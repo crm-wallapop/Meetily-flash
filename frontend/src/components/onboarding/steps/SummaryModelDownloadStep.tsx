@@ -10,7 +10,6 @@ import { toast } from 'sonner';
 const MODEL_DISPLAY_INFO: Record<string, { name: string; size: string }> = {
   'gemma3:1b': { name: 'Gemma 3 1B', size: '~806 MB' },
   'gemma3:4b': { name: 'Gemma 3 4B', size: '~2.5 GB' },
-  'mistral:7b': { name: 'Mistral 7B', size: '~4.3 GB' },
 };
 
 type ModelStatus = 'checking' | 'ready' | 'downloading' | 'downloaded' | 'error';
@@ -205,7 +204,7 @@ export function SummaryModelDownloadStep() {
   return (
     <OnboardingContainer
       title="Step 2"
-      description={`Download Summary AI Model (${recommendedModel} - open source model by ${recommendedModel?.includes('gemma3') ? 'Google' : 'Mistral'})`}
+      description={`Download Summary AI Model (${recommendedModel} - open source model by Google)`}
       step={3}
       totalSteps={4}
       stepOffset={1}

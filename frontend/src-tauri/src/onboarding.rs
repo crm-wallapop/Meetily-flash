@@ -20,7 +20,7 @@ pub struct OnboardingStatus {
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ModelStatus {
     pub parakeet: String,  // "downloaded" | "not_downloaded" | "downloading"
-    pub summary: String,   // Generic field for summary model (gemma3:1b or mistral:7b)
+    pub summary: String,   // Generic field for summary model (gemma3:1b or gemma3:4b)
 }
 
 impl Default for OnboardingStatus {
@@ -192,7 +192,7 @@ pub async fn complete_onboarding<R: Runtime>(
     if let Err(e) = SettingsRepository::save_model_config(
         pool,
         "builtin-ai",          // Provider
-        &summary_model,        // Model from parameter (e.g., "gemma3:1b", "gemma3:4b", "mistral:7b")
+        &summary_model,        // Model from parameter (e.g., "gemma3:1b", "gemma3:4b")
         "large-v3",            // Unused for builtin-ai but required by schema
         None,                  // No Ollama endpoint
     ).await {

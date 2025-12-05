@@ -100,25 +100,6 @@ pub fn get_available_models() -> Vec<ModelDef> {
             },
             description: "Balanced model. Great quality/speed trade-off. Requires ~3.5GB RAM.".to_string(),
         },
-
-        // Mistral 7B 
-        ModelDef {
-            name: "mistral:7b".to_string(),
-            display_name: "Mistral 7B (High Quality)".to_string(),
-            gguf_file: "Mistral-7B-v0.3.Q4_K_M.gguf".to_string(),
-            template: "mistral".to_string(),
-            download_url: "https://meetily.towardsgeneralintelligence.com/models/Mistral-7B-v0.3.Q4_K_M.gguf".to_string(),
-            size_mb: 4170,  
-            context_size: 32768, 
-            layer_count: 32, 
-            sampling: SamplingParams {
-                temperature: 0.7, 
-                top_k: 50,
-                top_p: 0.95,
-                stop_tokens: vec!["[INST]".to_string(), "[/INST]".to_string()],
-            },
-            description: "High quality model. Best results but requires ~6GB RAM. Ideal for detailed summaries.".to_string(),
-        },
     ]
 }
 
@@ -164,14 +145,6 @@ pub const GEMMA3_TEMPLATE: &str = "\
 <start_of_turn>model
 ";
 
-/// Llama 3 chat template format
-/// Format: <|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{system}<|eot_id|>...
-pub const LLAMA3_TEMPLATE: &str = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{system_prompt}<|eot_id|><|start_header_id|>user<|end_header_id|>\n{user_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n";
-
-/// Mistral v0.3 chat template format
-/// Format: <s>[INST] {system} {user} [/INST]
-pub const MISTRAL_TEMPLATE: &str = "<s>[INST] {system_prompt}\n\n{user_prompt} [/INST]";
-
 /// Format a prompt using the specified template
 ///
 /// # Arguments
@@ -188,7 +161,6 @@ pub fn format_prompt(
 ) -> Result<String> {
     let template = match template_name {
         "gemma3" => GEMMA3_TEMPLATE,
-        "mistral" => MISTRAL_TEMPLATE,
         _ => return Err(anyhow!("Unknown template: {}", template_name)),
     };
 

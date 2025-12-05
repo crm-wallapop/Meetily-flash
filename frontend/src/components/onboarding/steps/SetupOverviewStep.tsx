@@ -101,7 +101,7 @@ export function SetupOverviewStep() {
     {
       number: 2,
       title: 'Download Summarization Model',
-      description: 'Gemma 3 or Mistral',
+      description: 'Gemma 3',
       icon: Sparkles
     },
   ];

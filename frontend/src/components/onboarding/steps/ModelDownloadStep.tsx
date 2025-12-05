@@ -51,13 +51,13 @@ export function ModelDownloadStep() {
       
       setRecommendedModel(modelToUse);
       
-      // Set display info
-      if (modelToUse === 'mistral:7b') {
-        setModelDisplayName('Mistral 7B (Balanced)');
-        setModelSize('~4.3 GB');
+      // Set display info based on available Gemma models
+      if (modelToUse === 'gemma3:4b') {
+        setModelDisplayName('Gemma 3 4B (Balanced)');
+        setModelSize('~2.4 GB');
       } else {
         setModelDisplayName('Gemma 3 1B (Fast)');
-        setModelSize('~806 MB');
+        setModelSize('~1 GB');
       }
 
       // 2. Check existing models
@@ -86,12 +86,12 @@ export function ModelDownloadStep() {
         
         // Update display if we found a different model than recommended
         if (existingModel !== modelToUse) {
-           if (existingModel === 'mistral:7b') {
-            setModelDisplayName('Mistral 7B (Balanced)');
-            setModelSize('~4.3 GB');
+          if (existingModel === 'gemma3:4b') {
+            setModelDisplayName('Gemma 3 4B (Balanced)');
+            setModelSize('~2.4 GB');
           } else {
             setModelDisplayName('Gemma 3 1B (Fast)');
-            setModelSize('~806 MB');
+            setModelSize('~1 GB');
           }
         }
       } else {
@@ -244,9 +244,6 @@ export function ModelDownloadStep() {
                 <h3 className="font-medium text-gray-900">Summary Model</h3>
                 <p className="text-sm text-gray-600">
                   {modelDisplayName} ({modelSize})
-                  {recommendedModel === 'mistral:7b' && (
-                    <span className="ml-1 text-blue-600 font-medium">Recommended</span>
-                  )}
                 </p>
               </div>
             </div>
