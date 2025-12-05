@@ -153,7 +153,6 @@ pub async fn generate_with_builtin(
     // Apply model-specific chat template
     let formatted_prompt =
         models::format_prompt(&model_def.template, system_prompt, user_prompt)?;
-    log::info!("Formatted prompt: ======= \n{}\n=======", formatted_prompt);
     // Get or initialize sidecar manager
     let manager = {
         let mut global_manager = SIDECAR_MANAGER.lock().await;
