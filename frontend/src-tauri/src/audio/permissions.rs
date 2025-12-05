@@ -90,39 +90,23 @@ pub async fn request_screen_recording_permission_command() -> Result<(), String>
 }
 
 /// Trigger system audio permission request and verify it was granted
-/// Returns Ok(true) if permission granted (stream created successfully), Ok(false) if denied
+/// Returns Ok(true) if permission granted (tap created successfully), Ok(false) if denied
 #[cfg(target_os = "macos")]
 pub fn trigger_system_audio_permission() -> Result<bool> {
     info!("🔐 Triggering Audio Capture permission request...");
 
-    // Try to create a Core Audio capture - this automatically triggers the permission dialog
+    // Try to create a Core Audio capture - this triggers the permission dialog
     // if NSAudioCaptureUsageDescription is present in Info.plist
-    let capture = match crate::audio::capture::CoreAudioCapture::new() {
-        Ok(c) => {
-            info!("✅ Core Audio capture created");
-            c
-        }
-        Err(e) => {
-            let error_msg = e.to_string().to_lowercase();
-            if error_msg.contains("permission") || error_msg.contains("denied") {
-                info!("🔐 Audio Capture permission denied");
-                info!("👉 Please grant Audio Capture permission in System Settings");
-                return Ok(false);
-            }
-            warn!("⚠️ Failed to create Core Audio capture: {}", e);
-            return Err(e);
-        }
-    };
-
-    // Try to create a stream - this is what actually triggers the permission dialog
-    match capture.stream() {
-        Ok(stream) => {
-            info!("✅ Core Audio stream created successfully");
-            info!("📊 Stream sample rate: {} Hz", stream.sample_rate());
-            // If we can create a stream, permission is likely granted
-            // Note: On macOS, even with permission denied, stream creation may succeed
-            // but audio will be silence. For now, we consider stream creation as success.
+    // NOTE: We only create the tap, don't start streaming - similar to mic permission approach
+    match crate::audio::capture::CoreAudioCapture::new() {
+        Ok(_capture) => {
+            info!("✅ Core Audio tap created successfully");
+            // Sleep briefly to allow permission dialog to appear (if shown)
+            // Similar to microphone permission handling in discovery.rs
+            std::thread::sleep(std::time::Duration::from_millis(500));
             info!("✅ Audio Capture permission appears to be granted");
+            // Note: On macOS, even with permission denied, tap creation may succeed
+            // but audio will be silence. For onboarding, we just check tap creation.
             Ok(true)
         }
         Err(e) => {
@@ -132,8 +116,10 @@ pub fn trigger_system_audio_permission() -> Result<bool> {
                 info!("👉 Please grant Audio Capture permission in System Settings");
                 return Ok(false);
             }
-            warn!("⚠️ Failed to create system audio stream: {}", e);
-            Err(e)
+            warn!("⚠️ Failed to create Core Audio tap: {}", e);
+            // If tap creation fails for other reasons, still return false
+            // as we can't verify permission status
+            Ok(false)
         }
     }
 }
