@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use encoding_rs;
@@ -277,6 +277,7 @@ impl ModelState {
         top_p: f32,
         stop_tokens: Vec<String>,
     ) -> Result<String> {
+        let start_time = Instant::now();
         let model = self.model.as_ref().context("Model not loaded")?;
 
         // Calculate thread count (conservative default: max(1, (Cores / 2) + 2))
@@ -319,6 +320,7 @@ impl ModelState {
         }
 
         ctx.decode(&mut batch).context("llama_decode() failed")?;
+        let prompt_time = start_time.elapsed();
 
         let n_prompt_tokens = batch.n_tokens();
         let mut n_cur = n_prompt_tokens;
@@ -400,6 +402,26 @@ impl ModelState {
             n_cur += 1;
             ctx.decode(&mut batch).context("failed to eval")?;
         }
+
+        // Generation statistics
+        let total_time = start_time.elapsed();
+        let gen_time = total_time.saturating_sub(prompt_time);
+        let output_tokens = (n_cur - n_prompt_tokens) as u64;
+        let prompt_tokens = n_prompt_tokens as u64;
+
+        let tokens_per_sec = if gen_time.as_secs_f64() > 0.0 {
+            output_tokens as f64 / gen_time.as_secs_f64()
+        } else {
+            0.0
+        };
+
+        eprintln!("📊 Generation Statistics:");
+        eprintln!("   • Prompt tokens: {}", prompt_tokens);
+        eprintln!("   • Output tokens: {}", output_tokens);
+        eprintln!("   • Prompt processing: {:.2}s", prompt_time.as_secs_f64());
+        eprintln!("   • Generation time: {:.2}s", gen_time.as_secs_f64());
+        eprintln!("   • Total time: {:.2}s", total_time.as_secs_f64());
+        eprintln!("   • Speed: {:.2} tokens/sec", tokens_per_sec);
 
         self.update_activity();
         Ok(output)

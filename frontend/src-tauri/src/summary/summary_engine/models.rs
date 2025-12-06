@@ -182,4 +182,4 @@ pub const DEFAULT_MAX_TOKENS: i32 = 4096;
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
 /// Generation timeout (how long to wait for a response)
-pub const GENERATION_TIMEOUT_SECS: u64 = 300; // 5 minutes
+pub const GENERATION_TIMEOUT_SECS: u64 = 900; // 15 minutes
