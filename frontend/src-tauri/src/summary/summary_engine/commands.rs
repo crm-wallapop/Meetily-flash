@@ -13,7 +13,7 @@ use super::model_manager::{DownloadProgress, ModelInfo, ModelManager};
 // ============================================================================
 
 /// Global model manager instance
-pub struct ModelManagerState(pub Arc<Mutex<Option<ModelManager>>>);
+pub struct ModelManagerState(pub Arc<Mutex<Option<Arc<ModelManager>>>>);
 
 /// Initialize the model manager
 pub async fn init_model_manager<R: Runtime>(app: &AppHandle<R>) -> anyhow::Result<()> {
@@ -24,7 +24,7 @@ pub async fn init_model_manager<R: Runtime>(app: &AppHandle<R>) -> anyhow::Resul
 
     let state: State<ModelManagerState> = app.state();
     let mut manager_lock = state.0.lock().await;
-    *manager_lock = Some(manager);
+    *manager_lock = Some(Arc::new(manager));
 
     log::info!("Built-in AI model manager initialized");
     Ok(())
@@ -40,21 +40,24 @@ pub async fn builtin_ai_list_models<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, ModelManagerState>,
 ) -> Result<Vec<ModelInfo>, String> {
-    // Ensure manager is initialized
-    {
-        let manager_lock = state.0.lock().await;
-        if manager_lock.is_none() {
-            drop(manager_lock);
-            init_model_manager(&app)
-                .await
-                .map_err(|e| format!("Failed to initialize model manager: {}", e))?;
+    let manager = {
+        // Ensure manager is initialized
+        {
+            let manager_lock = state.0.lock().await;
+            if manager_lock.is_none() {
+                drop(manager_lock);
+                init_model_manager(&app)
+                    .await
+                    .map_err(|e| format!("Failed to initialize model manager: {}", e))?;
+            }
         }
-    }
 
-    let manager_lock = state.0.lock().await;
-    let manager = manager_lock
-        .as_ref()
-        .ok_or_else(|| "Model manager not initialized".to_string())?;
+        let manager_lock = state.0.lock().await;
+        manager_lock
+            .as_ref()
+            .ok_or_else(|| "Model manager not initialized".to_string())?
+            .clone()
+    };
 
     let models = manager.list_models().await;
     Ok(models)
@@ -67,21 +70,24 @@ pub async fn builtin_ai_get_model_info<R: Runtime>(
     state: State<'_, ModelManagerState>,
     model_name: String,
 ) -> Result<Option<ModelInfo>, String> {
-    // Ensure manager is initialized
-    {
-        let manager_lock = state.0.lock().await;
-        if manager_lock.is_none() {
-            drop(manager_lock);
-            init_model_manager(&app)
-                .await
-                .map_err(|e| format!("Failed to initialize model manager: {}", e))?;
+    let manager = {
+        // Ensure manager is initialized
+        {
+            let manager_lock = state.0.lock().await;
+            if manager_lock.is_none() {
+                drop(manager_lock);
+                init_model_manager(&app)
+                    .await
+                    .map_err(|e| format!("Failed to initialize model manager: {}", e))?;
+            }
         }
-    }
 
-    let manager_lock = state.0.lock().await;
-    let manager = manager_lock
-        .as_ref()
-        .ok_or_else(|| "Model manager not initialized".to_string())?;
+        let manager_lock = state.0.lock().await;
+        manager_lock
+            .as_ref()
+            .ok_or_else(|| "Model manager not initialized".to_string())?
+            .clone()
+    };
 
     let info = manager.get_model_info(&model_name).await;
     Ok(info)
@@ -94,21 +100,24 @@ pub async fn builtin_ai_download_model<R: Runtime>(
     state: State<'_, ModelManagerState>,
     model_name: String,
 ) -> Result<(), String> {
-    // Ensure manager is initialized
-    {
-        let manager_lock = state.0.lock().await;
-        if manager_lock.is_none() {
-            drop(manager_lock);
-            init_model_manager(&app)
-                .await
-                .map_err(|e| format!("Failed to initialize model manager: {}", e))?;
+    let manager = {
+        // Ensure manager is initialized
+        {
+            let manager_lock = state.0.lock().await;
+            if manager_lock.is_none() {
+                drop(manager_lock);
+                init_model_manager(&app)
+                    .await
+                    .map_err(|e| format!("Failed to initialize model manager: {}", e))?;
+            }
         }
-    }
 
-    let manager_lock = state.0.lock().await;
-    let manager = manager_lock
-        .as_ref()
-        .ok_or_else(|| "Model manager not initialized".to_string())?;
+        let manager_lock = state.0.lock().await;
+        manager_lock
+            .as_ref()
+            .ok_or_else(|| "Model manager not initialized".to_string())?
+            .clone() // Clone the Arc, not the ModelManager
+    };
 
     // Create progress callback that emits Tauri events with detailed info
     let app_clone = app.clone();
@@ -147,19 +156,34 @@ pub async fn builtin_ai_download_model<R: Runtime>(
 
 /// Cancel an ongoing model download
 #[tauri::command]
-pub async fn builtin_ai_cancel_download(
+pub async fn builtin_ai_cancel_download<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, ModelManagerState>,
     model_name: String,
 ) -> Result<(), String> {
-    let manager_lock = state.0.lock().await;
-    let manager = manager_lock
-        .as_ref()
-        .ok_or_else(|| "Model manager not initialized".to_string())?;
+    let manager = {
+        let manager_lock = state.0.lock().await;
+        manager_lock
+            .as_ref()
+            .ok_or_else(|| "Model manager not initialized".to_string())?
+            .clone()
+    };
 
     manager
         .cancel_download(&model_name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    let _ = app.emit(
+        "builtin-ai-download-progress",
+        serde_json::json!({
+            "model": model_name,
+            "progress": 0,
+            "status": "cancelled"
+        }),
+    );
+
+    Ok(())
 }
 
 /// Delete a corrupted or available model file
@@ -168,10 +192,13 @@ pub async fn builtin_ai_delete_model(
     state: State<'_, ModelManagerState>,
     model_name: String,
 ) -> Result<(), String> {
-    let manager_lock = state.0.lock().await;
-    let manager = manager_lock
-        .as_ref()
-        .ok_or_else(|| "Model manager not initialized".to_string())?;
+    let manager = {
+        let manager_lock = state.0.lock().await;
+        manager_lock
+            .as_ref()
+            .ok_or_else(|| "Model manager not initialized".to_string())?
+            .clone()
+    };
 
     manager
         .delete_model(&model_name)
@@ -187,21 +214,24 @@ pub async fn builtin_ai_is_model_ready<R: Runtime>(
     model_name: String,
     refresh: Option<bool>,  // NEW: Optional refresh parameter
 ) -> Result<bool, String> {
-    // Ensure manager is initialized
-    {
-        let manager_lock = state.0.lock().await;
-        if manager_lock.is_none() {
-            drop(manager_lock);
-            init_model_manager(&app)
-                .await
-                .map_err(|e| format!("Failed to initialize model manager: {}", e))?;
+    let manager = {
+        // Ensure manager is initialized
+        {
+            let manager_lock = state.0.lock().await;
+            if manager_lock.is_none() {
+                drop(manager_lock);
+                init_model_manager(&app)
+                    .await
+                    .map_err(|e| format!("Failed to initialize model manager: {}", e))?;
+            }
         }
-    }
 
-    let manager_lock = state.0.lock().await;
-    let manager = manager_lock
-        .as_ref()
-        .ok_or_else(|| "Model manager not initialized".to_string())?;
+        let manager_lock = state.0.lock().await;
+        manager_lock
+            .as_ref()
+            .ok_or_else(|| "Model manager not initialized".to_string())?
+            .clone()
+    };
 
     let refresh_scan = refresh.unwrap_or(false);
     let ready = manager.is_model_ready(&model_name, refresh_scan).await;
@@ -223,21 +253,24 @@ pub async fn builtin_ai_get_available_summary_model<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, ModelManagerState>,
 ) -> Result<Option<String>, String> {
-    // Ensure manager is initialized
-    {
-        let manager_lock = state.0.lock().await;
-        if manager_lock.is_none() {
-            drop(manager_lock);
-            init_model_manager(&app)
-                .await
-                .map_err(|e| format!("Failed to initialize model manager: {}", e))?;
+    let manager = {
+        // Ensure manager is initialized
+        {
+            let manager_lock = state.0.lock().await;
+            if manager_lock.is_none() {
+                drop(manager_lock);
+                init_model_manager(&app)
+                    .await
+                    .map_err(|e| format!("Failed to initialize model manager: {}", e))?;
+            }
         }
-    }
 
-    let manager_lock = state.0.lock().await;
-    let manager = manager_lock
-        .as_ref()
-        .ok_or_else(|| "Model manager not initialized".to_string())?;
+        let manager_lock = state.0.lock().await;
+        manager_lock
+            .as_ref()
+            .ok_or_else(|| "Model manager not initialized".to_string())?
+            .clone()
+    };
 
     // Force fresh scan to ensure accurate state
     manager
@@ -289,7 +322,7 @@ pub async fn init_model_manager_at_startup<R: Runtime>(
 
     let state: State<ModelManagerState> = app.state();
     let mut manager_lock = state.0.lock().await;
-    *manager_lock = Some(manager);
+    *manager_lock = Some(Arc::new(manager));
 
     log::info!("ModelManager initialized at startup");
     Ok(())

@@ -22,6 +22,12 @@ interface ModelInfo {
   gguf_file: string;
 }
 
+interface DownloadProgressInfo {
+  downloadedMb: number;
+  totalMb: number;
+  speedMbps: number;
+}
+
 interface BuiltInModelManagerProps {
   selectedModel: string;
   onModelSelect: (model: string) => void;
@@ -30,7 +36,9 @@ interface BuiltInModelManagerProps {
 export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInModelManagerProps) {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [hasFetched, setHasFetched] = useState<boolean>(false);
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
+  const [downloadProgressInfo, setDownloadProgressInfo] = useState<Record<string, DownloadProgressInfo>>({});
   const [downloadingModels, setDownloadingModels] = useState<Set<string>>(new Set());
 
   const fetchModels = async () => {
@@ -51,6 +59,7 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
       toast.error('Failed to load models');
     } finally {
       setIsLoading(false);
+      setHasFetched(true);
     }
   };
 
@@ -64,22 +73,75 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
 
     const setupListener = async () => {
       unlisten = await listen('builtin-ai-download-progress', (event: any) => {
-        const { model, progress, status } = event.payload;
+        const { model, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
 
+        // Update percentage progress
         setDownloadProgress((prev) => ({
           ...prev,
           [model]: progress,
         }));
 
+        // Update detailed progress info (MB, speed)
+        setDownloadProgressInfo((prev) => ({
+          ...prev,
+          [model]: {
+            downloadedMb: downloaded_mb ?? 0,
+            totalMb: total_mb ?? 0,
+            speedMbps: speed_mbps ?? 0,
+          },
+        }));
+
+        // Handle downloading status - restore downloadingModels state on modal reopen
+        if (status === 'downloading') {
+          setDownloadingModels((prev) => {
+            if (!prev.has(model)) {
+              const newSet = new Set(prev);
+              newSet.add(model);
+              return newSet;
+            }
+            return prev;
+          });
+        }
+
+        // Handle completed status
         if (status === 'completed') {
           setDownloadingModels((prev) => {
             const newSet = new Set(prev);
             newSet.delete(model);
             return newSet;
           });
+          // Clean up progress state
+          setDownloadProgress((prev) => {
+            const { [model]: _, ...rest } = prev;
+            return rest;
+          });
+          setDownloadProgressInfo((prev) => {
+            const { [model]: _, ...rest } = prev;
+            return rest;
+          });
           // Refresh models list
           fetchModels();
           toast.success(`Model ${model} downloaded successfully`);
+        }
+
+        // Handle cancelled status
+        if (status === 'cancelled') {
+          setDownloadingModels((prev) => {
+            const newSet = new Set(prev);
+            newSet.delete(model);
+            return newSet;
+          });
+          // Clean up progress state
+          setDownloadProgress((prev) => {
+            const { [model]: _, ...rest } = prev;
+            return rest;
+          });
+          setDownloadProgressInfo((prev) => {
+            const { [model]: _, ...rest } = prev;
+            return rest;
+          });
+          // Refresh models list
+          fetchModels();
         }
       });
     };
@@ -133,7 +195,8 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
     }
   };
 
-  if (isLoading) {
+  // Don't show loading spinner if we have downloads in progress - show the model list instead
+  if (isLoading && downloadingModels.size === 0) {
     return (
       <div className="text-center py-8 text-muted-foreground">
         <RefreshCw className="mx-auto h-8 w-8 animate-spin mb-2" />
@@ -142,7 +205,8 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
     );
   }
 
-  if (models.length === 0) {
+  // Only show "no models" message after fetch has completed
+  if (hasFetched && models.length === 0) {
     return (
       <Alert>
         <AlertDescription>
@@ -161,6 +225,7 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
       <div className="grid gap-4">
         {models.map((model) => {
           const progress = downloadProgress[model.name];
+          const progressInfo = downloadProgressInfo[model.name];
           const modelIsDownloading = downloadingModels.has(model.name);
           const isAvailable = model.status.type === 'available';
           const isNotDownloaded = model.status.type === 'not_downloaded';
@@ -170,7 +235,10 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
             <div
               key={model.name}
               className={cn(
-                'bg-card p-4 rounded-md border transition-colors',
+                'p-4 rounded-lg border transition-colors',
+                modelIsDownloading
+                  ? 'bg-gray-50 border-gray-200'
+                  : 'bg-card',
                 selectedModel === model.name
                   ? 'ring-2 ring-blue-500 border-blue-500'
                   : 'hover:bg-muted/50',
@@ -251,12 +319,26 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
 
               {/* Download progress bar */}
               {modelIsDownloading && progress !== undefined && (
-                <div className="mt-3">
-                  <div className="flex items-center justify-between mb-2">
+                <div className="mt-3 pt-3 border-t border-gray-200">
+                  <div className="flex items-center justify-between mb-1">
                     <span className="text-sm font-medium text-blue-600">Downloading...</span>
                     <span className="text-sm font-semibold text-blue-600">
                       {Math.round(progress)}%
                     </span>
+                  </div>
+                  <div className="text-sm text-muted-foreground mb-2">
+                    {progressInfo?.totalMb > 0 ? (
+                      <>
+                        {progressInfo.downloadedMb.toFixed(1)} MB / {progressInfo.totalMb.toFixed(1)} MB
+                        {progressInfo.speedMbps > 0 && (
+                          <span className="ml-2 text-gray-500">
+                            ({progressInfo.speedMbps.toFixed(1)} MB/s)
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <span>{model.size_mb} MB</span>
+                    )}
                   </div>
                   <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
                     <div
