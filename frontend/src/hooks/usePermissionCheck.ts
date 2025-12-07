@@ -61,8 +61,8 @@ export function usePermissionCheck() {
 
   const requestPermissions = async () => {
     try {
-      // Trigger microphone permission dialog
-      await invoke('trigger_microphone_permission');
+      // Trigger audio permission by trying to access devices
+      await invoke('get_audio_devices');
 
       // Recheck after triggering
       setTimeout(() => {
@@ -73,29 +73,9 @@ export function usePermissionCheck() {
     }
   };
 
-  // Trigger permission dialog on mount to ensure we have microphone access
+  // Check permissions on mount
   useEffect(() => {
-    const initPermissions = async () => {
-      try {
-        // First trigger the microphone permission dialog
-        console.log('🎤 [usePermissionCheck] Triggering microphone permission on mount...');
-        const result = await invoke('trigger_microphone_permission');
-        console.log('🎤 [usePermissionCheck] trigger_microphone_permission result:', result);
-
-        // Wait a moment for permission to be processed
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        // Then check permissions
-        console.log('🎤 [usePermissionCheck] Checking permissions after trigger...');
-        await checkPermissions();
-      } catch (error) {
-        console.error('🎤 [usePermissionCheck] Failed to trigger microphone permission:', error);
-        // Still try to check permissions even if trigger fails
-        await checkPermissions();
-      }
-    };
-
-    initPermissions();
+    checkPermissions();
   }, []);
 
   return {

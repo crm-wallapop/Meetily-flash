@@ -42,57 +42,32 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>> {
 }
 
 /// Trigger audio permission request on platforms that require it
-/// Returns Ok(true) if permission is granted, Ok(false) if denied, Err if something went wrong
-pub fn trigger_audio_permission() -> Result<bool> {
-    use log::info;
-
+pub fn trigger_audio_permission() -> Result<()> {
     let host = cpal::default_host();
-    let device = match host.default_input_device() {
-        Some(d) => d,
-        None => {
-            info!("[trigger_audio_permission] No default input device found - permission likely denied");
-            return Ok(false);
-        }
-    };
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| anyhow!("No default input device found"))?;
 
-    let config = match device.default_input_config() {
-        Ok(c) => c,
-        Err(e) => {
-            info!("[trigger_audio_permission] Failed to get input config: {} - permission likely denied", e);
-            return Ok(false);
-        }
-    };
+    let config = device.default_input_config()?;
 
     // Build and start an input stream to trigger the permission request
-    let stream = match device.build_input_stream(
+    let stream = device.build_input_stream(
         &config.into(),
         |_data: &[f32], _: &cpal::InputCallbackInfo| {
             // Do nothing, we just want to trigger the permission request
         },
         |err| error!("Error in audio stream: {}", err),
         None,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            info!("[trigger_audio_permission] Failed to build input stream: {} - permission likely denied", e);
-            return Ok(false);
-        }
-    };
+    )?;
 
     // Start the stream to actually trigger the permission dialog
-    if let Err(e) = stream.play() {
-        info!("[trigger_audio_permission] Failed to play stream: {} - permission likely denied", e);
-        return Ok(false);
-    }
+    stream.play()?;
 
-    // Sleep briefly to allow the permission dialog to appear and for stream to actually work
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // If we got here, permission was granted
-    info!("[trigger_audio_permission] Stream played successfully - permission granted");
+    // Sleep briefly to allow the permission dialog to appear
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Stop the stream
     drop(stream);
 
-    Ok(true)
+    Ok(())
 }

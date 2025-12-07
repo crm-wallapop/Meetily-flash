@@ -42,7 +42,6 @@ pub mod console_utils;
 pub mod database;
 pub mod notifications;
 pub mod ollama;
-pub mod onboarding;
 pub mod openrouter;
 pub mod parakeet_engine;
 pub mod state;
@@ -51,7 +50,7 @@ pub mod tray;
 pub mod utils;
 pub mod whisper_engine;
 
-use audio::{list_audio_devices, trigger_audio_permission, AudioDevice};
+use audio::{list_audio_devices, AudioDevice};
 use log::{error as log_error, info as log_info};
 use notifications::commands::NotificationManagerState;
 use std::sync::Arc;
@@ -282,12 +281,6 @@ async fn get_audio_devices() -> Result<Vec<AudioDevice>, String> {
     list_audio_devices()
         .await
         .map_err(|e| format!("Failed to list audio devices: {}", e))
-}
-
-#[tauri::command]
-async fn trigger_microphone_permission() -> Result<bool, String> {
-    trigger_audio_permission()
-        .map_err(|e| format!("Failed to trigger microphone permission: {}", e))
 }
 
 #[tauri::command]
@@ -558,7 +551,6 @@ pub fn run() {
             whisper_engine::parallel_commands::prepare_audio_chunks,
             whisper_engine::parallel_commands::test_parallel_processing_setup,
             get_audio_devices,
-            trigger_microphone_permission,
             start_recording_with_devices,
             start_recording_with_devices_and_meeting,
             start_audio_level_monitoring,
@@ -654,7 +646,7 @@ pub fn run() {
             // Screen Recording permission commands
             audio::permissions::check_screen_recording_permission_command,
             audio::permissions::request_screen_recording_permission_command,
-            audio::permissions::trigger_system_audio_permission_command,
+            // audio::permissions::trigger_system_audio_permission_command,
             // Database import commands
             database::commands::check_first_launch,
             database::commands::select_legacy_database_path,
@@ -669,11 +661,6 @@ pub fn run() {
             // System settings commands
             #[cfg(target_os = "macos")]
             utils::open_system_settings,
-            // Onboarding commands
-            onboarding::get_onboarding_status,
-            onboarding::save_onboarding_status_cmd,
-            onboarding::reset_onboarding_status_cmd,
-            onboarding::complete_onboarding,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

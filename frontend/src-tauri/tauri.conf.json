@@ -77,11 +77,6 @@
         ],
         "resources": [
             "templates/*.json"
-        ],
-        "macOS": {
-            "entitlements": "entitlements.plist",
-            "signingIdentity": "-",
-            "hardenedRuntime": true
-        }
+        ]
     }
 }
