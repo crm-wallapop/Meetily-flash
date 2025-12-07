@@ -246,13 +246,31 @@ pub async fn shutdown_sidecar_gracefully() -> Result<()> {
 
     if let Some(manager) = manager_opt {
         log::info!("Detaching sidecar manager for graceful shutdown");
-        
+
         // Spawn background task to wait for active requests and then kill
         tokio::spawn(async move {
             if let Err(e) = manager.shutdown_gracefully().await {
                 log::error!("Error during graceful shutdown: {}", e);
             }
         });
+    }
+
+    Ok(())
+}
+
+/// Force shutdown the global sidecar (for app exit)
+/// Directly kills the process without waiting for active requests to complete.
+/// This is synchronous and blocks until the sidecar is terminated.
+pub async fn force_shutdown_sidecar() -> Result<()> {
+    let manager_opt = {
+        let mut global_manager = SIDECAR_MANAGER.lock().await;
+        global_manager.take()
+    };
+
+    if let Some(manager) = manager_opt {
+        log::info!("Force shutting down sidecar for app exit");
+        // Call shutdown() directly - sends shutdown command and force kills after 3s
+        manager.shutdown().await?;
     }
 
     Ok(())

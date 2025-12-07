@@ -12,14 +12,14 @@ static THINKING_TAG_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?s)<think(?:ing)?>.*?</think(?:ing)?>").unwrap()
 });
 
-/// Rough token count estimation (4 bytes ≈ 1 token)
-/// Optimized to use byte length (O(1)) instead of char count (O(n))
+/// Rough token count estimation using character count
 pub fn rough_token_count(s: &str) -> usize {
-    (s.len() as f64 / 4.0).ceil() as usize
+    let char_count = s.chars().count();
+    (char_count as f64 * 0.35).ceil() as usize
 }
 
 /// Chunks text into overlapping segments based on token count
-/// Optimized to use byte-based slicing instead of char vector allocation
+/// Uses character-based chunking for proper Unicode support
 ///
 /// # Arguments
 /// * `text` - The text to chunk
@@ -38,54 +38,54 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
         return vec![];
     }
 
-    // Convert token-based sizes to byte-based sizes (4 bytes ≈ 1 token)
-    let chunk_size_bytes = chunk_size_tokens * 4;
-    let overlap_bytes = overlap_tokens * 4;
+    // Convert token-based sizes to character-based sizes
+    // Using ~2.85 chars per token (inverse of 0.35 tokens per char from rough_token_count)
+    let chars_per_token = 1.0 / 0.35;
+    let chunk_size_chars = (chunk_size_tokens as f64 * chars_per_token).ceil() as usize;
+    let overlap_chars = (overlap_tokens as f64 * chars_per_token).ceil() as usize;
 
-    if text.len() <= chunk_size_bytes {
+    // Collect characters for indexing (needed for proper Unicode support)
+    let chars: Vec<char> = text.chars().collect();
+    let total_chars = chars.len();
+
+    if total_chars <= chunk_size_chars {
         info!("Text is shorter than chunk size, returning as a single chunk.");
         return vec![text.to_string()];
     }
 
     let mut chunks = Vec::new();
-    let mut start = 0;
+    let mut start_char = 0;
     // Step is the size of the non-overlapping part of the window
-    let step = chunk_size_bytes.saturating_sub(overlap_bytes).max(1);
+    let step = chunk_size_chars.saturating_sub(overlap_chars).max(1);
 
-    while start < text.len() {
-        let mut end = (start + chunk_size_bytes).min(text.len());
+    while start_char < total_chars {
+        let end_char = (start_char + chunk_size_chars).min(total_chars);
 
-        // Find a safe UTF-8 boundary
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
-        }
+        // Convert character indices to byte indices for string slicing
+        let start_byte: usize = chars[..start_char].iter().map(|c| c.len_utf8()).sum();
+        let mut end_byte: usize = chars[..end_char].iter().map(|c| c.len_utf8()).sum();
 
         // Try to break at sentence or word boundary for cleaner chunks
-        if end < text.len() {
+        if end_char < total_chars {
+            let slice = &text[start_byte..end_byte];
             // Look for sentence boundary (period followed by space)
-            if let Some(last_period) = text[start..end].rfind(". ") {
-                let boundary = start + last_period + 2;
-                if text.is_char_boundary(boundary) {
-                    end = boundary;
-                }
-            } else if let Some(last_space) = text[start..end].rfind(' ') {
+            if let Some(last_period) = slice.rfind(". ") {
+                end_byte = start_byte + last_period + 2;
+            } else if let Some(last_space) = slice.rfind(' ') {
                 // Fall back to word boundary (space)
-                let boundary = start + last_space + 1;
-                if text.is_char_boundary(boundary) {
-                    end = boundary;
-                }
+                end_byte = start_byte + last_space + 1;
             }
         }
 
-        // Extract chunk using byte slicing (single allocation per chunk)
-        chunks.push(text[start..end].to_string());
+        // Extract chunk
+        chunks.push(text[start_byte..end_byte].to_string());
 
-        if end == text.len() {
+        if end_char >= total_chars {
             break;
         }
 
-        // Move to next chunk with overlap
-        start += step;
+        // Move to next chunk with overlap (in character units)
+        start_char += step;
     }
 
     info!("Created {} chunks from text", chunks.len());

@@ -698,6 +698,17 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             utils::open_system_settings,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                log::info!("Application exiting, cleaning up sidecar...");
+                tauri::async_runtime::block_on(async {
+                    if let Err(e) = summary::summary_engine::force_shutdown_sidecar().await {
+                        log::error!("Failed to force shutdown sidecar: {}", e);
+                    }
+                });
+                log::info!("Sidecar cleanup complete");
+            }
+        });
 }

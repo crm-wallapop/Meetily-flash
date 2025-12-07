@@ -171,21 +171,7 @@ pub async fn complete_onboarding<R: Runtime>(
 ) -> Result<(), String> {
     info!("Completing onboarding with summary model: {}", summary_model);
 
-    // Step 1: Save onboarding status to Tauri store (existing behavior)
-    let mut status = load_onboarding_status(&app)
-        .await
-        .map_err(|e| format!("Failed to load onboarding status: {}", e))?;
-
-    status.completed = true;
-    status.current_step = 5; // Completion step (5-step flow)
-    status.model_status.parakeet = "downloaded".to_string();
-    status.model_status.summary = "downloaded".to_string();
-
-    save_onboarding_status(&app, &status)
-        .await
-        .map_err(|e| format!("Failed to save completed onboarding status: {}", e))?;
-
-    // Step 2: Save model configuration to SQLite database (NEW)
+    // Step 1: Save model configuration to SQLite database FIRST
     let pool = state.db_manager.pool();
 
     // Save summary model config (builtin-ai provider)
@@ -211,6 +197,20 @@ pub async fn complete_onboarding<R: Runtime>(
         return Err(format!("Failed to save transcription model config: {}", e));
     }
     info!("Saved transcription model config: provider=parakeet, model=parakeet-tdt-0.6b-v3-int8");
+
+    // Step 2: Only NOW mark onboarding as complete (after DB operations succeed)
+    let mut status = load_onboarding_status(&app)
+        .await
+        .map_err(|e| format!("Failed to load onboarding status: {}", e))?;
+
+    status.completed = true;
+    status.current_step = 5; // Completion step (5-step flow)
+    status.model_status.parakeet = "downloaded".to_string();
+    status.model_status.summary = "downloaded".to_string();
+
+    save_onboarding_status(&app, &status)
+        .await
+        .map_err(|e| format!("Failed to save completed onboarding status: {}", e))?;
 
     info!("Onboarding completed successfully with summary model: {}", summary_model);
     Ok(())
