@@ -233,6 +233,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     openrouter: [],
     openai: ['gpt-4', 'gpt-4-turbo', 'gpt-3.5-turbo'],
     'builtin-ai': [],
+    'custom-openai': [],
   };
 
   // Toggle confidence indicator with localStorage persistence
