@@ -141,15 +141,6 @@ pub async fn builtin_ai_download_model<R: Runtime>(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Emit completion event
-    let _ = app.emit(
-        "builtin-ai-download-progress",
-        serde_json::json!({
-            "model": model_name,
-            "progress": 100,
-            "status": "completed"
-        }),
-    );
 
     Ok(())
 }

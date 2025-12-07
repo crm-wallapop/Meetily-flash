@@ -559,7 +559,14 @@ impl ModelManager {
                 }
             }
 
-            let chunk = chunk_result.map_err(|e| anyhow!("Error reading chunk: {}", e))?;
+            let chunk = match chunk_result {
+                Ok(c) => c,
+                Err(e) => {
+                    // Flush buffer before returning error to preserve bytes for resume
+                    let _ = writer.flush().await;
+                    return Err(anyhow!("Error reading chunk: {}", e));
+                }
+            };
             let chunk_len = chunk.len() as u64;
             writer
                 .write_all(&chunk)
@@ -699,19 +706,16 @@ impl ModelManager {
     pub async fn cancel_download(&self, model_name: &str) -> Result<()> {
         log::info!("Cancelling download for model: {}", model_name);
 
-        // Set cancellation flag
+        // Set cancellation flag - download loop will detect this and handle cleanup
         {
             let mut cancel_flag = self.cancel_download_flag.write().await;
             *cancel_flag = Some(model_name.to_string());
         }
 
-        // Remove from active downloads
-        {
-            let mut active = self.active_downloads.write().await;
-            active.remove(model_name);
-        }
+        // Note: active_downloads cleanup is handled by the download loop when it detects
+        // the cancellation flag. This avoids double-removal race condition.
 
-        // Update status
+        // Update status immediately for UI responsiveness
         {
             let mut models = self.available_models.write().await;
             if let Some(model_info) = models.get_mut(model_name) {

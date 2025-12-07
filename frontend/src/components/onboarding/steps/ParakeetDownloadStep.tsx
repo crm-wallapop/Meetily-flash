@@ -24,7 +24,8 @@ export function ParakeetDownloadStep() {
   const [parakeetError, setParakeetError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
   // Track if we've verified model is NOT ready (to prevent context race condition)
-  const [verifiedNotReady, setVerifiedNotReady] = useState(false);
+  // Using ref instead of state for synchronous updates - avoids React batching delays
+  const verifiedNotReadyRef = useRef(false);
   // Ref to track latest progress (avoids stale closure issues)
   const progressRef = useRef(parakeetProgress);
 
@@ -46,7 +47,7 @@ export function ParakeetDownloadStep() {
     }
     // Don't sync if we just verified the model is NOT ready
     // (context update is async and might still have stale true value)
-    if (verifiedNotReady) {
+    if (verifiedNotReadyRef.current) {
       return;
     }
     // Only sync downloaded state from context if we didn't just verify it's missing
@@ -55,7 +56,7 @@ export function ParakeetDownloadStep() {
     } else if (parakeetProgress > 0 && status !== 'error') {
       setStatus('downloading');
     }
-  }, [parakeetDownloaded, parakeetProgress, status, verifiedNotReady]);
+  }, [parakeetDownloaded, parakeetProgress, status]);
 
   // Auto-start download effect
   useEffect(() => {
@@ -66,18 +67,18 @@ export function ParakeetDownloadStep() {
 
   // Reset verifiedNotReady flag when download actually completes
   useEffect(() => {
-    if (parakeetProgress >= 100 && verifiedNotReady) {
+    if (parakeetProgress >= 100 && verifiedNotReadyRef.current) {
       console.log('[ParakeetDownloadStep] Download complete, resetting verifiedNotReady flag');
-      setVerifiedNotReady(false);
+      verifiedNotReadyRef.current = false;
       setStatus('downloaded');
       setParakeetDownloaded(true);
     }
-  }, [parakeetProgress, verifiedNotReady]);
+  }, [parakeetProgress]);
 
   const initializeStep = async () => {
     try {
       setStatus('checking');
-      setVerifiedNotReady(false); // Reset flag at start of verification
+      verifiedNotReadyRef.current = false; // Reset flag at start of verification
       console.log('[ParakeetDownloadStep] Initializing...');
 
       // Check if a download is already in progress (e.g., user clicked "Fix" to come back)
@@ -105,7 +106,7 @@ export function ParakeetDownloadStep() {
       // Model NOT found, set to ready (will trigger download)
       // IMPORTANT: Set flag BEFORE updating context to prevent race condition
       // The sync effect will ignore stale context values while this flag is true
-      setVerifiedNotReady(true);
+      verifiedNotReadyRef.current = true;
       setParakeetDownloaded(false);
       setStatus('ready');
     } catch (err) {

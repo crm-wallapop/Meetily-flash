@@ -32,7 +32,8 @@ export function SummaryModelDownloadStep() {
   const [modelSize, setModelSize] = useState<string>('');
   const [retryCount, setRetryCount] = useState(0);
   // Track if we've verified model is NOT ready (to prevent context race condition)
-  const [verifiedNotReady, setVerifiedNotReady] = useState(false);
+  // Using ref instead of state for synchronous updates - avoids React batching delays
+  const verifiedNotReadyRef = useRef(false);
   // Ref to track latest progress (avoids stale closure issues)
   const progressRef = useRef(summaryModelProgress);
 
@@ -53,8 +54,7 @@ export function SummaryModelDownloadStep() {
       return;
     }
     // Don't sync if we just verified the model is NOT ready
-    // (context update is async and might still have stale true value)
-    if (verifiedNotReady) {
+    if (verifiedNotReadyRef.current) {
       return;
     }
     // Only sync downloaded state from context if we didn't just verify it's missing
@@ -63,7 +63,7 @@ export function SummaryModelDownloadStep() {
     } else if (summaryModelProgress > 0 && status !== 'error') {
       setStatus('downloading');
     }
-  }, [summaryModelDownloaded, summaryModelProgress, status, verifiedNotReady]);
+  }, [summaryModelDownloaded, summaryModelProgress, status]);
 
   // Auto-start download effect
   useEffect(() => {
@@ -75,13 +75,13 @@ export function SummaryModelDownloadStep() {
   // Reset verifiedNotReady flag when download actually completes
   // This allows normal sync to resume after successful download
   useEffect(() => {
-    if (summaryModelProgress >= 100 && verifiedNotReady) {
+    if (summaryModelProgress >= 100 && verifiedNotReadyRef.current) {
       console.log('[SummaryModelDownloadStep] Download complete, resetting verifiedNotReady flag');
-      setVerifiedNotReady(false);
+      verifiedNotReadyRef.current = false;
       setStatus('downloaded');
       setSummaryModelDownloaded(true);
     }
-  }, [summaryModelProgress, verifiedNotReady]);
+  }, [summaryModelProgress]);
 
   const updateDisplayInfo = (modelName: string) => {
     const info = MODEL_DISPLAY_INFO[modelName];
@@ -98,7 +98,7 @@ export function SummaryModelDownloadStep() {
   const initializeStep = async () => {
     try {
       setStatus('checking');
-      setVerifiedNotReady(false); // Reset flag at start of verification
+      verifiedNotReadyRef.current = false; // Reset flag at start of verification
       console.log('[SummaryModelDownloadStep] Initializing...');
 
       // Check if a download is already in progress (e.g., user clicked "Fix" to come back)
@@ -153,7 +153,7 @@ export function SummaryModelDownloadStep() {
       // Model NOT ready, set for download
       // IMPORTANT: Set flag BEFORE updating context to prevent race condition
       // The sync effect will ignore stale context values while this flag is true
-      setVerifiedNotReady(true);
+      verifiedNotReadyRef.current = true;
       setSummaryModelDownloaded(false);
       setSelectedSummaryModel(modelToUse);
       setStatus('ready');
