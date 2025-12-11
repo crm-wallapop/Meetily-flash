@@ -56,7 +56,7 @@ export function WelcomeStep() {
             onClick={goNext}
             className="w-full h-11 bg-gray-900 hover:bg-gray-800 text-white"
           >
-            Proceed to Setup
+            Get Started
           </Button>
           <p className="text-xs text-center text-gray-500">Takes less than 3 minutes</p>
         </div>

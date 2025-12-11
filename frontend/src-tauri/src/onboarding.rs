@@ -38,6 +38,7 @@ impl Default for OnboardingStatus {
     }
 }
 
+
 /// Load onboarding status from store
 pub async fn load_onboarding_status<R: Runtime>(
     app: &AppHandle<R>,
@@ -167,27 +168,27 @@ pub async fn reset_onboarding_status_cmd<R: Runtime>(
 pub async fn complete_onboarding<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
-    summary_model: String,
+    model: String,
 ) -> Result<(), String> {
-    info!("Completing onboarding with summary model: {}", summary_model);
+    info!("Completing onboarding with builtin-ai model: {}", model);
 
     // Step 1: Save model configuration to SQLite database FIRST
     let pool = state.db_manager.pool();
 
-    // Save summary model config (builtin-ai provider)
+    // Onboarding always uses builtin-ai (local LLM)
     if let Err(e) = SettingsRepository::save_model_config(
         pool,
-        "builtin-ai",          // Provider
-        &summary_model,        // Model from parameter (e.g., "gemma3:1b", "gemma3:4b")
-        "large-v3",            // Unused for builtin-ai but required by schema
-        None,                  // No Ollama endpoint
+        "builtin-ai",
+        &model,
+        "large-v3",
+        None,
     ).await {
-        error!("Failed to save summary model config: {}", e);
-        return Err(format!("Failed to save summary model config: {}", e));
+        error!("Failed to save builtin-ai model config: {}", e);
+        return Err(format!("Failed to save builtin-ai model config: {}", e));
     }
-    info!("Saved summary model config: provider=builtin-ai, model={}", summary_model);
+    info!("Saved builtin-ai model config: model={}", model);
 
-    // Save transcription model config (parakeet provider)
+    // Save transcription model config (parakeet provider) - always parakeet
     if let Err(e) = SettingsRepository::save_transcript_config(
         pool,
         "parakeet",
@@ -204,7 +205,7 @@ pub async fn complete_onboarding<R: Runtime>(
         .map_err(|e| format!("Failed to load onboarding status: {}", e))?;
 
     status.completed = true;
-    status.current_step = 5; // Completion step (5-step flow)
+    status.current_step = 4; // Max step (4 on macOS with permissions, 3 on other platforms)
     status.model_status.parakeet = "downloaded".to_string();
     status.model_status.summary = "downloaded".to_string();
 
@@ -212,6 +213,6 @@ pub async fn complete_onboarding<R: Runtime>(
         .await
         .map_err(|e| format!("Failed to save completed onboarding status: {}", e))?;
 
-    info!("Onboarding completed successfully with summary model: {}", summary_model);
+    info!("Onboarding completed successfully with model: {}", model);
     Ok(())
 }

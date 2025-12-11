@@ -2,11 +2,9 @@ import React, { useEffect } from 'react';
 import { useOnboarding } from '@/contexts/OnboardingContext';
 import {
   WelcomeStep,
-  SetupOverviewStep,
   PermissionsStep,
-  ParakeetDownloadStep,
-  SummaryModelDownloadStep,
-  CompletionStep,
+  DownloadProgressStep,
+  SetupOverviewStep,
 } from './steps';
 
 interface OnboardingFlowProps {
@@ -33,21 +31,18 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
     checkPlatform();
   }, []);
 
-  // When Done is clicked on completion step, call parent callback
-  useEffect(() => {
-    // Listen for completion - we'll trigger this from CompletionStep
-    // The actual completion is handled by completeOnboarding() in the context
-    // This effect is just for cleanup/notification to parent
-  }, [currentStep, onComplete]);
+  // 4-Step Onboarding Flow (System-Recommended Models):
+  // Step 1: Welcome - Introduce Meetily features
+  // Step 2: Setup Overview - Database initialization + show recommended downloads
+  // Step 3: Download Progress - Download Parakeet + Gemma (auto-selected based on RAM)
+  // Step 4: Permissions - Request mic + system audio (macOS only)
 
   return (
     <div className="onboarding-flow">
       {currentStep === 1 && <WelcomeStep />}
       {currentStep === 2 && <SetupOverviewStep />}
-      {currentStep === 3 && <ParakeetDownloadStep />}
-      {currentStep === 4 && <SummaryModelDownloadStep />}
-      {currentStep === 5 && <CompletionStep isMac={isMac} />}
-      {currentStep === 6 && isMac && <PermissionsStep />}
+      {currentStep === 3 && <DownloadProgressStep />}
+      {currentStep === 4 && isMac && <PermissionsStep />}
     </div>
   );
 }

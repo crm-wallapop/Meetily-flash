@@ -140,8 +140,11 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
             // This is a model-related error that requires user action
             showModal('modelSelector', userMessage);
           } else {
-            // Regular transcription error
-            showModal('errorAlert', userMessage);
+            // Show toast instead of modal for non-actionable errors (consistent with sidebar)
+            toast.error('', {
+              description: userMessage,
+              duration: 5000,
+            });
           }
         });
         console.log('Transcription error listener setup complete');

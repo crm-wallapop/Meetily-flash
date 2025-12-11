@@ -86,48 +86,17 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     console.log('Meeting name:', meetingName);
     console.log('Current isRecording state:', isRecording);
 
-    setIsValidatingModel(true);
     setShowPlayback(false);
     setTranscript(''); // Clear any previous transcript
     setSpeechDetected(false); // Reset speech detection on new recording
 
     try {
-      // Generate meeting title here to ensure it's available for the backend call
-      const now = new Date();
-      const day = String(now.getDate()).padStart(2, '0');
-      const month = String(now.getMonth() + 1).padStart(2, '0');
-      const year = String(now.getFullYear()).slice(-2);
-      const hours = String(now.getHours()).padStart(2, '0');
-      const minutes = String(now.getMinutes()).padStart(2, '0');
-      const seconds = String(now.getSeconds()).padStart(2, '0');
-      const generatedMeetingTitle = `Meeting ${day}_${month}_${year}_${hours}_${minutes}_${seconds}`;
-
-      setIsStarting(true);
-      setIsValidatingModel(false);
-
-      // Use the correct command with device parameters
-      if (selectedDevices || meetingName || generatedMeetingTitle) {
-        console.log('Using start_recording_with_devices_and_meeting with:', {
-          mic_device_name: selectedDevices?.micDevice || null,
-          system_device_name: selectedDevices?.systemDevice || null,
-          meeting_name: meetingName || generatedMeetingTitle
-        });
-        const result = await invoke('start_recording_with_devices_and_meeting', {
-          mic_device_name: selectedDevices?.micDevice || null,
-          system_device_name: selectedDevices?.systemDevice || null,
-          meeting_name: meetingName || generatedMeetingTitle
-        });
-        console.log('Backend recording start result:', result);
-      } else {
-        console.log('Using start_recording (no devices/meeting specified)');
-        const result = await invoke('start_recording');
-        console.log('Backend recording start result:', result);
-      }
-      console.log('Recording started successfully');
-      setIsProcessing(false);
-
-      // Call onRecordingStart after successful recording start
-      onRecordingStart();
+      // Call the validation callback which will:
+      // 1. Check if model is ready
+      // 2. Show appropriate toast/modal
+      // 3. Call backend if valid
+      // 4. Update UI state
+      await onRecordingStart();
     } catch (error) {
       console.error('Failed to start recording:', error);
       console.error('Error details:', {
@@ -161,11 +130,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           message: 'Unable to start recording. Please check your audio device settings and try again.'
         });
       }
-    } finally {
-      setIsStarting(false);
-      setIsValidatingModel(false);
     }
-  }, [onRecordingStart, isStarting, selectedDevices, meetingName]);
+  }, [onRecordingStart, isStarting, isValidatingModel, selectedDevices, meetingName, isRecording]);
 
   const stopRecordingAction = useCallback(async () => {
     console.log('Executing stop recording...');
@@ -334,10 +300,11 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           onRecordingStop(false);
 
           // For actionable errors (like model loading failures), the main page will handle showing the model selector
-          // For regular errors, show via the error callback
-          if (onTranscriptionError && !isActionable) {
+          // For regular errors, they are handled by useModalState global listener which shows a toast
+          // We don't want to show a modal (via onTranscriptionError) AND a toast, so we skip the callback here
+          /* if (onTranscriptionError && !isActionable) {
             onTranscriptionError(errorMessage);
-          }
+          } */
         });
 
         // Recording paused listener

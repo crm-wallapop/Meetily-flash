@@ -415,6 +415,13 @@ pub async fn parakeet_download_model<R: Runtime>(
             }
         });
 
+        // Ensure models are discovered before downloading
+        // This populates available_models so we don't get "Model not found" error
+        if let Err(e) = engine.discover_models().await {
+            log::warn!("Failed to discover models before download: {}", e);
+            // Continue anyway, maybe it will work if the model is already known
+        }
+
         let result = engine
             .download_model_detailed(&model_name, Some(progress_callback))
             .await;
@@ -430,6 +437,11 @@ pub async fn parakeet_download_model<R: Runtime>(
                 ) {
                     log::error!("Failed to emit parakeet download complete event: {}", e);
                 }
+
+                // Update tray menu to reflect model is now available
+                log::info!("Parakeet model download complete - updating tray menu");
+                crate::tray::update_tray_menu(&app_handle);
+
                 Ok(())
             }
             Err(e) => {

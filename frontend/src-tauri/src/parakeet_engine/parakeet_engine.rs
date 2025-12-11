@@ -175,11 +175,19 @@ impl ParakeetEngine {
             ("parakeet-tdt-0.6b-v2-int8", 661, QuantizationType::Int8, "Fast (v2)", "Previous version with int8 quantization, good balance of speed and accuracy"),
         ];
 
+        // Get active downloads to override status
+        let active_downloads = self.active_downloads.read().await;
+
         for (name, size_mb, quantization, speed, description) in model_configs {
             let model_path = models_dir.join(name);
 
-            // Check if model directory exists and contains required files
-            let status = if model_path.exists() {
+            // Check if model is currently downloading
+            let status = if active_downloads.contains(name) {
+                // If downloading, preserve that status regardless of file system
+                // We don't know the exact progress here without more state, but 0 is safe fallback
+                // The progress events will update the UI
+                ModelStatus::Downloading { progress: 0 }
+            } else if model_path.exists() {
                 // Check for required ONNX files
                 let required_files = match quantization {
                     QuantizationType::Int8 => vec![

@@ -1,4 +1,4 @@
-export type OnboardingStep = 1 | 2 | 3 | 4 | 5 | 6;
+export type OnboardingStep = 1 | 2 | 3 | 4;
 
 export type PermissionStatus = 'checking' | 'not_determined' | 'authorized' | 'denied';
 
@@ -10,7 +10,7 @@ export interface OnboardingPermissions {
 
 export interface OnboardingContainerProps {
   title: string;
-  description?: string;
+  description?: React.ReactNode;
   children: React.ReactNode;
   step?: number;
   totalSteps?: number;
