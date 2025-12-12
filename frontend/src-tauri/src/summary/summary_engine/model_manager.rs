@@ -197,6 +197,29 @@ impl ModelManager {
                 model_path.display()
             );
 
+            let is_actively_downloading = {
+                let active = self.active_downloads.read().await;
+                active.contains(&model_def.name)
+            };
+
+            // If actively downloading, preserve existing status from memory
+            if is_actively_downloading {
+                let existing_info = {
+                    let models = self.available_models.read().await;
+                    models.get(&model_def.name).cloned()
+                };
+
+                if let Some(info) = existing_info {
+                    // Preserve existing status (should be Downloading)
+                    models_map.insert(model_def.name.clone(), info);
+                    log::debug!(
+                        "Model '{}': Preserving Downloading status during scan",
+                        model_def.name
+                    );
+                    continue;
+                }
+            }
+
             let status = if model_path.exists() {
                 // Check if file size matches expected size (basic validation)
                 match fs::metadata(&model_path).await {
@@ -578,15 +601,16 @@ impl ModelManager {
 
             // Calculate progress
             let progress_percent = if total_size > 0 {
-                ((downloaded as f64 / total_size as f64) * 100.0) as u8
+                let exact_percent = (downloaded as f64 / total_size as f64) * 100.0;
+                exact_percent.min(100.0) as u8
             } else {
                 0
             };
 
-            // Report progress every 1% or every 500ms for smoother updates
             let elapsed_since_report = last_report_time.elapsed();
-            let should_report = progress_percent >= last_progress_percent + 1
-                || progress_percent == 100
+            let is_download_complete = downloaded >= total_size;
+            let should_report = progress_percent > last_progress_percent
+                || is_download_complete  // Force report on completion
                 || elapsed_since_report.as_millis() >= 500;
 
             if should_report {
@@ -614,7 +638,9 @@ impl ModelManager {
                 {
                     let mut models = self.available_models.write().await;
                     if let Some(model_info) = models.get_mut(model_name) {
-                        model_info.status = ModelStatus::Downloading { progress: progress_percent };
+                        model_info.status = ModelStatus::Downloading {
+                            progress: if is_download_complete { 100 } else { progress_percent }
+                        };
                     }
                 }
 
@@ -634,7 +660,20 @@ impl ModelManager {
 
         log::info!("Download completed for model: {}", model_name);
 
-        // Validate GGUF magic number
+        {
+            let mut models = self.available_models.write().await;
+            if let Some(model_info) = models.get_mut(model_name) {
+                model_info.status = ModelStatus::Downloading { progress: 100 };
+            }
+        }
+
+        if let Some(ref callback) = progress_callback {
+            callback(DownloadProgress::new(total_size, total_size, 0.0));
+        }
+
+        // Small delay to ensure UI receives 100% event
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
         if let Err(e) = self.validate_gguf_file(&file_path).await {
             log::error!("Downloaded file failed validation: {}", e);
 
@@ -663,11 +702,6 @@ impl ModelManager {
                 model_info.status = ModelStatus::Available;
                 model_info.path = file_path.clone();
             }
-        }
-
-        // Ensure 100% progress is reported
-        if let Some(ref callback) = progress_callback {
-            callback(DownloadProgress::new(total_size, total_size, 0.0));
         }
 
         // Remove from active downloads
