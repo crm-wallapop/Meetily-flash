@@ -6,6 +6,7 @@ import { useOllamaDownload } from '@/contexts/OllamaDownloadContext';
 import { BuiltInModelManager } from '@/components/BuiltInModelManager';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { useConfig } from '@/contexts/ConfigContext';
 import {
   Select,
   SelectContent,
@@ -27,7 +28,6 @@ export interface ModelConfig {
   apiKey?: string | null;
   ollamaEndpoint?: string | null;
   // Custom OpenAI fields
-  customOpenAIDisplayName?: string | null;
   customOpenAIEndpoint?: string | null;
   customOpenAIModel?: string | null;
   customOpenAIApiKey?: string | null;
@@ -59,11 +59,16 @@ interface ModelSettingsModalProps {
 }
 
 export function ModelSettingsModal({
-  modelConfig,
-  setModelConfig,
+  modelConfig: propsModelConfig,
+  setModelConfig: propsSetModelConfig,
   onSave,
   skipInitialFetch = false,
 }: ModelSettingsModalProps) {
+  // Use ConfigContext if available, fallback to props for backward compatibility
+  const configContext = useConfig();
+  const modelConfig = configContext?.modelConfig || propsModelConfig;
+  const setModelConfig = configContext?.setModelConfig || propsSetModelConfig;
+
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [error, setError] = useState<string>('');
   const [apiKey, setApiKey] = useState<string | null>(modelConfig.apiKey || null);
@@ -87,7 +92,6 @@ export function ModelSettingsModal({
   const [ollamaNotInstalled, setOllamaNotInstalled] = useState<boolean>(false); // Track if Ollama is not installed
 
   // Custom OpenAI state
-  const [customOpenAIDisplayName, setCustomOpenAIDisplayName] = useState<string>(modelConfig.customOpenAIDisplayName || '');
   const [customOpenAIEndpoint, setCustomOpenAIEndpoint] = useState<string>(modelConfig.customOpenAIEndpoint || '');
   const [customOpenAIModel, setCustomOpenAIModel] = useState<string>(modelConfig.customOpenAIModel || '');
   const [customOpenAIApiKey, setCustomOpenAIApiKey] = useState<string>(modelConfig.customOpenAIApiKey || '');
@@ -207,7 +211,6 @@ export function ModelSettingsModal({
 
   // Custom OpenAI validation
   const isCustomOpenAIInvalid = modelConfig.provider === 'custom-openai' && (
-    !customOpenAIDisplayName.trim() ||
     !customOpenAIEndpoint.trim() ||
     !customOpenAIModel.trim()
   );
@@ -255,7 +258,6 @@ export function ModelSettingsModal({
             try {
               const customConfig = (await invoke('api_get_custom_openai_config')) as any;
               if (customConfig) {
-                setCustomOpenAIDisplayName(customConfig.displayName || '');
                 setCustomOpenAIEndpoint(customConfig.endpoint || '');
                 setCustomOpenAIModel(customConfig.model || '');
                 setCustomOpenAIApiKey(customConfig.apiKey || '');
@@ -306,20 +308,25 @@ export function ModelSettingsModal({
     }
   }, [modelConfig.ollamaEndpoint, modelConfig.provider]);
 
-  // Sync custom OpenAI state from props when they change
+  // Sync custom OpenAI state from modelConfig (context or props)
   useEffect(() => {
     if (modelConfig.provider === 'custom-openai') {
-      if (modelConfig.customOpenAIDisplayName !== undefined) setCustomOpenAIDisplayName(modelConfig.customOpenAIDisplayName || '');
-      if (modelConfig.customOpenAIEndpoint !== undefined) setCustomOpenAIEndpoint(modelConfig.customOpenAIEndpoint || '');
-      if (modelConfig.customOpenAIModel !== undefined) setCustomOpenAIModel(modelConfig.customOpenAIModel || '');
-      if (modelConfig.customOpenAIApiKey !== undefined) setCustomOpenAIApiKey(modelConfig.customOpenAIApiKey || '');
-      if (modelConfig.maxTokens !== undefined) setCustomMaxTokens(modelConfig.maxTokens?.toString() || '');
-      if (modelConfig.temperature !== undefined) setCustomTemperature(modelConfig.temperature?.toString() || '');
-      if (modelConfig.topP !== undefined) setCustomTopP(modelConfig.topP?.toString() || '');
+      console.log('🔄 Syncing custom OpenAI fields from ConfigContext:', {
+        endpoint: modelConfig.customOpenAIEndpoint,
+        model: modelConfig.customOpenAIModel,
+        hasApiKey: !!modelConfig.customOpenAIApiKey,
+      });
+
+      // Always sync from modelConfig (which comes from context if available)
+      setCustomOpenAIEndpoint(modelConfig.customOpenAIEndpoint || '');
+      setCustomOpenAIModel(modelConfig.customOpenAIModel || '');
+      setCustomOpenAIApiKey(modelConfig.customOpenAIApiKey || '');
+      setCustomMaxTokens(modelConfig.maxTokens?.toString() || '');
+      setCustomTemperature(modelConfig.temperature?.toString() || '');
+      setCustomTopP(modelConfig.topP?.toString() || '');
     }
   }, [
     modelConfig.provider,
-    modelConfig.customOpenAIDisplayName,
     modelConfig.customOpenAIEndpoint,
     modelConfig.customOpenAIModel,
     modelConfig.customOpenAIApiKey,
@@ -476,7 +483,6 @@ export function ModelSettingsModal({
     if (modelConfig.provider === 'custom-openai') {
       try {
         await invoke('api_save_custom_openai_config', {
-          displayName: customOpenAIDisplayName.trim(),
           endpoint: customOpenAIEndpoint.trim(),
           apiKey: customOpenAIApiKey.trim() || null,
           model: customOpenAIModel.trim(),
@@ -499,7 +505,6 @@ export function ModelSettingsModal({
         ? ollamaEndpoint.trim()
         : null,
       // Include custom OpenAI fields
-      customOpenAIDisplayName: modelConfig.provider === 'custom-openai' ? customOpenAIDisplayName.trim() : null,
       customOpenAIEndpoint: modelConfig.provider === 'custom-openai' ? customOpenAIEndpoint.trim() : null,
       customOpenAIModel: modelConfig.provider === 'custom-openai' ? customOpenAIModel.trim() : null,
       customOpenAIApiKey: modelConfig.provider === 'custom-openai' && customOpenAIApiKey.trim() ? customOpenAIApiKey.trim() : null,
@@ -693,7 +698,6 @@ export function ModelSettingsModal({
                 if (provider === 'custom-openai') {
                   invoke<any>('api_get_custom_openai_config').then((config) => {
                     if (config) {
-                      setCustomOpenAIDisplayName(config.displayName || '');
                       setCustomOpenAIEndpoint(config.endpoint || '');
                       setCustomOpenAIModel(config.model || '');
                       setCustomOpenAIApiKey(config.apiKey || '');
@@ -713,7 +717,7 @@ export function ModelSettingsModal({
               <SelectContent className="max-h-64 overflow-y-auto">
                 <SelectItem value="builtin-ai">Built-in AI (Offline, No API needed)</SelectItem>
                 <SelectItem value="claude">Claude</SelectItem>
-                <SelectItem value="custom-openai">Custom OpenAI-Compatible</SelectItem>
+                <SelectItem value="custom-openai">Custom Server (OpenAI)</SelectItem>
                 <SelectItem value="groq">Groq</SelectItem>
                 <SelectItem value="ollama">Ollama</SelectItem>
                 <SelectItem value="openai">OpenAI</SelectItem>
@@ -752,20 +756,6 @@ export function ModelSettingsModal({
         {/* Custom OpenAI Configuration Section */}
         {modelConfig.provider === 'custom-openai' && (
           <div className="space-y-4 border-t pt-4">
-            <div>
-              <Label htmlFor="custom-display-name">Display Name *</Label>
-              <Input
-                id="custom-display-name"
-                value={customOpenAIDisplayName}
-                onChange={(e) => setCustomOpenAIDisplayName(e.target.value)}
-                placeholder="My Local LLM"
-                className="mt-1"
-              />
-              <p className="text-xs text-muted-foreground mt-1">
-                Friendly name shown in the provider dropdown
-              </p>
-            </div>
-
             <div>
               <Label htmlFor="custom-endpoint">Endpoint URL *</Label>
               <Input

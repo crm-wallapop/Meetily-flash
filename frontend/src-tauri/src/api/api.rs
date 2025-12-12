@@ -1066,7 +1066,6 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
 pub async fn api_save_custom_openai_config<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
-    display_name: String,
     endpoint: String,
     api_key: Option<String>,
     model: String,
@@ -1075,16 +1074,12 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     top_p: Option<f32>,
 ) -> Result<serde_json::Value, String> {
     log_info!(
-        "api_save_custom_openai_config called: displayName='{}', endpoint='{}', model='{}'",
-        &display_name,
+        "api_save_custom_openai_config called: endpoint='{}', model='{}'",
         &endpoint,
         &model
     );
 
     // Validate required fields
-    if display_name.trim().is_empty() {
-        return Err("Display name is required".to_string());
-    }
     if endpoint.trim().is_empty() {
         return Err("Endpoint URL is required".to_string());
     }
@@ -1115,7 +1110,6 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     }
 
     let config = CustomOpenAIConfig {
-        display_name: display_name.trim().to_string(),
         endpoint: endpoint.trim().to_string(),
         api_key: api_key.filter(|k| !k.trim().is_empty()),
         model: model.trim().to_string(),
@@ -1128,7 +1122,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
 
     match SettingsRepository::save_custom_openai_config(pool, &config).await {
         Ok(()) => {
-            log_info!("✅ Successfully saved custom OpenAI config for '{}'", config.display_name);
+            log_info!("✅ Successfully saved custom OpenAI config for endpoint: {}", config.endpoint);
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Custom OpenAI configuration saved successfully"
@@ -1154,8 +1148,8 @@ pub async fn api_get_custom_openai_config<R: Runtime>(
     match SettingsRepository::get_custom_openai_config(pool).await {
         Ok(config) => {
             if let Some(ref c) = config {
-                log_info!("✅ Found custom OpenAI config: displayName='{}', endpoint='{}', model='{}'",
-                    c.display_name, c.endpoint, c.model);
+                log_info!("✅ Found custom OpenAI config: endpoint='{}', model='{}'",
+                    c.endpoint, c.model);
             } else {
                 log_info!("No custom OpenAI config found");
             }
@@ -1224,12 +1218,43 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
             let response_text = response.text().await.unwrap_or_default();
 
             if status.is_success() {
-                log_info!("✅ Custom OpenAI connection test successful (status: {})", status);
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "message": "Connection successful",
-                    "http_status": status.as_u16()
-                }))
+                // Parse response as JSON to verify it's a valid OpenAI-compatible response
+                match serde_json::from_str::<serde_json::Value>(&response_text) {
+                    Ok(json) => {
+                        // Verify the response has the expected OpenAI structure
+                        if let Some(choices) = json.get("choices") {
+                            if let Some(choices_array) = choices.as_array() {
+                                if !choices_array.is_empty() {
+                                    // Verify the first choice has the required message structure
+                                    if let Some(first_choice) = choices_array.get(0) {
+                                        // Check if message.content field exists (can be empty string)
+                                        let has_message_structure = first_choice
+                                            .get("message")
+                                            .and_then(|m| m.get("content"))
+                                            .is_some();
+
+                                        if has_message_structure {
+                                            log_info!("✅ Custom OpenAI connection test successful - response validated");
+                                            return Ok(serde_json::json!({
+                                                "status": "success",
+                                                "message": "Connection successful and response validated",
+                                                "http_status": status.as_u16()
+                                            }));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Response was 200 but doesn't match OpenAI format
+                        log_warn!("⚠️ Endpoint returned 200 but response doesn't match OpenAI format: {}", response_text);
+                        Err("Endpoint is reachable but doesn't appear to be OpenAI-compatible. Response is missing 'choices' array or 'message.content' field.".to_string())
+                    }
+                    Err(e) => {
+                        log_warn!("⚠️ Endpoint returned 200 but response is not valid JSON: {}", e);
+                        Err(format!("Endpoint is reachable but returned invalid JSON: {}. Response: {}", e, response_text))
+                    }
+                }
             } else {
                 log_warn!("⚠️ Custom OpenAI connection test failed with status {}: {}", status, response_text);
                 Err(format!("Connection failed with status {}: {}", status, response_text))

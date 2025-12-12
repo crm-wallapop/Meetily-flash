@@ -317,7 +317,7 @@ impl SettingsRepository {
     ///
     /// # Arguments
     /// * `pool` - Database connection pool
-    /// * `config` - CustomOpenAIConfig to save (includes displayName, endpoint, apiKey, model, maxTokens, temperature, topP)
+    /// * `config` - CustomOpenAIConfig to save (includes endpoint, apiKey, model, maxTokens, temperature, topP)
     ///
     /// # Returns
     /// * `Ok(())` - Config saved successfully

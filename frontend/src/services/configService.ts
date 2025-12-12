@@ -9,11 +9,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
 
 export interface ModelConfig {
-  provider: 'ollama' | 'groq' | 'claude' | 'openrouter' | 'openai' | 'builtin-ai' | 'custom-openai';
+  provider: 'ollama' | 'groq' | 'claude' | 'openrouter' | 'openai' | 'builtin-ai' | 'custom-openai' | 'gemini';
   model: string;
   whisperModel: string;
+  apiKey?: string | null;
+  ollamaEndpoint?: string | null;
   // Custom OpenAI fields (only populated when provider is 'custom-openai')
-  customOpenAIDisplayName?: string | null;
   customOpenAIEndpoint?: string | null;
   customOpenAIModel?: string | null;
   customOpenAIApiKey?: string | null;
@@ -23,7 +24,6 @@ export interface ModelConfig {
 }
 
 export interface CustomOpenAIConfig {
-  displayName: string;
   endpoint: string;
   apiKey: string | null;
   model: string;
@@ -93,7 +93,6 @@ export class ConfigService {
    */
   async saveCustomOpenAIConfig(config: CustomOpenAIConfig): Promise<{ status: string; message: string }> {
     return invoke<{ status: string; message: string }>('api_save_custom_openai_config', {
-      displayName: config.displayName,
       endpoint: config.endpoint,
       apiKey: config.apiKey,
       model: config.model,
