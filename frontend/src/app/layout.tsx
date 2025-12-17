@@ -18,6 +18,7 @@ import { TranscriptProvider } from '@/contexts/TranscriptContext'
 import { ConfigProvider } from '@/contexts/ConfigContext'
 import { OnboardingProvider } from '@/contexts/OnboardingContext'
 import { OnboardingFlow } from '@/components/onboarding'
+import { UpdateCheckProvider } from '@/components/UpdateCheckProvider'
 
 const sourceSans3 = Source_Sans_3({
   subsets: ['latin'],
@@ -74,19 +75,21 @@ export default function RootLayout({
               <ConfigProvider>
                 <OllamaDownloadProvider>
                   <OnboardingProvider>
-                    <SidebarProvider>
-                      <TooltipProvider>
-                        {/* Show onboarding or main app */}
-                        {showOnboarding ? (
-                          <OnboardingFlow onComplete={handleOnboardingComplete} />
-                        ) : (
-                          <div className="flex">
-                            <Sidebar />
-                            <MainContent>{children}</MainContent>
-                          </div>
-                        )}
-                      </TooltipProvider>
-                    </SidebarProvider>
+                    <UpdateCheckProvider>
+                      <SidebarProvider>
+                        <TooltipProvider>
+                          {/* Show onboarding or main app */}
+                          {showOnboarding ? (
+                            <OnboardingFlow onComplete={handleOnboardingComplete} />
+                          ) : (
+                            <div className="flex">
+                              <Sidebar />
+                              <MainContent>{children}</MainContent>
+                            </div>
+                          )}
+                        </TooltipProvider>
+                      </SidebarProvider>
+                    </UpdateCheckProvider>
                   </OnboardingProvider>
                 </OllamaDownloadProvider>
               </ConfigProvider>
