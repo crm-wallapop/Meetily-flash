@@ -13,9 +13,6 @@ use serde::{Deserialize, Serialize};
 /// Stored as JSON in the database and used for connecting to any OpenAI-compatible API server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomOpenAIConfig {
-    /// User-friendly name shown in the provider dropdown (e.g., "My Local LLM", "Company Server")
-    #[serde(rename = "displayName")]
-    pub display_name: String,
     /// Base URL of the OpenAI-compatible API endpoint (e.g., "http://localhost:8000/v1")
     pub endpoint: String,
     /// API key for authentication (optional if server doesn't require it)
