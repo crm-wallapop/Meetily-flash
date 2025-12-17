@@ -82,7 +82,6 @@ impl SettingsRepository {
         let api_key_column = match provider {
             "openai" => "openaiApiKey",
             "claude" => "anthropicApiKey",
-            "gemini" => "geminiApiKey",
             "ollama" => "ollamaApiKey",
             "groq" => "groqApiKey",
             "openrouter" => "openRouterApiKey",
@@ -123,7 +122,6 @@ impl SettingsRepository {
             "ollama" => "ollamaApiKey",
             "groq" => "groqApiKey",
             "claude" => "anthropicApiKey",
-            "gemini" => "geminiApiKey",
             "openrouter" => "openRouterApiKey",
             "builtin-ai" => return Ok(None), // No API key needed
             _ => {
@@ -250,7 +248,6 @@ impl SettingsRepository {
             "ollama" => "ollamaApiKey",
             "groq" => "groqApiKey",
             "claude" => "anthropicApiKey",
-            "gemini" => "geminiApiKey",
             "openrouter" => "openRouterApiKey",
             "builtin-ai" => return Ok(()), // No API key needed
             _ => {

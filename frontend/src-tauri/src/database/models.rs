@@ -83,9 +83,6 @@ pub struct Setting {
     #[sqlx(rename = "anthropicApiKey")]
     #[serde(rename = "anthropicApiKey")]
     pub anthropic_api_key: Option<String>,
-    #[sqlx(rename = "geminiApiKey")]
-    #[serde(rename = "geminiApiKey")]
-    pub gemini_api_key: Option<String>,
     #[sqlx(rename = "ollamaApiKey")]
     #[serde(rename = "ollamaApiKey")]
     pub ollama_api_key: Option<String>,

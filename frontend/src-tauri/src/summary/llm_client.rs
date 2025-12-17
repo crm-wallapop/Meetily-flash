@@ -63,69 +63,11 @@ pub struct ClaudeChatContent {
     pub text: String,
 }
 
-// Gemini-specific request structure
-#[derive(Debug, Serialize)]
-pub struct GeminiRequest {
-    pub contents: Vec<GeminiContent>,
-    #[serde(rename = "systemInstruction", skip_serializing_if = "Option::is_none")]
-    pub system_instruction: Option<GeminiSystemInstruction>,
-    #[serde(rename = "generationConfig", skip_serializing_if = "Option::is_none")]
-    pub generation_config: Option<GeminiGenerationConfig>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GeminiContent {
-    pub role: String,
-    pub parts: Vec<GeminiPart>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GeminiPart {
-    pub text: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GeminiSystemInstruction {
-    pub parts: Vec<GeminiPart>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GeminiGenerationConfig {
-    #[serde(rename = "maxOutputTokens", skip_serializing_if = "Option::is_none")]
-    pub max_output_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    #[serde(rename = "topP", skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
-}
-
-// Gemini-specific response structure
-#[derive(Deserialize, Debug)]
-pub struct GeminiResponse {
-    pub candidates: Vec<GeminiCandidate>,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct GeminiCandidate {
-    pub content: GeminiResponseContent,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct GeminiResponseContent {
-    pub parts: Vec<GeminiResponsePart>,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct GeminiResponsePart {
-    pub text: String,
-}
-
 /// LLM Provider enumeration for multi-provider support
 #[derive(Debug, Clone, PartialEq)]
 pub enum LLMProvider {
     OpenAI,
     Claude,
-    Gemini,
     Groq,
     Ollama,
     OpenRouter,
@@ -139,7 +81,6 @@ impl LLMProvider {
         match s.to_lowercase().as_str() {
             "openai" => Ok(Self::OpenAI),
             "claude" => Ok(Self::Claude),
-            "gemini" => Ok(Self::Gemini),
             "groq" => Ok(Self::Groq),
             "ollama" => Ok(Self::Ollama),
             "openrouter" => Ok(Self::OpenRouter),
@@ -207,19 +148,6 @@ pub async fn generate_summary(
         .map_err(|e| e.to_string());
     }
 
-    // Handle Gemini separately due to its different URL pattern (API key in query param)
-    if provider == &LLMProvider::Gemini {
-        return generate_with_gemini(
-            client,
-            model_name,
-            api_key,
-            system_prompt,
-            user_prompt,
-            cancellation_token,
-        )
-        .await;
-    }
-
     let (api_url, mut headers) = match provider {
         LLMProvider::OpenAI => (
             "https://api.openai.com/v1/chat/completions".to_string(),
@@ -266,9 +194,9 @@ pub async fn generate_summary(
             );
             ("https://api.anthropic.com/v1/messages".to_string(), header_map)
         }
-        LLMProvider::BuiltInAI | LLMProvider::Gemini => {
-            // These cases are handled earlier with early returns
-            unreachable!("BuiltInAI and Gemini are handled before this match statement")
+        LLMProvider::BuiltInAI => {
+            // This case is handled earlier with early returns
+            unreachable!("BuiltInAI is handled before this match statement")
         }
     };
 
@@ -409,120 +337,10 @@ fn provider_name(provider: &LLMProvider) -> &str {
     match provider {
         LLMProvider::OpenAI => "OpenAI",
         LLMProvider::Claude => "Claude",
-        LLMProvider::Gemini => "Gemini",
         LLMProvider::Groq => "Groq",
         LLMProvider::Ollama => "Ollama",
         LLMProvider::BuiltInAI => "Built-in AI",
         LLMProvider::OpenRouter => "OpenRouter",
         LLMProvider::CustomOpenAI => "Custom OpenAI",
     }
-}
-
-/// Generate summary using Google's Gemini API
-/// Gemini uses a different API pattern: model in URL path, API key as query param
-async fn generate_with_gemini(
-    client: &Client,
-    model_name: &str,
-    api_key: &str,
-    system_prompt: &str,
-    user_prompt: &str,
-    cancellation_token: Option<&CancellationToken>,
-) -> Result<String, String> {
-    // Gemini API URL format: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}
-    let api_url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        model_name, api_key
-    );
-
-    let mut headers = header::HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        "application/json"
-            .parse()
-            .map_err(|_| "Invalid content type".to_string())?,
-    );
-
-    // Build Gemini request body
-    let request_body = serde_json::json!(GeminiRequest {
-        contents: vec![GeminiContent {
-            role: "user".to_string(),
-            parts: vec![GeminiPart {
-                text: user_prompt.to_string(),
-            }],
-        }],
-        system_instruction: Some(GeminiSystemInstruction {
-            parts: vec![GeminiPart {
-                text: system_prompt.to_string(),
-            }],
-        }),
-        generation_config: Some(GeminiGenerationConfig {
-            max_output_tokens: Some(2048),
-            temperature: None,
-            top_p: None,
-        }),
-    });
-
-    info!("🐞 LLM Request to Gemini: model={}", model_name);
-
-    // Send request with timeout and cancellation support
-    let request_future = client
-        .post(&api_url)
-        .headers(headers)
-        .json(&request_body)
-        .timeout(REQUEST_TIMEOUT_DURATION)
-        .send();
-
-    let response = if let Some(token) = cancellation_token {
-        tokio::select! {
-            result = request_future => {
-                result.map_err(|e| {
-                    if e.is_timeout() {
-                        "Gemini request timed out after 300 seconds".to_string()
-                    } else {
-                        format!("Failed to send request to Gemini: {}", e)
-                    }
-                })?
-            }
-            _ = token.cancelled() => {
-                return Err("Summary generation was cancelled".to_string());
-            }
-        }
-    } else {
-        request_future.await.map_err(|e| {
-            if e.is_timeout() {
-                "Gemini request timed out after 300 seconds".to_string()
-            } else {
-                format!("Failed to send request to Gemini: {}", e)
-            }
-        })?
-    };
-
-    if !response.status().is_success() {
-        let error_body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(format!("Gemini API request failed: {}", error_body));
-    }
-
-    // Parse Gemini response
-    let gemini_response = response
-        .json::<GeminiResponse>()
-        .await
-        .map_err(|e| format!("Failed to parse Gemini response: {}", e))?;
-
-    info!("🐞 LLM Response received from Gemini");
-
-    let content = gemini_response
-        .candidates
-        .get(0)
-        .ok_or("No candidates in Gemini response")?
-        .content
-        .parts
-        .get(0)
-        .ok_or("No parts in Gemini response")?
-        .text
-        .trim();
-
-    Ok(content.to_string())
 }
