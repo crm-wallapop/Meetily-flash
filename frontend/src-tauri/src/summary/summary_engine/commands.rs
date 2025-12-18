@@ -118,8 +118,8 @@ pub async fn builtin_ai_download_model<R: Runtime>(
             .ok_or_else(|| "Model manager not initialized".to_string())?
             .clone() // Clone the Arc, not the ModelManager
     };
-
-    // Create progress callback that emits Tauri events with detailed info
+    // IMPORTANT: Only emit "downloading" status here, never "completed"
+    // Completion event is emitted AFTER download task fully finishes (validation, etc.)
     let app_clone = app.clone();
     let model_name_clone = model_name.clone();
     let progress_callback = Box::new(move |progress: DownloadProgress| {
@@ -131,18 +131,53 @@ pub async fn builtin_ai_download_model<R: Runtime>(
                 "downloaded_mb": progress.downloaded_mb,
                 "total_mb": progress.total_mb,
                 "speed_mbps": progress.speed_mbps,
-                "status": if progress.percent == 100 { "completed" } else { "downloading" }
+                "status": "downloading"  // Always "downloading", never "completed" from progress callback
             }),
         );
     });
 
-    manager
+    match manager
         .download_model_detailed(&model_name, Some(progress_callback))
         .await
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(_) => {
+            // Download task completed successfully (validation passed, status set to Available)
+            let _ = app.emit(
+                "builtin-ai-download-progress",
+                serde_json::json!({
+                    "model": model_name,
+                    "progress": 100,
+                    "downloaded_mb": 0,  // Not used by completion handler
+                    "total_mb": 0,       // Not used by completion handler
+                    "speed_mbps": 0,     // Not used by completion handler
+                    "status": "completed"
+                }),
+            );
+            Ok(())
+        },
+        Err(e) => {
+            let error_msg = e.to_string();
 
-
-    Ok(())
+            // Check if this is a cancellation error (marked with "CANCELLED:" prefix)
+            // Don't emit error event for cancellations - cancel command already emits cancelled event
+            if !error_msg.starts_with("CANCELLED:") {
+                // Emit error via progress event for frontend to display (only for real errors)
+                let _ = app.emit(
+                    "builtin-ai-download-progress",
+                    serde_json::json!({
+                        "model": model_name,
+                        "progress": 0,
+                        "downloaded_mb": 0,
+                        "total_mb": 0,
+                        "speed_mbps": 0,
+                        "status": "error",
+                        "error": error_msg
+                    }),
+                );
+            }
+            Err(error_msg)
+        }
+    }
 }
 
 /// Cancel an ongoing model download

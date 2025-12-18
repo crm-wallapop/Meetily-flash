@@ -8,6 +8,7 @@ use tokio::fs;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use tokio::time::timeout;
 
 /// Quantization type for Parakeet models
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -730,7 +731,7 @@ impl ParakeetEngine {
             let mut stream = response.bytes_stream();
             let mut file_downloaded = if resuming { existing_size } else { 0u64 };
 
-            while let Some(chunk_result) = stream.next().await {
+            loop {
                 // Check for cancellation before processing chunk
                 {
                     let cancel_flag = self.cancel_download_flag.read().await;
@@ -746,15 +747,44 @@ impl ParakeetEngine {
                     }
                 }
 
-                let chunk = match chunk_result {
-                    Ok(c) => c,
-                    Err(e) => {
-                        // Flush partial file for potential resume
+                // Add per-chunk timeout (30 seconds) to detect stalled connections
+                let next_result = timeout(Duration::from_secs(30), stream.next()).await;
+
+                let chunk = match next_result {
+                    // Timeout - no data received for 30 seconds
+                    Err(_) => {
+                        log::warn!("Download timeout for {}: no data received for 30 seconds", model_name);
                         let _ = writer.flush().await;
-                        // Remove from active downloads on error
                         let mut active = self.active_downloads.write().await;
                         active.remove(model_name);
-                        return Err(anyhow!("Failed to read chunk: {}", e));
+                        return Err(anyhow!("Download timeout - No data received for 30 seconds"));
+                    },
+                    // Stream ended
+                    Ok(None) => break,
+                    // Got chunk result
+                    Ok(Some(chunk_result)) => {
+                        match chunk_result {
+                            Ok(c) => c,
+                            // Detect error type for better user feedback
+                            Err(e) => {
+                                log::error!("Download error for {}: {:?}", model_name, e);
+                                let _ = writer.flush().await;
+                                let mut active = self.active_downloads.write().await;
+                                active.remove(model_name);
+
+                                let error_msg = if e.is_timeout() {
+                                    "Connection timeout - Check your internet"
+                                } else if e.is_connect() {
+                                    "Connection failed - Check your internet"
+                                } else if e.is_body() {
+                                    "Stream interrupted - Network unstable"
+                                } else {
+                                    "Download error"
+                                };
+
+                                return Err(anyhow!("{}: {}", error_msg, e));
+                            }
+                        }
                     }
                 };
 

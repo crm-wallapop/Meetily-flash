@@ -12,31 +12,65 @@ interface DownloadProgress {
   downloadedMb: number;
   totalMb: number;
   speedMbps: number;
-  status: 'downloading' | 'completed' | 'error';
+  status: 'downloading' | 'completed' | 'error' | 'cancelled';
   error?: string;
+}
+
+// Categorize error messages for better user experience
+function categorizeError(error: string): string {
+  const lowerError = error.toLowerCase();
+
+  if (lowerError.includes('network') ||
+    lowerError.includes('connection') ||
+    lowerError.includes('timeout') ||
+    lowerError.includes('failed to start download')) {
+    return 'Network error - Check your internet connection';
+  }
+
+  if (lowerError.includes('status:') || lowerError.includes('http')) {
+    return 'Server error - Download temporarily unavailable';
+  }
+
+  if (lowerError.includes('disk') ||
+    lowerError.includes('write') ||
+    lowerError.includes('file')) {
+    return 'Storage error - Check available disk space';
+  }
+
+  if (lowerError.includes('invalid') || lowerError.includes('validation')) {
+    return 'File validation failed - Please retry download';
+  }
+
+  // Fallback to original error
+  return error;
 }
 
 // Custom toast component for download progress
 function DownloadToastContent({
   download,
+  onDismiss,
 }: {
   download: DownloadProgress;
+  onDismiss?: () => void;
 }) {
   const isComplete = download.status === 'completed';
   const hasError = download.status === 'error';
+  const isCancelled = download.status === 'cancelled';
 
   return (
-    <div className="flex items-start gap-3 w-full max-w-sm bg-white rounded-lg shadow-lg border border-gray-200 p-4">
+    <div className="flex items-center gap-3 w-full max-w-sm bg-white rounded-lg shadow-lg border border-gray-200 p-3 relative">
+
       {/* Icon */}
-      <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${
-        isComplete ? 'bg-green-100' : hasError ? 'bg-red-100' : 'bg-gray-100'
-      }`}>
+      <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${isComplete ? 'bg-green-100' : hasError ? 'bg-red-100' : isCancelled ? 'bg-gray-100' : 'bg-blue-100'
+        }`}>
         {isComplete ? (
           <Check className="w-4 h-4 text-green-600" />
         ) : hasError ? (
           <X className="w-4 h-4 text-red-600" />
+        ) : isCancelled ? (
+          <X className="w-4 h-4 text-gray-600" />
         ) : (
-          <ArrowBigDownDash className="w-4 h-4 text-gray-900 animate-bounce" />
+          <ArrowBigDownDash className="w-4 h-4 text-gray-600 animate-bounce" />
         )}
       </div>
 
@@ -52,6 +86,8 @@ function DownloadToastContent({
           <p className="text-xs text-red-600">{download.error || 'Download failed'}</p>
         ) : isComplete ? (
           <p className="text-xs text-green-600">Download complete</p>
+        ) : isCancelled ? (
+          <p className="text-xs text-gray-600">Download cancelled</p>
         ) : (
           <>
             {/* Progress bar */}
@@ -106,36 +142,53 @@ export function useDownloadProgressToast() {
     });
   }, []);
 
+  const cleanupDownload = useCallback((modelName: string, delay: number = 4000) => {
+    // Remove download from map after delay (allows toast to show and auto-dismiss)
+    setTimeout(() => {
+      setDownloads((prev) => {
+        const updated = new Map(prev);
+        updated.delete(modelName);
+        return updated;
+      });
+    }, delay);
+  }, []);
+
   const showDownloadToast = useCallback((download: DownloadProgress) => {
     const toastId = `download-${download.modelName}`;
 
-    if (download.status === 'completed') {
-      toast.custom(
-        (t) => (
-          <DownloadToastContent
-            download={download}
-          />
-        ),
-        {
-          position: 'top-right',
-          id: toastId,
-          duration: 3000, // Auto-dismiss completed toasts after 3s
-        }
-      );
-    } else {
-      toast.custom(
-        (t) => (
-          <DownloadToastContent
-            download={download}
-          />
-        ),
-        {
-          position: 'top-right',
-          id: toastId,
-          duration: Infinity, // Keep showing until dismissed or completed
-        }
-      );
-    }
+    // Determine duration based on status
+    const getDuration = () => {
+      switch (download.status) {
+        case 'completed': return 3000;      // 3 seconds
+        case 'cancelled': return 5000;      // 5 seconds
+        case 'error': return 10000;         // 10 seconds
+        case 'downloading': return Infinity; // Manual dismiss only
+      }
+    };
+
+    // Dismiss handler
+    const dismissToast = () => {
+      toast.dismiss(toastId);
+      setDismissedModels(prev => {
+        const next = new Set(prev);
+        next.add(download.modelName);
+        return next;
+      });
+    };
+
+    toast.custom(
+      (t) => (
+        <DownloadToastContent
+          download={download}
+          onDismiss={dismissToast}
+        />
+      ),
+      {
+        position: 'top-right',
+        id: toastId,
+        duration: getDuration(),
+      }
+    );
   }, []);
 
   // Effect to handle toast visibility based on dismissed state
@@ -150,12 +203,12 @@ export function useDownloadProgressToast() {
       // (Optional: remove from dismissed set if you want to force show completion)
       if (download.status === 'completed' || download.status === 'error') {
         if (dismissedModels.has(download.modelName)) {
-           // Remove from dismissed so we can show the completion/error toast
-           setDismissedModels(prev => {
-             const next = new Set(prev);
-             next.delete(download.modelName);
-             return next;
-           });
+          // Remove from dismissed so we can show the completion/error toast
+          setDismissedModels(prev => {
+            const next = new Set(prev);
+            next.delete(download.modelName);
+            return next;
+          });
         }
       }
 
@@ -203,7 +256,8 @@ export function useDownloadProgressToast() {
           status: 'completed',
         };
         updateDownload(modelName, downloadData);
-        // Removed direct showDownloadToast call here, handled by effect
+        // Clean up after 4 seconds (completion toast duration is 3s + 1s buffer)
+        cleanupDownload(modelName, 4000);
       }
     );
 
@@ -219,10 +273,11 @@ export function useDownloadProgressToast() {
           totalMb: 670,
           speedMbps: 0,
           status: 'error',
-          error,
+          error: categorizeError(error),
         };
         updateDownload(modelName, downloadData);
-        // Removed direct showDownloadToast call here, handled by effect
+        // Clean up after 11 seconds (error toast duration is 10s + 1s buffer)
+        cleanupDownload(modelName, 11000);
       }
     );
 
@@ -231,7 +286,7 @@ export function useDownloadProgressToast() {
       unlistenComplete.then((fn) => fn());
       unlistenError.then((fn) => fn());
     };
-  }, [updateDownload]); // Removed showDownloadToast dependency
+  }, [updateDownload, cleanupDownload]);
 
   // Listen to Built-in AI (Gemma) download events
   useEffect(() => {
@@ -242,27 +297,43 @@ export function useDownloadProgressToast() {
       total_mb?: number;
       speed_mbps?: number;
       status: string;
+      error?: string;
     }>('builtin-ai-download-progress', (event) => {
-      const { model, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
+      const { model, progress, downloaded_mb, total_mb, speed_mbps, status, error } = event.payload;
 
       const downloadData: DownloadProgress = {
         modelName: model,
         displayName: `Summary Model (${model})`,
-        progress,
+        progress: progress ?? 0,
         downloadedMb: downloaded_mb ?? 0,
         totalMb: total_mb ?? (model.includes('4b') ? 2500 : 806),
         speedMbps: speed_mbps ?? 0,
-        status: status === 'completed' || progress >= 100 ? 'completed' : 'downloading',
+        status: status === 'completed' || progress >= 100
+          ? 'completed'
+          : status === 'cancelled'
+            ? 'cancelled'
+            : status === 'error'
+              ? 'error'
+              : 'downloading',
+        error: status === 'error' ? categorizeError(error || 'Download failed') : undefined,
       };
 
       updateDownload(model, downloadData);
-      // Removed direct showDownloadToast call here, handled by effect
+
+      // Clean up finished downloads after delay to prevent endless toasts
+      if (downloadData.status === 'completed') {
+        cleanupDownload(model, 4000);  // 3s toast + 1s buffer
+      } else if (downloadData.status === 'error') {
+        cleanupDownload(model, 11000); // 10s toast + 1s buffer
+      } else if (downloadData.status === 'cancelled') {
+        cleanupDownload(model, 6000);  // 5s toast + 1s buffer
+      }
     });
 
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [updateDownload]); // Removed showDownloadToast dependency
+  }, [updateDownload, cleanupDownload]);
 
   return { downloads };
 }

@@ -181,19 +181,6 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
       });
       unlisteners.push(unlistenWhisper);
 
-      // Listen for Parakeet model download complete
-      const unlistenParakeet = await listen<{ modelName: string }>('parakeet-model-download-complete', (event) => {
-        const { modelName } = event.payload;
-        console.log('[useModalState] Parakeet model download complete:', modelName);
-
-        // Auto-close modal if the downloaded model matches the selected one
-        if (transcriptModelConfig?.provider === 'parakeet' && transcriptModelConfig?.model === modelName) {
-          toast.success('Model ready! Closing window...', { duration: 1500 });
-          setTimeout(() => hideModal('modelSelector'), 1500);
-        }
-      });
-      unlisteners.push(unlistenParakeet);
-
       return () => {
         unlisteners.forEach(unsub => unsub());
       };

@@ -12,6 +12,7 @@ use std::time::Duration;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::RwLock;
+use tokio::time::timeout;
 
 use super::models::{get_available_models, get_model_by_name};
 
@@ -555,7 +556,7 @@ impl ModelManager {
         use futures_util::StreamExt;
         let mut stream = response.bytes_stream();
 
-        while let Some(chunk_result) = stream.next().await {
+        loop {
             // Check for cancellation
             {
                 let cancel_flag = self.cancel_download_flag.read().await;
@@ -578,16 +579,71 @@ impl ModelManager {
                         }
                     }
 
-                    return Err(anyhow!("Download cancelled"));
+                    // Use special marker prefix to distinguish cancellation from other errors
+                    return Err(anyhow!("CANCELLED: Download cancelled by user"));
                 }
             }
 
-            let chunk = match chunk_result {
-                Ok(c) => c,
-                Err(e) => {
-                    // Flush buffer before returning error to preserve bytes for resume
+            // Add per-chunk timeout (30 seconds) to detect stalled connections
+            let next_result = timeout(Duration::from_secs(30), stream.next()).await;
+
+            let chunk = match next_result {
+                // Timeout - no data received for 30 seconds
+                Err(_) => {
+                    log::warn!("Download timeout for {}: no data received for 30 seconds", model_name);
                     let _ = writer.flush().await;
-                    return Err(anyhow!("Error reading chunk: {}", e));
+
+                    // Cleanup: Remove from active downloads
+                    let mut active = self.active_downloads.write().await;
+                    active.remove(model_name);
+
+                    // Set model status to Error (NOT NotDownloaded) so UI can show retry button
+                    {
+                        let mut models = self.available_models.write().await;
+                        if let Some(model_info) = models.get_mut(model_name) {
+                            model_info.status = ModelStatus::Error("Download timeout - No data received for 30 seconds".to_string());
+                        }
+                    }
+
+                    return Err(anyhow!("Download timeout - No data received for 30 seconds"));
+                },
+                // Stream ended
+                Ok(None) => break,
+                // Got chunk result
+                Ok(Some(chunk_result)) => {
+                    match chunk_result {
+                        Ok(c) => c,
+                        // Detect error type for better user feedback
+                        Err(e) => {
+                            log::error!("Download error for {}: {:?}", model_name, e);
+                            let _ = writer.flush().await;
+
+                            // Cleanup: Remove from active downloads
+                            let mut active = self.active_downloads.write().await;
+                            active.remove(model_name);
+
+                            // Categorize error for user-friendly message
+                            let error_msg = if e.is_timeout() {
+                                "Connection timeout - Check your internet"
+                            } else if e.is_connect() {
+                                "Connection failed - Check your internet"
+                            } else if e.is_body() {
+                                "Stream interrupted - Network unstable"
+                            } else {
+                                "Download error"
+                            };
+
+                            // Set model status to Error (NOT NotDownloaded) so UI can show retry button
+                            {
+                                let mut models = self.available_models.write().await;
+                                if let Some(model_info) = models.get_mut(model_name) {
+                                    model_info.status = ModelStatus::Error(error_msg.to_string());
+                                }
+                            }
+
+                            return Err(anyhow!("{}: {}", error_msg, e));
+                        }
+                    }
                 }
             };
             let chunk_len = chunk.len() as u64;
