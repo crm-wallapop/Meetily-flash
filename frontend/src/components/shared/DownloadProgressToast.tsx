@@ -61,7 +61,7 @@ function DownloadToastContent({
     <div className="flex items-center gap-3 w-full max-w-sm bg-white rounded-lg shadow-lg border border-gray-200 p-3 relative">
 
       {/* Icon */}
-      <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${isComplete ? 'bg-green-100' : hasError ? 'bg-red-100' : isCancelled ? 'bg-gray-100' : 'bg-blue-100'
+      <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${isComplete ? 'bg-green-100' : hasError ? 'bg-red-100' : isCancelled ? 'bg-gray-100' : 'bg-gray-100'
         }`}>
         {isComplete ? (
           <Check className="w-4 h-4 text-green-600" />
@@ -70,7 +70,7 @@ function DownloadToastContent({
         ) : isCancelled ? (
           <X className="w-4 h-4 text-gray-600" />
         ) : (
-          <ArrowBigDownDash className="w-4 h-4 text-gray-600 animate-bounce" />
+          <ArrowBigDownDash className="size-5 text-gray-600 " />
         )}
       </div>
 

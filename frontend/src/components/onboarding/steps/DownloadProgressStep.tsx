@@ -202,7 +202,7 @@ export function DownloadProgressStep() {
   const handleContinue = async () => {
     // Check if downloads are complete for toast notification
     const downloadsComplete = parakeetState.status === 'completed' &&
-                               gemmaState.status === 'completed';
+      gemmaState.status === 'completed';
 
     // Show toast if downloads still in progress
     if (!downloadsComplete) {
@@ -306,7 +306,7 @@ export function DownloadProgressStep() {
   return (
     <OnboardingContainer
       title="Getting things ready"
-      description="You can start using Meetily while setup finishes in the background."
+      description="You can start using Meetily after downloading the Transcription Engine."
       step={3}
       totalSteps={isMac ? 4 : 3}
     >
@@ -330,7 +330,7 @@ export function DownloadProgressStep() {
 
         {/* Info Message - Only show when Parakeet is downloaded */}
         <AnimatePresence>
-          {parakeetDownloaded && (
+          {parakeetDownloaded && !summaryModelDownloaded && (
             <motion.div
               initial={{ opacity: 0, y: -10 }}
               animate={{ opacity: 1, y: 0 }}
@@ -343,7 +343,7 @@ export function DownloadProgressStep() {
                 <div>
                   <p className="font-medium">You can continue while this finishes</p>
                   <p className="text-gray-700 mt-1">
-                    Download will continue in the background. Recording will be available once <span className="font-medium">Transcription Engine</span> is ready.
+                    Download will continue in the background.
                   </p>
                 </div>
               </div>
@@ -358,11 +358,8 @@ export function DownloadProgressStep() {
             disabled={!parakeetDownloaded || isCompleting}
             className="w-full h-11 bg-gray-900 hover:bg-gray-800 text-white disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {isCompleting ? (
-              <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Finishing...
-              </>
+            {(isCompleting || !parakeetDownloaded) ? (
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
             ) : (
               'Continue'
             )}
