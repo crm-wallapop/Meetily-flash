@@ -255,7 +255,14 @@ impl RecordingManager {
     pub async fn stop_streams_and_force_flush(&mut self) -> Result<()> {
         info!("🚀 Stopping recording streams with IMMEDIATE pipeline flush");
 
-        // Stop recording state first
+        // CRITICAL: Stop device monitor FIRST to prevent continuous WASAPI polling on Windows
+        // This fixes the slow shutdown issue where device enumeration runs for 90+ seconds
+        if let Some(ref mut monitor) = self.device_monitor {
+            info!("Stopping device monitor first...");
+            monitor.stop_monitoring().await;
+        }
+
+        // Stop recording state first - this clears device references
         self.state.stop_recording();
 
         // Stop audio streams immediately
