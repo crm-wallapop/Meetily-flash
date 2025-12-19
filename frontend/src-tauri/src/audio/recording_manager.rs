@@ -269,6 +269,10 @@ impl RecordingManager {
             error!("Error during force flush: {}", e);
         }
 
+        // CRITICAL: Full cleanup to release all Arc references and resources
+        // This ensures microphone is released even if Drop is delayed
+        self.state.cleanup();
+
         info!("✅ Recording streams stopped with immediate flush completed");
         Ok(())
     }

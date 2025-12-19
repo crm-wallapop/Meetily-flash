@@ -42,6 +42,9 @@ static IS_RECORDING: AtomicBool = AtomicBool::new(false);
 static RECORDING_MANAGER: Mutex<Option<RecordingManager>> = Mutex::new(None);
 static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
+// Listener ID for proper cleanup - prevents microphone from staying active after recording stops
+static TRANSCRIPT_LISTENER_ID: Mutex<Option<tauri::EventId>> = Mutex::new(None);
+
 // ============================================================================
 // PUBLIC TYPES
 // ============================================================================
@@ -253,11 +256,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // CRITICAL: Listen for transcript-update events and save to recording manager
     // This enables transcript history persistence for page reload sync
-    let app_for_listener = app.clone();
-    tokio::spawn(async move {
+    // Store listener ID for cleanup during stop_recording to ensure microphone is released
+    {
         use tauri::Listener;
-
-        app_for_listener.listen("transcript-update", move |event: tauri::Event| {
+        let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
             // Parse the transcript update from the event payload
             if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
                 // Create structured transcript segment
@@ -280,9 +282,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
                 }
             }
         });
-
+        let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
+        *global_listener = Some(listener_id);
         info!("✅ Transcript-update event listener registered for history persistence");
-    });
+    }
 
     // Emit success event
     app.emit("recording-started", serde_json::json!({
@@ -421,11 +424,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // CRITICAL: Listen for transcript-update events and save to recording manager
     // This enables transcript history persistence for page reload sync
-    let app_for_listener = app.clone();
-    tokio::spawn(async move {
+    // Store listener ID for cleanup during stop_recording to ensure microphone is released
+    {
         use tauri::Listener;
-
-        app_for_listener.listen("transcript-update", move |event: tauri::Event| {
+        let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
             // Parse the transcript update from the event payload
             if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
                 // Create structured transcript segment
@@ -448,9 +450,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 }
             }
         });
-
+        let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
+        *global_listener = Some(listener_id);
         info!("✅ Transcript-update event listener registered for history persistence");
-    });
+    }
 
     // Emit success event
     app.emit("recording-started", serde_json::json!({
@@ -522,6 +525,16 @@ pub async fn stop_recording<R: Runtime>(
         Err(e) => {
             error!("❌ Failed to stop audio streams: {}", e);
             return Err(format!("Failed to stop audio streams: {}", e));
+        }
+    }
+
+    // Step 1.5: Clean up transcript listener to release microphone
+    // Unlisten transcript-update event to prevent lingering references
+    {
+        use tauri::Listener;
+        if let Some(listener_id) = TRANSCRIPT_LISTENER_ID.lock().unwrap().take() {
+            app.unlisten(listener_id);
+            info!("✅ Transcript-update listener removed");
         }
     }
 
