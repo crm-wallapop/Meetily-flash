@@ -6,7 +6,7 @@ import Sidebar from '@/components/Sidebar'
 import { SidebarProvider } from '@/components/Sidebar/SidebarProvider'
 import MainContent from '@/components/MainContent'
 import AnalyticsProvider from '@/components/AnalyticsProvider'
-import { Toaster } from 'sonner'
+import { Toaster, toast } from 'sonner'
 import "sonner/dist/styles.css"
 import { useState, useEffect } from 'react'
 import { listen } from '@tauri-apps/api/event'
@@ -18,6 +18,7 @@ import { TranscriptProvider } from '@/contexts/TranscriptContext'
 import { ConfigProvider } from '@/contexts/ConfigContext'
 import { OnboardingProvider } from '@/contexts/OnboardingContext'
 import { OnboardingFlow } from '@/components/onboarding'
+import { DownloadProgressToastProvider } from '@/components/shared/DownloadProgressToast'
 import { UpdateCheckProvider } from '@/components/UpdateCheckProvider'
 
 const sourceSans3 = Source_Sans_3({
@@ -57,6 +58,26 @@ export default function RootLayout({
         setOnboardingCompleted(false)
       })
   }, [])
+  useEffect(() => {
+    // Listen for tray recording toggle request
+    const unlisten = listen('request-recording-toggle', () => {
+      console.log('[Layout] Received request-recording-toggle from tray');
+      
+      if (showOnboarding) {
+        toast.error("Please complete setup first", {
+          description: "You need to finish onboarding before you can start recording."
+        });
+      } else {
+        // If in main app, forward to useRecordingStart via window event
+        console.log('[Layout] Forwarding to start-recording-from-sidebar');
+        window.dispatchEvent(new CustomEvent('start-recording-from-sidebar'));
+      }
+    });
+
+    return () => {
+      unlisten.then(fn => fn());
+    };
+  }, [showOnboarding]);
 
   const handleOnboardingComplete = () => {
     console.log('[Layout] Onboarding completed, reloading app')
@@ -78,6 +99,9 @@ export default function RootLayout({
                     <UpdateCheckProvider>
                       <SidebarProvider>
                         <TooltipProvider>
+                          {/* Download progress toast provider - listens for background downloads */}
+                          <DownloadProgressToastProvider />
+
                           {/* Show onboarding or main app */}
                           {showOnboarding ? (
                             <OnboardingFlow onComplete={handleOnboardingComplete} />
@@ -91,6 +115,7 @@ export default function RootLayout({
                       </SidebarProvider>
                     </UpdateCheckProvider>
                   </OnboardingProvider>
+
                 </OllamaDownloadProvider>
               </ConfigProvider>
             </TranscriptProvider>

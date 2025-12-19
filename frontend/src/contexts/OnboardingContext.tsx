@@ -42,6 +42,7 @@ interface OnboardingContextType {
   summaryModelProgressInfo: SummaryModelProgressInfo;
   selectedSummaryModel: string;
   databaseExists: boolean;
+  isBackgroundDownloading: boolean;
   // Permissions
   permissions: OnboardingPermissions;
   permissionsSkipped: boolean;
@@ -57,6 +58,7 @@ interface OnboardingContextType {
   setPermissionStatus: (permission: keyof OnboardingPermissions, status: PermissionStatus) => void;
   setPermissionsSkipped: (skipped: boolean) => void;
   completeOnboarding: () => Promise<void>;
+  startBackgroundDownloads: (includeGemma: boolean) => Promise<void>;
 }
 
 const OnboardingContext = createContext<OnboardingContextType | undefined>(undefined);
@@ -82,6 +84,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   });
   const [selectedSummaryModel, setSelectedSummaryModel] = useState<string>('gemma3:1b');
   const [databaseExists, setDatabaseExists] = useState(false);
+  const [isBackgroundDownloading, setIsBackgroundDownloading] = useState(false);
 
   // Permissions state
   const [permissions, setPermissions] = useState<OnboardingPermissions>({
@@ -93,18 +96,95 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
 
   const saveTimeoutRef = useRef<NodeJS.Timeout>();
 
-  // Load status on mount
+  // Load status on mount and initialize database
   useEffect(() => {
     loadOnboardingStatus();
     checkDatabaseStatus();
+    initializeDatabaseInBackground();
+
+    // Fetch and set recommended model
+    const fetchRecommendation = async () => {
+      try {
+        const recommendedModel = await invoke<string>('builtin_ai_get_recommended_model');
+        setSelectedSummaryModel(recommendedModel);
+        console.log('[OnboardingContext] Set recommended model:', recommendedModel);
+      } catch (error) {
+        console.error('[OnboardingContext] Failed to get recommended model:', error);
+        // Keep default gemma3:1b
+      }
+    };
+    fetchRecommendation();
   }, []);
+
+  // Initialize database silently in background (moved from SetupOverviewStep)
+  const initializeDatabaseInBackground = async () => {
+    try {
+      console.log('[OnboardingContext] Starting background database initialization');
+      const isFirstLaunch = await invoke<boolean>('check_first_launch');
+
+      if (!isFirstLaunch) {
+        console.log('[OnboardingContext] Database exists, skipping initialization');
+        setDatabaseExists(true);
+        return;
+      }
+
+      // First launch - attempt auto-detection and import
+      await performAutoDetection();
+    } catch (error) {
+      console.error('[OnboardingContext] Database initialization failed:', error);
+      // Don't throw - database init failure shouldn't block onboarding
+    }
+  };
+
+  const performAutoDetection = async () => {
+    // Check Homebrew (macOS only)
+    if (typeof navigator !== 'undefined' && navigator.platform?.toLowerCase().includes('mac')) {
+      const homebrewDbPath = '/usr/local/var/meetily/meeting_minutes.db';
+      try {
+        const homebrewCheck = await invoke<{ exists: boolean; size: number } | null>(
+          'check_homebrew_database',
+          { path: homebrewDbPath }
+        );
+
+        if (homebrewCheck?.exists) {
+          console.log('[OnboardingContext] Found Homebrew database, importing');
+          await invoke('import_and_initialize_database', { legacyDbPath: homebrewDbPath });
+          setDatabaseExists(true);
+          return;
+        }
+      } catch (e) {
+        console.log('[OnboardingContext] Homebrew check failed, continuing:', e);
+      }
+    }
+
+    // Check default legacy database location
+    try {
+      const legacyPath = await invoke<string | null>('check_default_legacy_database');
+      if (legacyPath) {
+        console.log('[OnboardingContext] Found legacy database, importing');
+        await invoke('import_and_initialize_database', { legacyDbPath: legacyPath });
+        setDatabaseExists(true);
+        return;
+      }
+    } catch (e) {
+      console.log('[OnboardingContext] Legacy check failed, continuing:', e);
+    }
+
+    // No legacy database found - initialize fresh
+    console.log('[OnboardingContext] No legacy database found, initializing fresh');
+    await invoke('initialize_fresh_database');
+    setDatabaseExists(true);
+  };
+
+  const isCompletingRef = useRef(false);
 
   // Auto-save on state change (debounced)
   useEffect(() => {
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
 
     // Don't auto-save if completed (to avoid overwriting completion status)
-    if (completed) return;
+    // Also don't auto-save if we are currently in the process of completing
+    if (completed || isCompletingRef.current) return;
 
     saveTimeoutRef.current = setTimeout(() => {
       saveOnboardingStatus();
@@ -169,7 +249,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
       unlistenComplete.then(fn => fn());
       unlistenError.then(fn => fn());
     };
-  }, []);
+  }, [selectedSummaryModel]);
 
   // Listen to summary model (Built-in AI) download progress
   useEffect(() => {
@@ -231,6 +311,9 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         setSummaryModelDownloaded(verifiedStatus.summaryModelDownloaded);
 
         console.log('[OnboardingContext] Verified status:', verifiedStatus);
+
+        // Check if any downloads are active to restore isBackgroundDownloading state
+        await checkActiveDownloads();
       }
     } catch (error) {
       console.error('[OnboardingContext] Failed to load onboarding status:', error);
@@ -253,6 +336,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     }
 
     // Verify Summary model exists on disk - check if ANY model is available
+    // Onboarding always uses builtin-ai (local models)
     try {
       const availableModel = await invoke<string | null>('builtin_ai_get_available_summary_model');
       summaryModelDownloaded = !!availableModel;
@@ -263,33 +347,17 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     }
 
     // Determine the correct step based on verified status
-    // Step 1: Welcome, Step 2: Setup, Step 3: Parakeet, Step 4: Summary, Step 5: Complete, Step 6: Permissions
+    // New simplified flow: Step 1: Welcome, Step 2: Setup Overview, Step 3: Download Progress, Step 4: Permissions (macOS)
     let currentStep = savedStatus.current_step;
     let completed = savedStatus.completed;
 
-    // If we're past Parakeet step (3) but Parakeet isn't actually downloaded, go back
-    if (currentStep > 3 && !parakeetDownloaded) {
-      console.log('[OnboardingContext] Parakeet missing, resetting to step 3');
-      currentStep = 3;
-      completed = false;
-    }
-    // If we're past Summary step (4) but Summary isn't actually downloaded, go back
-    else if (currentStep > 4 && !summaryModelDownloaded) {
-      console.log('[OnboardingContext] Summary model missing, resetting to step 4');
-      currentStep = 4;
-      completed = false;
-    }
-    // If marked as completed but models are missing, un-complete
-    else if (completed && (!parakeetDownloaded || !summaryModelDownloaded)) {
-      console.log('[OnboardingContext] Marked complete but models missing, un-completing');
-      completed = false;
-      if (!parakeetDownloaded) {
-        currentStep = 3;
-      } else if (!summaryModelDownloaded) {
-        currentStep = 4;
-      }
+    // Clamp step to new max (4)
+    if (currentStep > 4) {
+      currentStep = 3; // Go to download progress step
     }
 
+    // Trust the completed status - don't revert based on model downloads
+    // Downloads continue in background; user stays in main app regardless
     return {
       currentStep,
       completed,
@@ -299,6 +367,14 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   };
 
   const saveOnboardingStatus = async () => {
+    // Safety check: if we are in the process of completing, DO NOT save
+    // This prevents a race condition where a download completion event triggers a save
+    // that overwrites the "completed" status set by completeOnboarding
+    if (isCompletingRef.current) {
+      console.log('[OnboardingContext] Skipping saveOnboardingStatus because completion is in progress');
+      return;
+    }
+
     try {
       await invoke('save_onboarding_status_cmd', {
         status: {
@@ -319,15 +395,74 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
 
   const completeOnboarding = async () => {
     try {
-      // Pass the selected summary model to backend to save in database
+      // Set completion flag to prevent race conditions with auto-save
+      isCompletingRef.current = true;
+
+      // Clear any pending auto-saves
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = undefined;
+      }
+
+      // Onboarding always uses builtin-ai with selected model
       await invoke('complete_onboarding', {
-        summaryModel: selectedSummaryModel,
+        model: selectedSummaryModel,
       });
       setCompleted(true);
       console.log('[OnboardingContext] Onboarding completed with model:', selectedSummaryModel);
+
+      // Reset the flag so subsequent state updates can be saved
+      isCompletingRef.current = false;
     } catch (error) {
       console.error('[OnboardingContext] Failed to complete onboarding:', error);
-      throw error; // Re-throw so CompletionStep can handle it
+      isCompletingRef.current = false; // Reset flag on error
+      throw error; // Re-throw so PermissionsStep can handle it
+    }
+  };
+
+  // Start background downloads for models (parallel - Parakeet first, then Gemma immediately)
+  const startBackgroundDownloads = async (includeGemma: boolean) => {
+    console.log('[OnboardingContext] Starting background downloads, includeGemma:', includeGemma);
+    setIsBackgroundDownloading(true);
+
+    try {
+      // Start Parakeet download first (speech recognition - always required)
+      if (!parakeetDownloaded) {
+        console.log('[OnboardingContext] Starting Parakeet download');
+        invoke('parakeet_download_model', { modelName: PARAKEET_MODEL })
+          .catch(err => console.error('[OnboardingContext] Parakeet download failed:', err));
+      }
+
+      // Start Gemma download after a delay to prioritize Parakeet bandwidth
+      if (includeGemma && !summaryModelDownloaded) {
+        setTimeout(() => {
+          console.log('[OnboardingContext] Starting Gemma download (delayed to prioritize Parakeet)');
+          invoke('builtin_ai_download_model', { modelName: selectedSummaryModel || 'gemma3:1b' })
+            .catch(err => console.error('[OnboardingContext] Gemma download failed:', err));
+        }, 3000); // 3 second delay to give Parakeet priority
+      }
+    } catch (error) {
+      console.error('[OnboardingContext] Failed to start background downloads:', error);
+      setIsBackgroundDownloading(false);
+      throw error;
+    }
+  };
+
+  // Check if any models are currently downloading (for re-entry)
+  const checkActiveDownloads = async () => {
+    try {
+      const models = await invoke<any[]>('parakeet_get_available_models');
+      const isDownloading = models.some(m => m.status && (typeof m.status === 'object' ? 'Downloading' in m.status : m.status === 'Downloading'));
+      
+      if (isDownloading) {
+        console.log('[OnboardingContext] Detected active background downloads on mount');
+        setIsBackgroundDownloading(true);
+      }
+      
+      // Also check for Gemma/Built-in AI downloads if possible (though less critical as Parakeet is the main blocker)
+      
+    } catch (error) {
+      console.warn('[OnboardingContext] Failed to check active downloads:', error);
     }
   };
 
@@ -339,14 +474,14 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   }, []);
 
   const goToStep = useCallback((step: number) => {
-    setCurrentStep(Math.max(1, Math.min(step, 6)));
+    setCurrentStep(Math.max(1, Math.min(step, 4)));
   }, []);
 
   const goNext = useCallback(() => {
     setCurrentStep((prev: number) => {
       const next = prev + 1;
-      // Don't go past step 6
-      return Math.min(next, 6);
+      // Don't go past step 4
+      return Math.min(next, 4);
     });
   }, []);
 
@@ -370,6 +505,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         summaryModelProgressInfo,
         selectedSummaryModel,
         databaseExists,
+        isBackgroundDownloading,
         permissions,
         permissionsSkipped,
         goToStep,
@@ -382,6 +518,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         setPermissionStatus,
         setPermissionsSkipped,
         completeOnboarding,
+        startBackgroundDownloads,
       }}
     >
       {children}

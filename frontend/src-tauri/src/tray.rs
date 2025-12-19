@@ -1,4 +1,5 @@
 use tauri::{
+    Emitter,
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
     tray::TrayIconBuilder,
     AppHandle, Manager, Runtime,
@@ -17,7 +18,8 @@ pub enum RecordingState {
 
 pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     // Start with default menu, will update with actual state after initialization
-    let menu = build_menu(app, RecordingState::Stopped)?;
+    // Pass can_record=true initially, will be updated by update_tray_menu immediately
+    let menu = build_menu(app, RecordingState::Stopped, true)?;
 
     TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
@@ -227,7 +229,8 @@ pub fn update_tray_menu<R: Runtime>(app: &AppHandle<R>) {
 
 pub fn set_tray_state<R: Runtime>(app: &AppHandle<R>, state: RecordingState) {
     log::info!("Tray: Setting intermediate state: {:?}", state);
-    if let Ok(menu) = build_menu(app, state) {
+    // During recording state transitions, we assume recording is allowed (we're already recording)
+    if let Ok(menu) = build_menu(app, state, true) {
         if let Some(tray) = app.tray_by_id("main-tray") {
             let result = tray.set_menu(Some(menu));
             log::info!("Tray: Intermediate state menu update result: {:?}", result);
@@ -265,13 +268,48 @@ async fn get_current_recording_state() -> RecordingState {
     }
 }
 
+/// Check if recording is allowed based on onboarding status and transcription model availability
+/// Returns true if:
+/// - Onboarding is complete (user may prefer Whisper later), OR
+/// - Parakeet transcription model is ready (downloaded)
+async fn check_can_record<R: Runtime>(app: &AppHandle<R>) -> bool {
+    // First check if onboarding is complete
+    let onboarding_complete = match crate::onboarding::load_onboarding_status(app).await {
+        Ok(status) => status.completed,
+        Err(e) => {
+            log::warn!("Tray: Failed to load onboarding status: {}, assuming complete", e);
+            true // Assume complete if we can't check (safe default)
+        }
+    };
+
+    // If onboarding is complete, always allow recording
+    // (user may prefer Whisper or have their own transcription setup)
+    if onboarding_complete {
+        return true;
+    }
+
+    // During onboarding, check if Parakeet transcription model is ready
+    match crate::parakeet_engine::commands::parakeet_has_available_models().await {
+        Ok(has_models) => has_models,
+        Err(e) => {
+            log::warn!("Tray: Failed to check Parakeet models: {}, assuming not ready", e);
+            false
+        }
+    }
+}
+
 pub async fn update_tray_menu_async<R: Runtime>(app: &AppHandle<R>) {
     log::info!("Tray: update_tray_menu_async called");
     // Get the current recording state
     let recording_state = get_current_recording_state().await;
     log::info!("Tray: Current recording state: {:?}", recording_state);
 
-    if let Ok(menu) = build_menu(app, recording_state) {
+    // Determine if recording should be allowed
+    // Only block recording during incomplete onboarding when no transcription model is ready
+    let can_record = check_can_record(app).await;
+    log::info!("Tray: can_record: {}", can_record);
+
+    if let Ok(menu) = build_menu(app, recording_state, can_record) {
         if let Some(tray) = app.tray_by_id("main-tray") {
             let result = tray.set_menu(Some(menu));
             log::info!("Tray: Menu update result: {:?}", result);
@@ -286,58 +324,68 @@ pub async fn update_tray_menu_async<R: Runtime>(app: &AppHandle<R>) {
 fn build_menu<R: Runtime>(
     app: &AppHandle<R>,
     state: RecordingState,
+    can_record: bool, // True if recording is allowed (onboarding complete OR transcription model ready)
 ) -> tauri::Result<tauri::menu::Menu<R>> {
     let mut builder = MenuBuilder::new(app);
 
-    match state {
-        RecordingState::Stopped => {
-            builder = builder
-                .item(&MenuItemBuilder::with_id("toggle_recording", "Start Recording").build(app)?);
-        }
-        RecordingState::Starting => {
-            builder = builder.item(
-                &MenuItemBuilder::new("🔄 Starting Recording...")
-                    .enabled(false)
-                    .build(app)?,
-            );
-        }
-        RecordingState::Recording => {
-            builder = builder
-                .item(&MenuItemBuilder::with_id("pause_recording", "⏸ Pause Recording").build(app)?)
-                .item(&MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording").build(app)?);
-        }
-        RecordingState::Pausing => {
-            builder = builder
-                .item(
-                    &MenuItemBuilder::new("⏸ Pausing...")
+    // If recording is not allowed (during onboarding, no transcription model), show disabled message
+    if !can_record {
+        builder = builder.item(
+            &MenuItemBuilder::new("⏳ Downloading transcription model...")
+                .enabled(false)
+                .build(app)?,
+        );
+    } else {
+        match state {
+            RecordingState::Stopped => {
+                builder = builder
+                    .item(&MenuItemBuilder::with_id("toggle_recording", "Start Recording").build(app)?);
+            }
+            RecordingState::Starting => {
+                builder = builder.item(
+                    &MenuItemBuilder::new("🔄 Starting Recording...")
                         .enabled(false)
                         .build(app)?,
-                )
-                .item(&MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording").build(app)?);
-        }
-        RecordingState::Paused => {
-            builder = builder
-                .item(
-                    &MenuItemBuilder::with_id("resume_recording", "▶ Resume Recording")
-                        .build(app)?,
-                )
-                .item(&MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording").build(app)?);
-        }
-        RecordingState::Resuming => {
-            builder = builder
-                .item(
-                    &MenuItemBuilder::new("▶ Resuming...")
+                );
+            }
+            RecordingState::Recording => {
+                builder = builder
+                    .item(&MenuItemBuilder::with_id("pause_recording", "⏸ Pause Recording").build(app)?)
+                    .item(&MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording").build(app)?);
+            }
+            RecordingState::Pausing => {
+                builder = builder
+                    .item(
+                        &MenuItemBuilder::new("⏸ Pausing...")
+                            .enabled(false)
+                            .build(app)?,
+                    )
+                    .item(&MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording").build(app)?);
+            }
+            RecordingState::Paused => {
+                builder = builder
+                    .item(
+                        &MenuItemBuilder::with_id("resume_recording", "▶ Resume Recording")
+                            .build(app)?,
+                    )
+                    .item(&MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording").build(app)?);
+            }
+            RecordingState::Resuming => {
+                builder = builder
+                    .item(
+                        &MenuItemBuilder::new("▶ Resuming...")
+                            .enabled(false)
+                            .build(app)?,
+                    )
+                    .item(&MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording").build(app)?);
+            }
+            RecordingState::Stopping => {
+                builder = builder.item(
+                    &MenuItemBuilder::new("⏹ Stopping...")
                         .enabled(false)
                         .build(app)?,
-                )
-                .item(&MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording").build(app)?);
-        }
-        RecordingState::Stopping => {
-            builder = builder.item(
-                &MenuItemBuilder::new("⏹ Stopping...")
-                    .enabled(false)
-                    .build(app)?,
-            );
+                );
+            }
         }
     }
 

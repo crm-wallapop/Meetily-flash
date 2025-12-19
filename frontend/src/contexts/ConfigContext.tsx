@@ -174,6 +174,36 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       try {
         const data = await configService.getModelConfig();
         if (data && data.provider) {
+          // If provider is custom-openai, fetch the additional config
+          if (data.provider === 'custom-openai') {
+            try {
+              const customConfig = await configService.getCustomOpenAIConfig();
+              if (customConfig) {
+                // Merge custom config fields into modelConfig
+                console.log('[ConfigContext] Loading custom OpenAI config:', {
+                  endpoint: customConfig.endpoint,
+                  model: customConfig.model,
+                });
+                setModelConfig(prev => ({
+                  ...prev,
+                  provider: data.provider,
+                  model: customConfig.model || data.model || prev.model,
+                  whisperModel: data.whisperModel || prev.whisperModel,
+                  customOpenAIEndpoint: customConfig.endpoint,
+                  customOpenAIModel: customConfig.model,
+                  customOpenAIApiKey: customConfig.apiKey,
+                  maxTokens: customConfig.maxTokens,
+                  temperature: customConfig.temperature,
+                  topP: customConfig.topP,
+                }));
+                return; // Early return
+              }
+            } catch (err) {
+              console.error('[ConfigContext] Failed to fetch custom OpenAI config:', err);
+            }
+          }
+
+          // For non-custom-openai providers, just set base config
           setModelConfig(prev => ({
             ...prev,
             provider: data.provider,
@@ -186,6 +216,25 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       }
     };
     fetchModelConfig();
+  }, []);
+
+  // Listen for model config updates from other components
+  useEffect(() => {
+    const setupListener = async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      const unlisten = await listen<ModelConfig>('model-config-updated', (event) => {
+        console.log('[ConfigContext] Received model-config-updated event:', event.payload);
+        setModelConfig(event.payload);
+      });
+      return unlisten;
+    };
+
+    let cleanup: (() => void) | undefined;
+    setupListener().then(fn => cleanup = fn);
+
+    return () => {
+      cleanup?.();
+    };
   }, []);
 
   // Load device preferences on mount
@@ -233,6 +282,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     openrouter: [],
     openai: ['gpt-4', 'gpt-4-turbo', 'gpt-3.5-turbo'],
     'builtin-ai': [],
+    'custom-openai': [],
   };
 
   // Toggle confidence indicator with localStorage persistence

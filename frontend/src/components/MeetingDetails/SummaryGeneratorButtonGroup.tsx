@@ -22,6 +22,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { useState, useEffect, useRef } from 'react';
 import { isOllamaNotInstalledError } from '@/lib/utils';
+import { BuiltInModelInfo } from '@/lib/builtin-ai';
 
 interface SummaryGeneratorButtonGroupProps {
   modelConfig: ModelConfig;
@@ -78,7 +79,110 @@ export function SummaryGeneratorButtonGroup({
     return null;
   }
 
+  const checkBuiltInAIModelsAndGenerate = async () => {
+    setIsCheckingModels(true);
+    try {
+      const selectedModel = modelConfig.model;
+
+      // Check if specific model is configured
+      if (!selectedModel) {
+        toast.error('No built-in AI model selected', {
+          description: 'Please select a model in settings',
+          duration: 5000,
+        });
+        setSettingsDialogOpen(true);
+        return;
+      }
+
+      // Check model readiness (with filesystem refresh)
+      const isReady = await invoke<boolean>('builtin_ai_is_model_ready', {
+        modelName: selectedModel,
+        refresh: true,
+      });
+
+      if (isReady) {
+        // Model is available, proceed with generation
+        onGenerateSummary(customPrompt);
+        return;
+      }
+
+      // Model not ready - check detailed status
+      const modelInfo = await invoke<BuiltInModelInfo | null>('builtin_ai_get_model_info', {
+        modelName: selectedModel,
+      });
+
+      if (!modelInfo) {
+        toast.error('Model not found', {
+          description: `Could not find information for model: ${selectedModel}`,
+          duration: 5000,
+        });
+        setSettingsDialogOpen(true);
+        return;
+      }
+
+      // Handle different model states
+      const status = modelInfo.status;
+
+      if (status.type === 'downloading') {
+        toast.info('Model download in progress', {
+          description: `${selectedModel} is downloading (${status.progress}%). Please wait until download completes.`,
+          duration: 5000,
+        });
+        return;
+      }
+
+      if (status.type === 'not_downloaded') {
+        toast.error('Model not downloaded', {
+          description: `${selectedModel} needs to be downloaded before use. Opening model settings...`,
+          duration: 5000,
+        });
+        setSettingsDialogOpen(true);
+        return;
+      }
+
+      if (status.type === 'corrupted') {
+        toast.error('Model file corrupted', {
+          description: `${selectedModel} file is corrupted. Please delete and re-download.`,
+          duration: 7000,
+        });
+        setSettingsDialogOpen(true);
+        return;
+      }
+
+      if (status.type === 'error') {
+        toast.error('Model error', {
+          description: status.Error || 'An error occurred with the model',
+          duration: 5000,
+        });
+        setSettingsDialogOpen(true);
+        return;
+      }
+
+      // Fallback
+      toast.error('Model not available', {
+        description: 'The selected model is not ready for use',
+        duration: 5000,
+      });
+      setSettingsDialogOpen(true);
+
+    } catch (error) {
+      console.error('Error checking built-in AI models:', error);
+      toast.error('Failed to check model status', {
+        description: error instanceof Error ? error.message : String(error),
+        duration: 5000,
+      });
+    } finally {
+      setIsCheckingModels(false);
+    }
+  };
+
   const checkOllamaModelsAndGenerate = async () => {
+    // Handle built-in AI provider
+    if (modelConfig.provider === 'builtin-ai') {
+      await checkBuiltInAIModelsAndGenerate();
+      return;
+    }
+
     // Only check for Ollama provider
     if (modelConfig.provider !== 'ollama') {
       onGenerateSummary(customPrompt);

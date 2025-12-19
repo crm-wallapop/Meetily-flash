@@ -12,6 +12,7 @@ use std::time::Duration;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::RwLock;
+use tokio::time::timeout;
 
 use super::models::{get_available_models, get_model_by_name};
 
@@ -196,6 +197,29 @@ impl ModelManager {
                 model_def.name,
                 model_path.display()
             );
+
+            let is_actively_downloading = {
+                let active = self.active_downloads.read().await;
+                active.contains(&model_def.name)
+            };
+
+            // If actively downloading, preserve existing status from memory
+            if is_actively_downloading {
+                let existing_info = {
+                    let models = self.available_models.read().await;
+                    models.get(&model_def.name).cloned()
+                };
+
+                if let Some(info) = existing_info {
+                    // Preserve existing status (should be Downloading)
+                    models_map.insert(model_def.name.clone(), info);
+                    log::debug!(
+                        "Model '{}': Preserving Downloading status during scan",
+                        model_def.name
+                    );
+                    continue;
+                }
+            }
 
             let status = if model_path.exists() {
                 // Check if file size matches expected size (basic validation)
@@ -532,7 +556,7 @@ impl ModelManager {
         use futures_util::StreamExt;
         let mut stream = response.bytes_stream();
 
-        while let Some(chunk_result) = stream.next().await {
+        loop {
             // Check for cancellation
             {
                 let cancel_flag = self.cancel_download_flag.read().await;
@@ -555,16 +579,71 @@ impl ModelManager {
                         }
                     }
 
-                    return Err(anyhow!("Download cancelled"));
+                    // Use special marker prefix to distinguish cancellation from other errors
+                    return Err(anyhow!("CANCELLED: Download cancelled by user"));
                 }
             }
 
-            let chunk = match chunk_result {
-                Ok(c) => c,
-                Err(e) => {
-                    // Flush buffer before returning error to preserve bytes for resume
+            // Add per-chunk timeout (30 seconds) to detect stalled connections
+            let next_result = timeout(Duration::from_secs(30), stream.next()).await;
+
+            let chunk = match next_result {
+                // Timeout - no data received for 30 seconds
+                Err(_) => {
+                    log::warn!("Download timeout for {}: no data received for 30 seconds", model_name);
                     let _ = writer.flush().await;
-                    return Err(anyhow!("Error reading chunk: {}", e));
+
+                    // Cleanup: Remove from active downloads
+                    let mut active = self.active_downloads.write().await;
+                    active.remove(model_name);
+
+                    // Set model status to Error (NOT NotDownloaded) so UI can show retry button
+                    {
+                        let mut models = self.available_models.write().await;
+                        if let Some(model_info) = models.get_mut(model_name) {
+                            model_info.status = ModelStatus::Error("Download timeout - No data received for 30 seconds".to_string());
+                        }
+                    }
+
+                    return Err(anyhow!("Download timeout - No data received for 30 seconds"));
+                },
+                // Stream ended
+                Ok(None) => break,
+                // Got chunk result
+                Ok(Some(chunk_result)) => {
+                    match chunk_result {
+                        Ok(c) => c,
+                        // Detect error type for better user feedback
+                        Err(e) => {
+                            log::error!("Download error for {}: {:?}", model_name, e);
+                            let _ = writer.flush().await;
+
+                            // Cleanup: Remove from active downloads
+                            let mut active = self.active_downloads.write().await;
+                            active.remove(model_name);
+
+                            // Categorize error for user-friendly message
+                            let error_msg = if e.is_timeout() {
+                                "Connection timeout - Check your internet"
+                            } else if e.is_connect() {
+                                "Connection failed - Check your internet"
+                            } else if e.is_body() {
+                                "Stream interrupted - Network unstable"
+                            } else {
+                                "Download error"
+                            };
+
+                            // Set model status to Error (NOT NotDownloaded) so UI can show retry button
+                            {
+                                let mut models = self.available_models.write().await;
+                                if let Some(model_info) = models.get_mut(model_name) {
+                                    model_info.status = ModelStatus::Error(error_msg.to_string());
+                                }
+                            }
+
+                            return Err(anyhow!("{}: {}", error_msg, e));
+                        }
+                    }
                 }
             };
             let chunk_len = chunk.len() as u64;
@@ -578,15 +657,16 @@ impl ModelManager {
 
             // Calculate progress
             let progress_percent = if total_size > 0 {
-                ((downloaded as f64 / total_size as f64) * 100.0) as u8
+                let exact_percent = (downloaded as f64 / total_size as f64) * 100.0;
+                exact_percent.min(100.0) as u8
             } else {
                 0
             };
 
-            // Report progress every 1% or every 500ms for smoother updates
             let elapsed_since_report = last_report_time.elapsed();
-            let should_report = progress_percent >= last_progress_percent + 1
-                || progress_percent == 100
+            let is_download_complete = downloaded >= total_size;
+            let should_report = progress_percent > last_progress_percent
+                || is_download_complete  // Force report on completion
                 || elapsed_since_report.as_millis() >= 500;
 
             if should_report {
@@ -614,7 +694,9 @@ impl ModelManager {
                 {
                     let mut models = self.available_models.write().await;
                     if let Some(model_info) = models.get_mut(model_name) {
-                        model_info.status = ModelStatus::Downloading { progress: progress_percent };
+                        model_info.status = ModelStatus::Downloading {
+                            progress: if is_download_complete { 100 } else { progress_percent }
+                        };
                     }
                 }
 
@@ -634,7 +716,20 @@ impl ModelManager {
 
         log::info!("Download completed for model: {}", model_name);
 
-        // Validate GGUF magic number
+        {
+            let mut models = self.available_models.write().await;
+            if let Some(model_info) = models.get_mut(model_name) {
+                model_info.status = ModelStatus::Downloading { progress: 100 };
+            }
+        }
+
+        if let Some(ref callback) = progress_callback {
+            callback(DownloadProgress::new(total_size, total_size, 0.0));
+        }
+
+        // Small delay to ensure UI receives 100% event
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
         if let Err(e) = self.validate_gguf_file(&file_path).await {
             log::error!("Downloaded file failed validation: {}", e);
 
@@ -663,11 +758,6 @@ impl ModelManager {
                 model_info.status = ModelStatus::Available;
                 model_info.path = file_path.clone();
             }
-        }
-
-        // Ensure 100% progress is reported
-        if let Some(ref callback) = progress_callback {
-            callback(DownloadProgress::new(total_size, total_size, 0.0));
         }
 
         // Remove from active downloads

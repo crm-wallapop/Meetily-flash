@@ -44,10 +44,10 @@ export function OnboardingContainer({
 
   return (
     <div className="fixed inset-0 bg-gray-50 flex items-center justify-center z-50 overflow-hidden">
-      <div className={cn('w-full max-w-2xl h-full max-h-screen flex flex-col px-6 py-8', className)}>
+      <div className={cn('w-full max-w-2xl h-full max-h-screen flex flex-col px-6 py-6', className)}>
         {/* Progress Indicator with Navigation - Fixed */}
         {step && !hideProgress && (
-          <div className="mb-8 relative flex-shrink-0">
+          <div className="mb-2 relative flex-shrink-0">
             {/* Navigation Buttons */}
             {showNavigation && (
               <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 flex justify-between pointer-events-none">
@@ -85,7 +85,7 @@ export function OnboardingContainer({
         )}
 
         {/* Header - Fixed */}
-        <div className="mb-8 text-center space-y-3 flex-shrink-0">
+        <div className="mb-4 text-center space-y-3 flex-shrink-0">
           <h1 className="text-4xl font-semibold text-gray-900 animate-fade-in-up">{title}</h1>
           {description && (
             <p className="text-base text-gray-600 max-w-md mx-auto animate-fade-in-up delay-75">

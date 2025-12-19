@@ -140,8 +140,11 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
             // This is a model-related error that requires user action
             showModal('modelSelector', userMessage);
           } else {
-            // Regular transcription error
-            showModal('errorAlert', userMessage);
+            // Show toast instead of modal for non-actionable errors (consistent with sidebar)
+            toast.error('', {
+              description: userMessage,
+              duration: 5000,
+            });
           }
         });
         console.log('Transcription error listener setup complete');
@@ -177,19 +180,6 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
         }
       });
       unlisteners.push(unlistenWhisper);
-
-      // Listen for Parakeet model download complete
-      const unlistenParakeet = await listen<{ modelName: string }>('parakeet-model-download-complete', (event) => {
-        const { modelName } = event.payload;
-        console.log('[useModalState] Parakeet model download complete:', modelName);
-
-        // Auto-close modal if the downloaded model matches the selected one
-        if (transcriptModelConfig?.provider === 'parakeet' && transcriptModelConfig?.model === modelName) {
-          toast.success('Model ready! Closing window...', { duration: 1500 });
-          setTimeout(() => hideModal('modelSelector'), 1500);
-        }
-      });
-      unlisteners.push(unlistenParakeet);
 
       return () => {
         unlisteners.forEach(unsub => unsub());

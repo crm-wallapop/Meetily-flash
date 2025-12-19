@@ -10,10 +10,10 @@ import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
 // Custom hooks
 import { useMeetingData } from '@/hooks/meeting-details/useMeetingData';
 import { useSummaryGeneration } from '@/hooks/meeting-details/useSummaryGeneration';
-import { useModelConfiguration } from '@/hooks/meeting-details/useModelConfiguration';
 import { useTemplates } from '@/hooks/meeting-details/useTemplates';
 import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
 import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperations';
+import { useConfig } from '@/contexts/ConfigContext';
 
 export default function PageContent({
   meeting,
@@ -45,9 +45,11 @@ export default function PageContent({
   // Sidebar context
   const { serverAddress } = useSidebar();
 
+  // Get model config from ConfigContext
+  const { modelConfig, setModelConfig } = useConfig();
+
   // Custom hooks
   const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
-  const modelConfig = useModelConfiguration({ serverAddress });
   const templates = useTemplates();
 
   // Callback to register the modal open function
@@ -66,11 +68,18 @@ export default function PageContent({
     }
   };
 
+  // Model config save handler (ConfigContext updates automatically via events)
+  const handleSaveModelConfig = async (config?: any) => {
+    // The actual save happens in the modal via api_save_model_config
+    // ConfigContext will be updated via event listener
+    console.log('[PageContent] Model config saved, context will update via event');
+  };
+
   const summaryGeneration = useSummaryGeneration({
     meeting,
     transcripts: meetingData.transcripts,
-    modelConfig: modelConfig.modelConfig,
-    isModelConfigLoading: modelConfig.isLoading,
+    modelConfig: modelConfig,
+    isModelConfigLoading: false, // ConfigContext loads on mount
     selectedTemplate: templates.selectedTemplate,
     onMeetingUpdated,
     updateMeetingTitle: meetingData.updateMeetingTitle,
@@ -101,7 +110,7 @@ export default function PageContent({
 
     const autoGenerate = async () => {
       if (shouldAutoGenerate && meetingData.transcripts.length > 0 && !cancelled) {
-        console.log(`🤖 Auto-generating summary with ${modelConfig.modelConfig.provider}/${modelConfig.modelConfig.model}...`);
+        console.log(`🤖 Auto-generating summary with ${modelConfig.provider}/${modelConfig.model}...`);
         await summaryGeneration.handleGenerateSummary('');
 
         // Notify parent that auto-generation is complete (only if not cancelled)
@@ -154,9 +163,9 @@ export default function PageContent({
           aiSummary={meetingData.aiSummary}
           summaryStatus={summaryGeneration.summaryStatus}
           transcripts={meetingData.transcripts}
-          modelConfig={modelConfig.modelConfig}
-          setModelConfig={modelConfig.setModelConfig}
-          onSaveModelConfig={modelConfig.handleSaveModelConfig}
+          modelConfig={modelConfig}
+          setModelConfig={setModelConfig}
+          onSaveModelConfig={handleSaveModelConfig}
           onGenerateSummary={summaryGeneration.handleGenerateSummary}
           onStopGeneration={summaryGeneration.handleStopGeneration}
           customPrompt={customPrompt}
@@ -170,7 +179,7 @@ export default function PageContent({
           availableTemplates={templates.availableTemplates}
           selectedTemplate={templates.selectedTemplate}
           onTemplateSelect={templates.handleTemplateSelection}
-          isModelConfigLoading={modelConfig.isLoading}
+          isModelConfigLoading={false}
           onOpenModelSettings={handleRegisterModalOpen}
         />
 

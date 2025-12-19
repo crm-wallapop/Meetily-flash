@@ -32,7 +32,7 @@ export default function Home() {
   const { setIsMeetingActive, isCollapsed: sidebarCollapsed } = useSidebar();
   const { modals, messages, showModal, hideModal } = useModalState(transcriptModelConfig);
   const { isRecordingDisabled, setIsRecordingDisabled } = useRecordingStateSync(isRecording, setIsRecordingState, setIsMeetingActive);
-  const { handleRecordingStart } = useRecordingStart(isRecording, setIsRecordingState);
+  const { handleRecordingStart } = useRecordingStart(isRecording, setIsRecordingState, showModal);
   const { handleRecordingStop, isStopping, isProcessingTranscript, isSavingTranscript, summaryStatus, setIsStopping } = useRecordingStop(
     setIsRecordingState,
     setIsRecordingDisabled
