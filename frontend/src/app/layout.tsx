@@ -19,6 +19,7 @@ import { ConfigProvider } from '@/contexts/ConfigContext'
 import { OnboardingProvider } from '@/contexts/OnboardingContext'
 import { OnboardingFlow } from '@/components/onboarding'
 import { DownloadProgressToastProvider } from '@/components/shared/DownloadProgressToast'
+import { UpdateCheckProvider } from '@/components/UpdateCheckProvider'
 
 const sourceSans3 = Source_Sans_3({
   subsets: ['latin'],
@@ -95,23 +96,26 @@ export default function RootLayout({
               <ConfigProvider>
                 <OllamaDownloadProvider>
                   <OnboardingProvider>
-                    <SidebarProvider>
-                      <TooltipProvider>
-                        {/* Download progress toast provider - listens for background downloads */}
-                        <DownloadProgressToastProvider />
+                    <UpdateCheckProvider>
+                      <SidebarProvider>
+                        <TooltipProvider>
+                          {/* Download progress toast provider - listens for background downloads */}
+                          <DownloadProgressToastProvider />
 
-                        {/* Show onboarding or main app */}
-                        {showOnboarding ? (
-                          <OnboardingFlow onComplete={handleOnboardingComplete} />
-                        ) : (
-                          <div className="flex">
-                            <Sidebar />
-                            <MainContent>{children}</MainContent>
-                          </div>
-                        )}
-                      </TooltipProvider>
-                    </SidebarProvider>
+                          {/* Show onboarding or main app */}
+                          {showOnboarding ? (
+                            <OnboardingFlow onComplete={handleOnboardingComplete} />
+                          ) : (
+                            <div className="flex">
+                              <Sidebar />
+                              <MainContent>{children}</MainContent>
+                            </div>
+                          )}
+                        </TooltipProvider>
+                      </SidebarProvider>
+                    </UpdateCheckProvider>
                   </OnboardingProvider>
+
                 </OllamaDownloadProvider>
               </ConfigProvider>
             </TranscriptProvider>
