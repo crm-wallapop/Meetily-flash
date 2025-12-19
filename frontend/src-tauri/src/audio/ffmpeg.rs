@@ -123,6 +123,31 @@ fn find_ffmpeg_path_internal() -> Option<PathBuf> {
         return Some(ffmpeg_in_installation);
     }
 
+    // Windows often has nested structure like ffmpeg-6.0-full_build/bin/ffmpeg.exe
+    #[cfg(windows)]
+    {
+        debug!("Searching for nested ffmpeg in {:?}", installation_dir);
+        if let Ok(entries) = std::fs::read_dir(&installation_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Check bin/ffmpeg.exe
+                    let bin_ffmpeg = path.join("bin").join(EXECUTABLE_NAME);
+                    if bin_ffmpeg.exists() {
+                        debug!("found ffmpeg in nested bin: {:?}", bin_ffmpeg);
+                        return Some(bin_ffmpeg);
+                    }
+                    // Check root of subdir
+                    let root_ffmpeg = path.join(EXECUTABLE_NAME);
+                    if root_ffmpeg.exists() {
+                        debug!("found ffmpeg in nested root: {:?}", root_ffmpeg);
+                        return Some(root_ffmpeg);
+                    }
+                }
+            }
+        }
+    }
+
     error!("ffmpeg not found even after installation");
     None // Return None if ffmpeg is not found
 }
