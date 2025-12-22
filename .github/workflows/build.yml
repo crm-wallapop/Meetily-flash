@@ -468,20 +468,16 @@ jobs:
         if: contains(inputs.platform, 'windows')
         shell: pwsh
         run: |
-          Write-Host "Building llama-helper sidecar with Vulkan support..."
+          # Build llama-helper without GPU features (CPU-only)
+          # Note: Vulkan build has CMake race condition issues with llama-cpp-sys-2
+          # The Tauri app itself uses whisper-rs with Vulkan for transcription
+          # llama-helper is for LLM inference and works fine on CPU
+          Write-Host "Building llama-helper sidecar (CPU-only)..."
 
-          # Set CMAKE_BUILD_PARALLEL_LEVEL=1 to prevent race condition in vulkan-shaders-gen
-          $env:CMAKE_BUILD_PARALLEL_LEVEL = "1"
-
-          # Verify Vulkan SDK is available
-          Write-Host "Vulkan SDK: $env:VULKAN_SDK"
-          Write-Host "PATH includes glslc: $(if (Get-Command glslc -ErrorAction SilentlyContinue) { 'YES' } else { 'NO' })"
-
-          # Build with Vulkan support
-          cargo build --release -p llama-helper --features vulkan
+          cargo build --release -p llama-helper
 
           if ($LASTEXITCODE -ne 0) {
-            Write-Error "Failed to build llama-helper with Vulkan support"
+            Write-Error "Failed to build llama-helper"
             exit $LASTEXITCODE
           }
 
