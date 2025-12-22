@@ -1,0 +1,168 @@
+name: "Release"
+
+on:
+  workflow_dispatch:
+
+# Prevent duplicate releases
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false  # Don't cancel releases, fail instead
+
+jobs:
+  # STEP 1: Create draft release first
+  create-release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      release-id: ${{ steps.create-release.outputs.result }}
+      version: ${{ steps.get-version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get version from tauri.conf.json
+        id: get-version
+        shell: bash
+        run: |
+          VERSION=$(grep -o '"version": "[^"]*"' frontend/src-tauri/tauri.conf.json | cut -d'"' -f4)
+          echo "Application version from tauri.conf.json: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create Draft Release
+        id: create-release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: `v${{ steps.get-version.outputs.version }}`,
+              name: `Meetily v${{ steps.get-version.outputs.version }}`,
+              draft: true,
+              prerelease: false,
+              generate_release_notes: true
+            })
+            console.log(`Created draft release with ID: ${data.id}`)
+            return data.id
+
+  # STEP 2: Build all platforms and upload directly to release
+  build-all-platforms:
+    needs: create-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "macos-latest" # for Apple Silicon only (M1 and above)
+            args: "--target aarch64-apple-darwin"
+            target: "aarch64-apple-darwin"
+          - platform: "ubuntu-22.04" # Build .deb on 22.04
+            args: "--bundles deb"
+            target: "x86_64-unknown-linux-gnu"
+          - platform: "ubuntu-24.04" # Build AppImage and RPM on 24.04
+            args: "--bundles appimage,rpm"
+            target: "x86_64-unknown-linux-gnu"
+          - platform: "windows-latest"
+            args: ""
+            target: "x86_64-pc-windows-msvc"
+
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: ${{ matrix.platform }}
+      target: ${{ matrix.target }}
+      build-args: ${{ matrix.args }}
+      sign-binaries: true
+      asset-prefix: "meetily"
+      upload-artifacts: false  # tauri-action uploads directly to release
+      release-id: ${{ needs.create-release.outputs.release-id }}
+    secrets: inherit
+
+  # STEP 3: Show release summary
+  release-summary:
+    needs: [create-release, build-all-platforms]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Get release assets and latest.json
+        id: release-info
+        run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          RELEASE_ID="${{ needs.create-release.outputs.release-id }}"
+
+          echo "## Release Assets" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # List all release assets
+          echo "### Files in Release" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          gh api repos/${{ github.repository }}/releases/${RELEASE_ID}/assets --jq '.[] | "\(.name) (\(.size / 1048576 | floor)MB)"' >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Download and show latest.json
+          echo "### latest.json content" >> $GITHUB_STEP_SUMMARY
+          gh release download "v${VERSION}" --pattern "latest.json" --dir . 2>/dev/null || echo "latest.json not yet available"
+          if [ -f latest.json ]; then
+            echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+            cat latest.json >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Download links
+          echo "### Download Links" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Release page:** https://github.com/${{ github.repository }}/releases/tag/v${VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Download all as ZIP:** https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.zip" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Manual S3 upload:** Download latest.json from release and upload to \`s3://meetily-updates/latest.json\`" >> $GITHUB_STEP_SUMMARY
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release Summary
+        run: |
+          echo "============================================"
+          echo "=== Release Created Successfully ==="
+          echo "============================================"
+          echo "Version: v${{ needs.create-release.outputs.version }}"
+          echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/v${{ needs.create-release.outputs.version }}"
+          echo ""
+          echo "Uploaded assets (via tauri-action):"
+          echo "  - macOS: DMG installer + app.tar.gz (for updater) + .sig"
+          echo "  - Windows: MSI + NSIS installers (SIGNED via signCommand) + .sig files"
+          echo "  - Linux: DEB + AppImage + RPM packages"
+          echo "  - Updater manifest: latest.json (auto-generated by tauri-action)"
+          echo ""
+          echo "Next steps:"
+          echo "  1. Review the draft release"
+          echo "  2. Edit release notes if needed"
+          echo "  3. Publish the release when ready"
+          echo "============================================"
+
+          # Add to GitHub Step Summary
+          echo "## ✅ Release Created Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** v${{ needs.create-release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Release URL:** [View Release](https://github.com/${{ github.repository }}/releases/tag/v${{ needs.create-release.outputs.version }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Uploaded Assets" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | Assets |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🍎 **macOS** | DMG installer, app.tar.gz (updater), .sig |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🪟 **Windows** | MSI installer (SIGNED ✅), NSIS installer (SIGNED ✅), .sig files |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🐧 **Linux** | DEB package, AppImage, RPM package |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔄 **Updater** | latest.json manifest (upload to S3 manually) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. ✅ [Review the draft release](https://github.com/${{ github.repository }}/releases/tag/v${{ needs.create-release.outputs.version }})" >> $GITHUB_STEP_SUMMARY
+          echo "2. ✏️ Edit release notes if needed" >> $GITHUB_STEP_SUMMARY
+          echo "3. 📤 Upload latest.json to S3: \`s3://meetily-updates/latest.json\`" >> $GITHUB_STEP_SUMMARY
+          echo "4. 🚀 Publish the release when ready" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
