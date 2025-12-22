@@ -1,11 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { RefreshCw, Mic, Speaker, Lock, HelpCircle } from 'lucide-react';
+import { RefreshCw, Mic, Speaker } from 'lucide-react';
 import { usePlatform } from '@/hooks/usePlatform';
 import { AudioLevelMeter, CompactAudioLevelMeter } from './AudioLevelMeter';
 import { AudioBackendSelector } from './AudioBackendSelector';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
 import Analytics from '@/lib/analytics';
@@ -297,7 +296,10 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
             <SelectContent>
               <SelectItem value="default">Default Microphone</SelectItem>
               {inputDevices.map((device) => (
-                <SelectItem key={device.name} value={device.name}>
+                <SelectItem
+                  key={device.name}
+                  value={`${device.name} (${device.device_type.toLowerCase()})`}
+                >
                   {device.name}
                 </SelectItem>
               ))}
@@ -350,57 +352,35 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
             <Label htmlFor="system-selection" className="text-sm font-medium text-gray-700">
               System Audio
             </Label>
-            {isWindows && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div className="flex items-center gap-1 text-amber-600 cursor-help">
-                      <Lock className="h-3 w-3" />
-                      <HelpCircle className="h-3 w-3" />
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" className="max-w-xs">
-                    <p className="text-sm">
-                      On Windows, system audio is captured from the default output device.
-                      To change this, update your default device in Windows Sound Settings.
-                    </p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
           </div>
 
-          {/* Windows: Show locked default device */}
-          {isWindows ? (
-            <div id="system-selection" className="w-full h-9 px-3 py-2 text-sm bg-gray-100 border border-gray-300 rounded-md text-gray-600 cursor-not-allowed flex items-center">
-              {defaultOutputDevice}
-            </div>
-          ) : (
-            <Select
-              value={selectedDevices.systemDevice || 'default'}
-              onValueChange={handleSystemDeviceChange}
-              disabled={disabled}
-            >
-              <SelectTrigger id="system-selection" className="w-full">
-                <SelectValue placeholder="Select System Audio" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="default">Default System Audio</SelectItem>
-                {outputDevices.map((device) => (
-                  <SelectItem key={device.name} value={device.name}>
-                    {device.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
+          <Select
+            value={selectedDevices.systemDevice || 'default'}
+            onValueChange={handleSystemDeviceChange}
+            disabled={disabled}
+          >
+            <SelectTrigger id="system-selection" className="w-full">
+              <SelectValue placeholder="Select System Audio" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="default">Default System Audio</SelectItem>
+              {outputDevices.map((device) => (
+                <SelectItem
+                  key={device.name}
+                  value={`${device.name} (${device.device_type.toLowerCase()})`}
+                >
+                  {device.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
 
-          {!isWindows && outputDevices.length === 0 && (
+          {outputDevices.length === 0 && (
             <p className="text-xs text-gray-500">No system audio devices found</p>
           )}
 
-          {/* Backend Selection - only show when not recording and not on Windows */}
-          {!disabled && !isWindows && (
+          {/* Backend Selection - available on all platforms */}
+          {!disabled && (
             <div className="pt-3 border-t border-gray-100">
               <AudioBackendSelector disabled={disabled} />
             </div>

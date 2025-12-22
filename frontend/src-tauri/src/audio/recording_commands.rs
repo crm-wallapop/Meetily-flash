@@ -13,7 +13,14 @@ use std::sync::{
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::task::JoinHandle;
 
-use super::{parse_audio_device, RecordingManager, DeviceEvent, DeviceMonitorType};
+use super::{
+    parse_audio_device,
+    default_input_device,   // Get default microphone
+    default_output_device,  // Get default system audio
+    RecordingManager,
+    DeviceEvent,
+    DeviceMonitorType
+};
 
 // Import transcription modules
 use super::transcription::{
@@ -100,16 +107,106 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Create new recording manager
     let mut manager = RecordingManager::new();
 
-    // Load recording preferences to check auto_save setting
-    // This determines whether we save audio checkpoints or just transcripts/metadata
-    let auto_save = match super::recording_preferences::load_recording_preferences(&app).await {
-        Ok(prefs) => {
-            info!("📋 Loaded recording preferences: auto_save={}", prefs.auto_save);
-            prefs.auto_save
+    // Load recording preferences to get auto_save AND device preferences
+    let (auto_save, preferred_mic_name, preferred_system_name) =
+        match super::recording_preferences::load_recording_preferences(&app).await {
+            Ok(prefs) => {
+                info!("📋 Loaded recording preferences: auto_save={}, preferred_mic={:?}, preferred_system={:?}",
+                      prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device);
+                (prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device)
+            }
+            Err(e) => {
+                warn!("Failed to load recording preferences, using defaults: {}", e);
+                (true, None, None)
+            }
+        };
+
+    // ============================================================================
+    // MICROPHONE DEVICE RESOLUTION: Preference → Default → Error
+    // ============================================================================
+    let microphone_device = match preferred_mic_name {
+        Some(pref_name) => {
+            info!("🎤 Attempting to use preferred microphone: '{}'", pref_name);
+            match parse_audio_device(&pref_name) {
+                Ok(device) => {
+                    info!("✅ Using preferred microphone: '{}'", device.name);
+                    Some(Arc::new(device))
+                }
+                Err(e) => {
+                    warn!("⚠️ Preferred microphone '{}' not available: {}", pref_name, e);
+                    warn!("   Falling back to system default microphone...");
+                    match default_input_device() {
+                        Ok(device) => {
+                            info!("✅ Using default microphone: '{}'", device.name);
+                            Some(Arc::new(device))
+                        }
+                        Err(default_err) => {
+                            error!("❌ No microphone available (preferred and default both failed)");
+                            return Err(format!(
+                                "No microphone device available. Preferred device '{}' not found, and default microphone unavailable: {}",
+                                pref_name, default_err
+                            ));
+                        }
+                    }
+                }
+            }
         }
-        Err(e) => {
-            warn!("Failed to load recording preferences, defaulting to auto_save=true: {}", e);
-            true // Default to saving if preferences can't be loaded
+        None => {
+            info!("🎤 No microphone preference set, using system default");
+            match default_input_device() {
+                Ok(device) => {
+                    info!("✅ Using default microphone: '{}'", device.name);
+                    Some(Arc::new(device))
+                }
+                Err(e) => {
+                    error!("❌ No default microphone available");
+                    return Err(format!("No microphone device available: {}", e));
+                }
+            }
+        }
+    };
+
+    // ============================================================================
+    // SYSTEM AUDIO DEVICE RESOLUTION: Preference → Default → None (optional)
+    // ============================================================================
+    let system_device = match preferred_system_name {
+        Some(pref_name) => {
+            info!("🔊 Attempting to use preferred system audio: '{}'", pref_name);
+            match parse_audio_device(&pref_name) {
+                Ok(device) => {
+                    info!("✅ Using preferred system audio: '{}'", device.name);
+                    Some(Arc::new(device))
+                }
+                Err(e) => {
+                    warn!("⚠️ Preferred system audio '{}' not available: {}", pref_name, e);
+                    warn!("   Falling back to system default...");
+                    match default_output_device() {
+                        Ok(device) => {
+                            info!("✅ Using default system audio: '{}'", device.name);
+                            Some(Arc::new(device))
+                        }
+                        Err(default_err) => {
+                            warn!("⚠️ No system audio available (preferred and default both failed): {}", default_err);
+                            warn!("   Recording will continue with microphone only");
+                            None // System audio is optional
+                        }
+                    }
+                }
+            }
+        }
+        None => {
+            info!("🔊 No system audio preference set, using system default");
+            match default_output_device() {
+                Ok(device) => {
+                    info!("✅ Using default system audio: '{}'", device.name);
+                    Some(Arc::new(device))
+                }
+                Err(e) => {
+                    warn!("⚠️ No default system audio available: {}", e);
+                    warn!("   Recording will continue with microphone only");
+                    None // System audio is optional
+                }
+            }
         }
     };
 
@@ -130,9 +227,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         let _ = app_for_error.emit("recording-error", error.user_message());
     });
 
-    // Start recording with default devices, passing auto_save setting
+    // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
     let transcription_receiver = manager
-        .start_recording_with_defaults_and_auto_save(auto_save)
+        .start_recording(microphone_device, system_device, auto_save)
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
 
