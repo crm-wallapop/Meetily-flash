@@ -557,6 +557,7 @@ pub fn run() {
             parakeet_engine::commands::parakeet_transcribe_audio,
             parakeet_engine::commands::parakeet_get_models_directory,
             parakeet_engine::commands::parakeet_download_model,
+            parakeet_engine::commands::parakeet_retry_download,
             parakeet_engine::commands::parakeet_cancel_download,
             parakeet_engine::commands::parakeet_delete_corrupted_model,
             parakeet_engine::commands::open_parakeet_models_folder,

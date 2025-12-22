@@ -56,6 +56,37 @@ export function DownloadProgressStep() {
   const [isCompleting, setIsCompleting] = useState(false);
   const downloadStartedRef = useRef(false);
 
+  // Retry download handler
+  const handleRetryDownload = async () => {
+    console.log('[DownloadProgressStep] Retrying Parakeet download');
+
+    // Reset error state
+    setParakeetState((prev) => ({
+      ...prev,
+      status: 'waiting',
+      error: undefined,
+      progress: 0,
+      downloadedMb: 0,
+      speedMbps: 0,
+    }));
+
+    try {
+      await invoke('parakeet_retry_download', { modelName: PARAKEET_MODEL });
+      // Progress events will update state
+    } catch (error) {
+      console.error('[DownloadProgressStep] Retry failed:', error);
+      setParakeetState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: error instanceof Error ? error.message : 'Retry failed',
+      }));
+
+      toast.error('Download retry failed', {
+        description: 'Please check your connection and try again.',
+      });
+    }
+  };
+
   // Fetch recommended model and detect platform on mount
   useEffect(() => {
     const fetchRecommendation = async () => {
@@ -200,6 +231,29 @@ export function DownloadProgressStep() {
   };
 
   const handleContinue = async () => {
+    // Verify actual model availability (catches state drift)
+    try {
+      await invoke('parakeet_init');
+      const actuallyAvailable = await invoke<boolean>('parakeet_has_available_models');
+
+      if (actuallyAvailable && !parakeetDownloaded) {
+        console.log('[DownloadProgressStep] Model available but state not updated');
+        setParakeetDownloaded(true);
+        setParakeetState((prev) => ({
+          ...prev,
+          status: 'completed',
+          progress: 100,
+        }));
+      } else if (!actuallyAvailable && parakeetState.status === 'error') {
+        toast.error('Transcription engine required', {
+          description: 'Please retry the download before continuing.',
+        });
+        return;
+      }
+    } catch (error) {
+      console.warn('[DownloadProgressStep] Failed to verify model:', error);
+    }
+
     // Check if downloads are complete for toast notification
     const downloadsComplete = parakeetState.status === 'completed' &&
       gemmaState.status === 'completed';
@@ -265,7 +319,17 @@ export function DownloadProgressStep() {
             </div>
           )}
           {state.status === 'error' && (
-            <span className="text-sm text-red-500">Error</span>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-red-500">Failed</span>
+              {title === 'Transcription Engine' && (
+                <button
+                  onClick={handleRetryDownload}
+                  className="text-xs text-blue-600 hover:text-blue-700 underline"
+                >
+                  Retry
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -298,7 +362,22 @@ export function DownloadProgressStep() {
       )}
 
       {state.status === 'error' && state.error && (
-        <p className="text-sm text-red-500 mt-2">{state.error}</p>
+        <div className="mt-2 p-3 bg-red-50 border border-red-200 rounded-md">
+          <p className="text-sm text-red-600 font-medium">Download Error</p>
+          <p className="text-xs text-red-500 mt-1">{state.error}</p>
+          {title === 'Transcription Engine' && (
+            <button
+              onClick={handleRetryDownload}
+              className="mt-2 text-sm text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              Try Again
+            </button>
+          )}
+        </div>
       )}
     </div>
   );

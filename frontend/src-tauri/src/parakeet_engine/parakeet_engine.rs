@@ -325,6 +325,53 @@ impl ParakeetEngine {
         Ok(())
     }
 
+    /// Clean incomplete model directory before download
+    /// Removes all files if directory exists but model is not Available
+    async fn clean_incomplete_model_directory(&self, model_dir: &PathBuf) -> Result<()> {
+        if !model_dir.exists() {
+            return Ok(()); // Nothing to clean
+        }
+
+        // Validate the directory
+        match self.validate_model_directory(model_dir).await {
+            Ok(_) => {
+                log::info!("Model directory is valid, no cleanup needed");
+                return Ok(());
+            }
+            Err(validation_error) => {
+                log::warn!(
+                    "Model directory exists but is invalid: {}. Cleaning up...",
+                    validation_error
+                );
+
+                // List and remove all files in the directory
+                let mut entries = fs::read_dir(model_dir).await
+                    .map_err(|e| anyhow!("Failed to read model directory: {}", e))?;
+
+                let mut removed_count = 0;
+                while let Some(entry) = entries.next_entry().await
+                    .map_err(|e| anyhow!("Failed to read directory entry: {}", e))?
+                {
+                    let path = entry.path();
+                    if path.is_file() {
+                        match fs::remove_file(&path).await {
+                            Ok(_) => {
+                                log::info!("Removed incomplete file: {:?}", path.file_name());
+                                removed_count += 1;
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to remove file {:?}: {}", path, e);
+                            }
+                        }
+                    }
+                }
+
+                log::info!("Cleaned {} incomplete files from model directory", removed_count);
+                Ok(())
+            }
+        }
+    }
+
     /// Load a Parakeet model
     pub async fn load_model(&self, model_name: &str) -> Result<()> {
         let models = self.available_models.read().await;
@@ -578,6 +625,13 @@ impl ParakeetEngine {
             }
         }
 
+        // Clean up incomplete downloads before starting
+        log::info!("Checking for incomplete model files to clean up...");
+        if let Err(e) = self.clean_incomplete_model_directory(model_dir).await {
+            log::warn!("Failed to clean incomplete model directory: {}", e);
+            // Continue anyway - we'll handle errors during download
+        }
+
         // Optimized HTTP client for large file downloads
         let client = reqwest::Client::builder()
             .tcp_nodelay(true)              // Disable Nagle's algorithm for better streaming
@@ -671,9 +725,15 @@ impl ParakeetEngine {
 
             let expected_size = file_sizes.get(*filename).copied().unwrap_or(0);
 
-            // Skip if file is already complete
-            if existing_size >= expected_size && expected_size > 0 {
-                log::info!("Skipping already downloaded file: {} ({:.2} MB)", filename, existing_size as f64 / 1_048_576.0);
+            // Skip if file is already complete (with 1% tolerance for size variations)
+            let size_tolerance = (expected_size as f64 * 0.99) as u64;
+            if existing_size >= size_tolerance && expected_size > 0 {
+                log::info!(
+                    "Skipping complete file: {} ({:.2} MB, expected: {:.2} MB)",
+                    filename,
+                    existing_size as f64 / 1_048_576.0,
+                    expected_size as f64 / 1_048_576.0
+                );
                 continue;
             }
 
@@ -686,7 +746,7 @@ impl ParakeetEngine {
                 log::info!("Resuming download from byte {}", existing_size);
             }
 
-            let response = request.send().await
+            let mut response = request.send().await
                 .map_err(|e| {
                     anyhow!("Failed to start download for {}: {}", filename, e)
                 })?;
@@ -703,8 +763,43 @@ impl ParakeetEngine {
                     log::warn!("Server doesn't support resume for {}, starting fresh download", filename);
                 }
                 (response.content_length().unwrap_or(0), false)
+            } else if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+                // 416: Range not satisfiable - file complete or invalid range
+                log::warn!("Server returned 416 Range Not Satisfiable for {}", filename);
+
+                let size_tolerance = (expected_size as f64 * 0.99) as u64;
+                if existing_size >= size_tolerance && expected_size > 0 {
+                    // File is complete - skip it
+                    log::info!("File {} complete ({} bytes). Skipping.", filename, existing_size);
+                    continue;
+                } else {
+                    // File incomplete but server won't accept range - delete and retry
+                    log::warn!(
+                        "File {} incomplete ({}/{} bytes). Deleting and retrying.",
+                        filename, existing_size, expected_size
+                    );
+
+                    if let Err(e) = fs::remove_file(&file_path).await {
+                        let mut active = self.active_downloads.write().await;
+                        active.remove(model_name);
+                        return Err(anyhow!("Failed to delete incomplete file {}: {}", filename, e));
+                    }
+
+                    // Retry without Range header
+                    log::info!("Retrying {} without resume", filename);
+                    response = client.get(&file_url).send().await
+                        .map_err(|e| anyhow!("Retry failed for {}: {}", filename, e))?;
+
+                    if !response.status().is_success() {
+                        let mut active = self.active_downloads.write().await;
+                        active.remove(model_name);
+                        return Err(anyhow!("Retry failed for {} with status: {}", filename, response.status()));
+                    }
+
+                    (response.content_length().unwrap_or(0), false)
+                }
             } else {
-                // Remove from active downloads on error
+                // Other errors
                 let mut active = self.active_downloads.write().await;
                 active.remove(model_name);
                 return Err(anyhow!("Download failed for {} with status: {}", filename, response.status()));

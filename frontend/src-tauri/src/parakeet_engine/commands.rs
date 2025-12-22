@@ -481,6 +481,29 @@ pub async fn parakeet_cancel_download(model_name: String) -> Result<(), String> 
 }
 
 #[command]
+pub async fn parakeet_retry_download<R: Runtime>(
+    app_handle: AppHandle<R>,
+    model_name: String,
+) -> Result<(), String> {
+    log::info!("Retrying download for: {}", model_name);
+
+    let engine = {
+        let guard = PARAKEET_ENGINE.lock().unwrap();
+        guard.as_ref().cloned()
+    };
+
+    if let Some(engine) = engine {
+        // Rediscover models to reset state
+        let _ = engine.discover_models().await;
+
+        // Call regular download (emits events)
+        parakeet_download_model(app_handle, model_name).await
+    } else {
+        Err("Parakeet engine not initialized".to_string())
+    }
+}
+
+#[command]
 pub async fn parakeet_delete_corrupted_model(model_name: String) -> Result<String, String> {
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();

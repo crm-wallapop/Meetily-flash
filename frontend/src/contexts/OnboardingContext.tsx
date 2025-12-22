@@ -59,6 +59,7 @@ interface OnboardingContextType {
   setPermissionsSkipped: (skipped: boolean) => void;
   completeOnboarding: () => Promise<void>;
   startBackgroundDownloads: (includeGemma: boolean) => Promise<void>;
+  retryParakeetDownload: () => Promise<void>;
 }
 
 const OnboardingContext = createContext<OnboardingContextType | undefined>(undefined);
@@ -466,6 +467,16 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     }
   };
 
+  const retryParakeetDownload = async () => {
+    console.log('[OnboardingContext] Retrying Parakeet download');
+    try {
+      await invoke('parakeet_retry_download', { modelName: PARAKEET_MODEL });
+    } catch (error) {
+      console.error('[OnboardingContext] Retry failed:', error);
+      throw error;
+    }
+  };
+
   const setPermissionStatus = useCallback((permission: keyof OnboardingPermissions, status: PermissionStatus) => {
     setPermissions((prev: OnboardingPermissions) => ({
       ...prev,
@@ -519,6 +530,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         setPermissionsSkipped,
         completeOnboarding,
         startBackgroundDownloads,
+        retryParakeetDownload,
       }}
     >
       {children}
