@@ -12,12 +12,27 @@ if (-not $env:DIGICERT_KEYPAIR_ALIAS) {
 Write-Host "Signing: $FilePath"
 Write-Host "Using keypair alias: $env:DIGICERT_KEYPAIR_ALIAS"
 
-# Sign the file
-smctl sign -i $FilePath -k $env:DIGICERT_KEYPAIR_ALIAS
+# Sign the file with verbose output
+$signOutput = smctl sign --keypair-alias $env:DIGICERT_KEYPAIR_ALIAS --input $FilePath --verbose 2>&1
+$signExitCode = $LASTEXITCODE
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Signing failed with exit code: $LASTEXITCODE"
-    exit $LASTEXITCODE
+Write-Host "Sign output: $signOutput"
+Write-Host "Sign exit code: $signExitCode"
+
+if ($signExitCode -ne 0) {
+    Write-Error "Signing failed with exit code: $signExitCode"
+    Write-Error "Output: $signOutput"
+    exit $signExitCode
+}
+
+# Verify the signature was applied
+$sig = Get-AuthenticodeSignature -FilePath $FilePath
+if ($sig.Status -ne 'Valid') {
+    Write-Error "Signature verification failed after signing"
+    Write-Error "Status: $($sig.Status)"
+    Write-Error "Message: $($sig.StatusMessage)"
+    exit 1
 }
 
 Write-Host "Successfully signed: $FilePath"
+Write-Host "Signature status: $($sig.Status)"
