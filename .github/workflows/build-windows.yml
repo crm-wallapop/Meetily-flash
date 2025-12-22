@@ -244,7 +244,7 @@ jobs:
           # the signing should still work. We'll test in the pre-build signing test.
 
       - name: Pre-Build Signing Test
-        if: ${{ github.event.inputs.test-signing == 'true' }}
+        if: ${{ github.event.inputs.sign-build == 'true' && github.event.inputs.test-signing == 'true' }}
         shell: pwsh
         run: |
           Write-Host "============================================================"
@@ -253,10 +253,16 @@ jobs:
           Write-Host "Testing signing before Tauri build to fail fast if signing is broken"
           Write-Host ""
           Write-Host "Environment Configuration:"
-          Write-Host "  SM_HOST: $env:SM_HOST"
-          Write-Host "  SM_API_KEY: $($env:SM_API_KEY.Substring(0, [Math]::Min(20, $env:SM_API_KEY.Length)))..."
-          Write-Host "  SM_CLIENT_CERT_FILE: $env:SM_CLIENT_CERT_FILE"
-          Write-Host "  SM_CODE_SIGNING_CERT_SHA1_HASH: $env:SM_CODE_SIGNING_CERT_SHA1_HASH"
+          Write-Host "  SM_HOST: $($env:SM_HOST ?? 'NOT SET')"
+          Write-Host "  SM_API_KEY: $(if ($env:SM_API_KEY) { $env:SM_API_KEY.Substring(0, [Math]::Min(20, $env:SM_API_KEY.Length)) + '...' } else { 'NOT SET' })"
+          Write-Host "  SM_CLIENT_CERT_FILE: $($env:SM_CLIENT_CERT_FILE ?? 'NOT SET')"
+          Write-Host "  SM_CODE_SIGNING_CERT_SHA1_HASH: $($env:SM_CODE_SIGNING_CERT_SHA1_HASH ?? 'NOT SET')"
+
+          # Verify environment is set up
+          if (-not $env:SM_HOST -or -not $env:SM_API_KEY) {
+            Write-Error "DigiCert environment not configured. Make sure 'Sign the build' is enabled."
+            exit 1
+          }
           Write-Host ""
 
           # Verify client certificate exists
