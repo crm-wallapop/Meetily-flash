@@ -66,6 +66,13 @@ export default function Home() {
   useEffect(() => {
     const performStartupChecks = async () => {
       try {
+        // Skip recovery check if currently recording or processing stop
+        // This prevents the recovery dialog from showing when:
+        if (recordingState.isRecording || isStopping || isProcessingTranscript) {
+          console.log('Skipping recovery check - recording in progress or processing');
+          return;
+        }
+
         // 1. Clean up old meetings (7+ days)
         try {
           await indexedDBService.deleteOldMeetings(7);
@@ -89,7 +96,7 @@ export default function Home() {
     };
 
     performStartupChecks();
-  }, [checkForRecoverableTranscripts]);
+  }, [checkForRecoverableTranscripts, recordingState.isRecording, isStopping, isProcessingTranscript]);
 
   // Watch for recoverable meetings changes and show dialog once per session
   useEffect(() => {

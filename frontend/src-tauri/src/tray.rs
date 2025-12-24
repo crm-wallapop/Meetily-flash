@@ -89,15 +89,10 @@ fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
                 Ok(_) => {
                     log::info!("Tray toggle: Recording stopped successfully");
 
-                    // Trigger frontend post-processing AFTER Rust completes
+                    // Trigger frontend post-processing via event (works from any page)
                     // (SQLite save, navigation, analytics)
-                    if let Some(window) = app_clone.get_webview_window("main") {
-                        let _ = window
-                            .eval("window.handleRecordingStop && window.handleRecordingStop(true)");
-                    } else {
-                        log::warn!(
-                            "Tray toggle: Main window not found for post-processing callback"
-                        );
+                    if let Err(e) = app_clone.emit("recording-stop-complete", true) {
+                        log::error!("Tray toggle: Failed to emit recording-stop-complete event: {}", e);
                     }
                 }
                 Err(e) => {
@@ -190,13 +185,10 @@ fn stop_recording_handler<R: Runtime>(app: &AppHandle<R>) {
             Ok(_) => {
                 log::info!("Tray: Recording stopped successfully");
 
-                // Trigger frontend post-processing AFTER Rust completes
+                // Trigger frontend post-processing via event (works from any page)
                 // (SQLite save, navigation, analytics)
-                if let Some(window) = app_clone.get_webview_window("main") {
-                    let _ = window
-                        .eval("window.handleRecordingStop && window.handleRecordingStop(true)");
-                } else {
-                    log::warn!("Tray: Main window not found for post-processing callback");
+                if let Err(e) = app_clone.emit("recording-stop-complete", true) {
+                    log::error!("Tray: Failed to emit recording-stop-complete event: {}", e);
                 }
             }
             Err(e) => {

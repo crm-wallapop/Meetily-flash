@@ -41,9 +41,16 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
     try {
       const meetings = await indexedDBService.getAllMeetings();
 
-      // Filter out meetings older than 7 days
+      // Filter out meetings older than 7 days and newer than 5 seconds
+      // The 5 seconds threshold prevents showing meetings from the current session(jus in case)
+      // where recording just stopped but hasn't been fully saved yet
       const cutoffTime = Date.now() - (7 * 24 * 60 * 60 * 1000);
-      const recentMeetings = meetings.filter(m => m.lastUpdated > cutoffTime);
+      const secondsAgo = Date.now() - (5 * 1000);
+      const recentMeetings = meetings.filter(m => {
+        const isWithinRetention = m.lastUpdated > cutoffTime; // Not older than 7 days
+        const isOldEnough = m.lastUpdated < secondsAgo; // Older than 5 seconds
+        return isWithinRetention && isOldEnough;
+      });
 
       // Verify audio checkpoint availability for each meeting
       const meetingsWithAudioStatus = await Promise.all(

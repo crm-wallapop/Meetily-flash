@@ -580,14 +580,21 @@ pub async fn stop_recording<R: Runtime>(
             }
         });
 
-        // Wait indefinitely for transcription completion - no 30 second timeout!
-        match task_handle.await {
-            Ok(()) => {
+        // Wait up to 10 minutes for transcription completion to prevent indefinite hangs
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(600), // 10 minutes max
+            task_handle
+        ).await {
+            Ok(Ok(())) => {
                 info!("✅ ALL transcription chunks processed successfully - no data lost");
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!("⚠️ Transcription task completed with error: {:?}", e);
                 // Continue anyway - the worker may have processed most chunks
+            }
+            Err(_) => {
+                warn!("⏱️ Transcription timeout (10 minutes) reached, continuing shutdown to prevent indefinite hang");
+                // Continue shutdown even on timeout - better to lose some chunks than hang forever
             }
         }
 
@@ -609,16 +616,27 @@ pub async fn stop_recording<R: Runtime>(
 
     info!("🧠 All transcript chunks processed. Now safely unloading transcription model...");
 
-    // Determine which provider was used and unload the appropriate model
-    let config = match crate::api::api::api_get_transcript_config(
-        app.clone(),
-        app.clone().state(),
-        None,
+    // Determine which provider was used and unload the appropriate model (with timeout)
+    let config = match tokio::time::timeout(
+        tokio::time::Duration::from_secs(30), // 30 seconds max for DB operation
+        crate::api::api::api_get_transcript_config(
+            app.clone(),
+            app.clone().state(),
+            None,
+        )
     )
     .await
     {
-        Ok(Some(config)) => Some(config.provider),
-        _ => None,
+        Ok(Ok(Some(config))) => Some(config.provider),
+        Ok(Ok(None)) => None,
+        Ok(Err(e)) => {
+            warn!("⚠️ Failed to get transcript config: {:?}", e);
+            None
+        }
+        Err(_) => {
+            warn!("⏱️ Transcript config timeout (30s), continuing shutdown");
+            None
+        }
     };
 
     match config.as_deref() {
@@ -796,15 +814,22 @@ pub async fn stop_recording<R: Runtime>(
         let meeting_folder = manager.get_meeting_folder();
         let meeting_name = manager.get_meeting_name();
 
-        match manager.save_recording_only(&app).await {
-            Ok(_) => {
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(300), // 5 minutes max for file I/O
+            manager.save_recording_only(&app)
+        ).await {
+            Ok(Ok(_)) => {
                 info!("✅ Recording data saved successfully during cleanup");
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!(
                     "⚠️ Error during recording cleanup (transcripts preserved): {}",
                     e
                 );
+                // Don't fail shutdown - transcripts are already preserved
+            }
+            Err(_) => {
+                warn!("⏱️ File I/O timeout (5 minutes) reached during save, continuing shutdown");
                 // Don't fail shutdown - transcripts are already preserved
             }
         }
