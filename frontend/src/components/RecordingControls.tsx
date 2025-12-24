@@ -9,6 +9,7 @@ import { listen } from '@tauri-apps/api/event';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import Analytics from '@/lib/analytics';
+import { useRecordingState } from '@/contexts/RecordingStateContext';
 
 interface RecordingControlsProps {
   isRecording: boolean;
@@ -40,13 +41,16 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   selectedDevices,
   meetingName,
 }) => {
+  // Use global recording state context for pause state (syncs with tray operations)
+  const recordingState = useRecordingState();
+  const isPaused = recordingState.isPaused;
+
   const [showPlayback, setShowPlayback] = useState(false);
   const [recordingPath, setRecordingPath] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
-  const [isPaused, setIsPaused] = useState(false);
   const [isPausing, setIsPausing] = useState(false);
   const [isResuming, setIsResuming] = useState(false);
   const MIN_RECORDING_DURATION = 2000; // 2 seconds minimum recording time
@@ -209,7 +213,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
 
     try {
       await invoke('pause_recording');
-      setIsPaused(true);
+      // isPaused state now managed by RecordingStateContext via events
       console.log('Recording paused successfully');
     } catch (error) {
       console.error('Failed to pause recording:', error);
@@ -227,7 +231,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
 
     try {
       await invoke('resume_recording');
-      setIsPaused(false);
+      // isPaused state now managed by RecordingStateContext via events
       console.log('Recording resumed successfully');
     } catch (error) {
       console.error('Failed to resume recording:', error);
@@ -307,17 +311,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           } */
         });
 
-        // Recording paused listener
-        const pausedUnsubscribe = await listen('recording-paused', (event) => {
-          console.log('recording-paused event received:', event);
-          setIsPaused(true);
-        });
-
-        // Recording resumed listener
-        const resumedUnsubscribe = await listen('recording-resumed', (event) => {
-          console.log('recording-resumed event received:', event);
-          setIsPaused(false);
-        });
+        // Pause/Resume events are now handled by RecordingStateContext
+        // No need for duplicate listeners here
 
         // Speech detected listener - for UX feedback when VAD detects speech
         const speechDetectedUnsubscribe = await listen('speech-detected', (event) => {
@@ -328,8 +323,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
         unsubscribes = [
           transcriptErrorUnsubscribe,
           transcriptionErrorUnsubscribe,
-          pausedUnsubscribe,
-          resumedUnsubscribe,
           speechDetectedUnsubscribe
         ];
         console.log('Recording event listeners set up successfully');
