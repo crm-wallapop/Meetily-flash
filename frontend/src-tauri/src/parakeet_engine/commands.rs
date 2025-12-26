@@ -1,4 +1,4 @@
-use crate::parakeet_engine::{ModelInfo, ParakeetEngine, DownloadProgress};
+use crate::parakeet_engine::{ModelInfo, ModelStatus, ParakeetEngine, DownloadProgress};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::Arc;
@@ -464,7 +464,10 @@ pub async fn parakeet_download_model<R: Runtime>(
 }
 
 #[command]
-pub async fn parakeet_cancel_download(model_name: String) -> Result<(), String> {
+pub async fn parakeet_cancel_download<R: Runtime>(
+    app_handle: AppHandle<R>,
+    model_name: String,
+) -> Result<(), String> {
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();
         guard.as_ref().cloned()
@@ -474,7 +477,20 @@ pub async fn parakeet_cancel_download(model_name: String) -> Result<(), String> 
         engine
             .cancel_download(&model_name)
             .await
-            .map_err(|e| format!("Failed to cancel Parakeet download: {}", e))
+            .map_err(|e| format!("Failed to cancel Parakeet download: {}", e))?;
+
+        // Emit cancellation event to update UI (global toast and component state)
+        let _ = app_handle.emit(
+            "parakeet-model-download-progress",
+            serde_json::json!({
+                "modelName": model_name,
+                "progress": 0,
+                "status": "cancelled"
+            }),
+        );
+
+        log::info!("Parakeet download cancelled: {}", model_name);
+        Ok(())
     } else {
         Err("Parakeet engine not initialized".to_string())
     }
@@ -493,7 +509,26 @@ pub async fn parakeet_retry_download<R: Runtime>(
     };
 
     if let Some(engine) = engine {
-        // Rediscover models to reset state
+        // DEFENSIVE: Ensure clean state before retry
+        // This handles any edge cases where error handler didn't complete
+        {
+            let mut active = engine.active_downloads.write().await;
+            if active.contains(&model_name) {
+                log::warn!("Retry: Model {} was still in active downloads, removing", model_name);
+                active.remove(&model_name);
+            }
+        }
+
+        // DEFENSIVE: Force model status to Missing to allow fresh download
+        {
+            let mut models = engine.available_models.write().await;
+            if let Some(model) = models.get_mut(&model_name) {
+                log::info!("Retry: Resetting model {} status from {:?} to Missing", model_name, model.status);
+                model.status = ModelStatus::Missing;
+            }
+        }
+
+        // Rediscover models to refresh state based on disk files
         let _ = engine.discover_models().await;
 
         // Call regular download (emits events)

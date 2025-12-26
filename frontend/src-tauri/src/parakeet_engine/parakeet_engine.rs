@@ -115,10 +115,10 @@ pub struct ParakeetEngine {
     models_dir: PathBuf,
     current_model: Arc<RwLock<Option<ParakeetModel>>>,
     current_model_name: Arc<RwLock<Option<String>>>,
-    available_models: Arc<RwLock<HashMap<String, ModelInfo>>>,
+    pub(crate) available_models: Arc<RwLock<HashMap<String, ModelInfo>>>,
     cancel_download_flag: Arc<RwLock<Option<String>>>, // Model name being cancelled
     // Active downloads tracking to prevent concurrent downloads
-    active_downloads: Arc<RwLock<HashSet<String>>>, // Set of models currently being downloaded
+    pub(crate) active_downloads: Arc<RwLock<HashSet<String>>>, // Set of models currently being downloaded
 }
 
 impl ParakeetEngine {
@@ -850,8 +850,21 @@ impl ParakeetEngine {
                     Err(_) => {
                         log::warn!("Download timeout for {}: no data received for 30 seconds", model_name);
                         let _ = writer.flush().await;
-                        let mut active = self.active_downloads.write().await;
-                        active.remove(model_name);
+
+                        // Remove from active downloads
+                        {
+                            let mut active = self.active_downloads.write().await;
+                            active.remove(model_name);
+                        }
+
+                        // Update model status to Missing so retry can work
+                        {
+                            let mut models = self.available_models.write().await;
+                            if let Some(model) = models.get_mut(model_name) {
+                                model.status = ModelStatus::Missing;
+                            }
+                        }
+
                         return Err(anyhow!("Download timeout - No data received for 30 seconds"));
                     },
                     // Stream ended
@@ -864,8 +877,20 @@ impl ParakeetEngine {
                             Err(e) => {
                                 log::error!("Download error for {}: {:?}", model_name, e);
                                 let _ = writer.flush().await;
-                                let mut active = self.active_downloads.write().await;
-                                active.remove(model_name);
+
+                                // Remove from active downloads
+                                {
+                                    let mut active = self.active_downloads.write().await;
+                                    active.remove(model_name);
+                                }
+
+                                // Update model status to Missing so retry can work
+                                {
+                                    let mut models = self.available_models.write().await;
+                                    if let Some(model) = models.get_mut(model_name) {
+                                        model.status = ModelStatus::Missing;
+                                    }
+                                }
 
                                 let error_msg = if e.is_timeout() {
                                     "Connection timeout - Check your internet"
@@ -885,8 +910,19 @@ impl ParakeetEngine {
 
                 if let Err(e) = writer.write_all(&chunk).await {
                     // Remove from active downloads on error
-                    let mut active = self.active_downloads.write().await;
-                    active.remove(model_name);
+                    {
+                        let mut active = self.active_downloads.write().await;
+                        active.remove(model_name);
+                    }
+
+                    // Update model status to Missing so retry can work
+                    {
+                        let mut models = self.available_models.write().await;
+                        if let Some(model) = models.get_mut(model_name) {
+                            model.status = ModelStatus::Missing;
+                        }
+                    }
+
                     return Err(anyhow!("Failed to write chunk to file: {}", e));
                 }
 
@@ -948,8 +984,19 @@ impl ParakeetEngine {
             // Flush the buffered writer
             if let Err(e) = writer.flush().await {
                 // Remove from active downloads on error
-                let mut active = self.active_downloads.write().await;
-                active.remove(model_name);
+                {
+                    let mut active = self.active_downloads.write().await;
+                    active.remove(model_name);
+                }
+
+                // Update model status to Missing so retry can work
+                {
+                    let mut models = self.available_models.write().await;
+                    if let Some(model) = models.get_mut(model_name) {
+                        model.status = ModelStatus::Missing;
+                    }
+                }
+
                 return Err(anyhow!("Failed to flush file {}: {}", filename, e));
             }
 

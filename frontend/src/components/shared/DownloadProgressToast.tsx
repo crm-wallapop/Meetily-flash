@@ -235,10 +235,19 @@ export function useDownloadProgressToast() {
         downloadedMb: downloaded_mb ?? 0,
         totalMb: total_mb ?? 670,
         speedMbps: speed_mbps ?? 0,
-        status: status === 'completed' || progress >= 100 ? 'completed' : 'downloading',
+        status: status === 'cancelled'
+          ? 'cancelled'
+          : status === 'completed' || progress >= 100
+          ? 'completed'
+          : 'downloading',
       };
 
       updateDownload(modelName, downloadData);
+
+      // Clean up cancelled downloads after delay to auto-dismiss toast
+      if (downloadData.status === 'cancelled') {
+        cleanupDownload(modelName, 6000); // 5s toast + 1s buffer
+      }
       // Removed direct showDownloadToast call here, handled by effect
     });
 

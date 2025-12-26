@@ -160,9 +160,25 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
             const { [model]: _, ...rest } = prev;
             return rest;
           });
-          // Refresh models list to get updated status from backend
-          fetchModels();
+
+          // Update model status to error locally instead of fetching from backend
+          // Backend doesn't persist error status, so fetchModels() would return not_downloaded
+          setModels((prevModels) =>
+            prevModels.map((m) =>
+              m.name === model
+                ? {
+                    ...m,
+                    status: {
+                      type: 'error',
+                      progress: 0,
+                    } as any,
+                  }
+                : m
+            )
+          );
+
           // Don't show error toast here - DownloadProgressToast already handles it
+          // Don't call fetchModels() - it would overwrite error status with not_downloaded
         }
       });
     };
@@ -178,8 +194,9 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
 
   const downloadModel = async (modelName: string) => {
     try {
-      // Don't optimistically add to downloadingModels - wait for first progress event
-      // This avoids state desync if backend immediately rejects the download
+      // Optimistically add to downloadingModels for immediate UI feedback
+      setDownloadingModels((prev) => new Set([...prev, modelName]));
+
       await invoke('builtin_ai_download_model', { modelName });
     } catch (error) {
       console.error('Failed to download model:', error);
@@ -187,14 +204,14 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
       // Check if this is a cancellation error (starts with "CANCELLED:")
       const errorMsg = String(error);
       if (errorMsg.startsWith('CANCELLED:')) {
+        // Cancel handler already removed from downloadingModels
         // Don't show error toast for cancellations - cancel function already shows info toast
         return;
       }
 
-      // For real errors, show toast
+      // For real errors, show toast and remove from downloading
       toast.error(`Failed to download ${modelName}`);
 
-      // Remove from downloadingModels in case it was added
       setDownloadingModels((prev) => {
         const newSet = new Set(prev);
         newSet.delete(modelName);

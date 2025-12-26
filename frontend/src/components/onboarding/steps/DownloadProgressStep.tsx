@@ -55,10 +55,19 @@ export function DownloadProgressStep() {
 
   const [isCompleting, setIsCompleting] = useState(false);
   const downloadStartedRef = useRef(false);
+  const retryingRef = useRef(false);
+  const retryingSummaryRef = useRef(false);
 
   // Retry download handler
   const handleRetryDownload = async () => {
+    // Prevent multiple simultaneous retries
+    if (retryingRef.current) {
+      console.log('[DownloadProgressStep] Retry already in progress, ignoring');
+      return;
+    }
+
     console.log('[DownloadProgressStep] Retrying Parakeet download');
+    retryingRef.current = true;
 
     // Reset error state
     setParakeetState((prev) => ({
@@ -84,6 +93,54 @@ export function DownloadProgressStep() {
       toast.error('Download retry failed', {
         description: 'Please check your connection and try again.',
       });
+    } finally {
+      // Allow retry again after 2 seconds
+      setTimeout(() => {
+        retryingRef.current = false;
+      }, 2000);
+    }
+  };
+
+  // Retry summary download handler
+  const handleRetrySummaryDownload = async () => {
+    // Prevent multiple simultaneous retries
+    if (retryingSummaryRef.current) {
+      console.log('[DownloadProgressStep] Summary retry already in progress, ignoring');
+      return;
+    }
+
+    console.log('[DownloadProgressStep] Retrying summary model download');
+    retryingSummaryRef.current = true;
+
+    // Reset error state
+    setGemmaState((prev) => ({
+      ...prev,
+      status: 'downloading',
+      error: undefined,
+      progress: 0,
+      downloadedMb: 0,
+      speedMbps: 0,
+    }));
+
+    try {
+      // Call download command directly (no retry command exists for built-in AI)
+      await invoke('builtin_ai_download_model', { modelName: selectedSummaryModel || recommendedModel });
+    } catch (error) {
+      console.error('[DownloadProgressStep] Summary retry failed:', error);
+      setGemmaState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: error instanceof Error ? error.message : 'Retry failed',
+      }));
+
+      toast.error('Summary model download retry failed', {
+        description: 'Please check your connection and try again.',
+      });
+    } finally {
+      // Allow retry again after 2 seconds
+      setTimeout(() => {
+        retryingSummaryRef.current = false;
+      }, 2000);
     }
   };
 
@@ -187,16 +244,22 @@ export function DownloadProgressStep() {
       total_mb?: number;
       speed_mbps?: number;
       status: string;
+      error?: string;
     }>('builtin-ai-download-progress', (event) => {
-      const { model, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
+      const { model, progress, downloaded_mb, total_mb, speed_mbps, status, error } = event.payload;
       if (model === selectedSummaryModel || model === 'gemma3:1b' || model === 'gemma3:4b') {
         setGemmaState((prev) => ({
           ...prev,
-          status: status === 'completed' ? 'completed' : 'downloading',
+          status: status === 'completed'
+            ? 'completed'
+            : status === 'error'
+            ? 'error'
+            : 'downloading',
           progress,
           downloadedMb: downloaded_mb ?? prev.downloadedMb,
           totalMb: total_mb ?? prev.totalMb,
           speedMbps: speed_mbps ?? prev.speedMbps,
+          error: status === 'error' ? error : undefined,
         }));
 
         if (status === 'completed' || progress >= 100) {
@@ -319,17 +382,7 @@ export function DownloadProgressStep() {
             </div>
           )}
           {state.status === 'error' && (
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-red-500">Failed</span>
-              {title === 'Transcription Engine' && (
-                <button
-                  onClick={handleRetryDownload}
-                  className="text-xs text-blue-600 hover:text-blue-700 underline"
-                >
-                  Retry
-                </button>
-              )}
-            </div>
+            <span className="text-sm text-red-500">Failed</span>
           )}
         </div>
       </div>
@@ -365,10 +418,10 @@ export function DownloadProgressStep() {
         <div className="mt-2 p-3 bg-red-50 border border-red-200 rounded-md">
           <p className="text-sm text-red-600 font-medium">Download Error</p>
           <p className="text-xs text-red-500 mt-1">{state.error}</p>
-          {title === 'Transcription Engine' && (
+          {(title === 'Transcription Engine' || title === 'Summary Engine') && (
             <button
-              onClick={handleRetryDownload}
-              className="mt-2 text-sm text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1"
+              onClick={title === 'Transcription Engine' ? handleRetryDownload : handleRetrySummaryDownload}
+              className="mt-3 w-full h-9 px-4 bg-gray-900 hover:bg-gray-800 text-white text-sm font-medium rounded-md transition-colors flex items-center justify-center gap-2"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
