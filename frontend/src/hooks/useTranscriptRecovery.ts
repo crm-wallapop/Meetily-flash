@@ -41,59 +41,13 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
     try {
       const meetings = await indexedDBService.getAllMeetings();
 
-      // Get and validate session storage flags
-      const justSavedMeetingId = sessionStorage.getItem('just_saved_meeting_id');
-      const justSavedTimestamp = sessionStorage.getItem('just_saved_meeting_timestamp');
-
-      // Check for in-progress stops (early protection)
-      const justStoppedKey = sessionStorage.getItem('just_stopped_meeting_key');
-      const justStoppedTimestamp = sessionStorage.getItem('just_stopped_meeting_timestamp');
-
-      // Clean up stale saved meeting flags (older than 5 minutes)
-      if (justSavedTimestamp) {
-        const savedAge = Date.now() - parseInt(justSavedTimestamp);
-        if (savedAge > 5 * 60 * 1000) { // 5 minutes
-          sessionStorage.removeItem('just_saved_meeting_id');
-          sessionStorage.removeItem('just_saved_meeting_timestamp');
-        }
-      }
-
-      // Clean up stale stop protection (older than 2 minutes)
-      if (justStoppedTimestamp) {
-        const stoppedAge = Date.now() - parseInt(justStoppedTimestamp);
-        if (stoppedAge > 2 * 60 * 1000) { // 2 minutes
-          sessionStorage.removeItem('just_stopped_meeting_key');
-          sessionStorage.removeItem('just_stopped_meeting_timestamp');
-        }
-      }
-
       // Filter out meetings older than 7 days and newer than 15 seconds
       // The 15 seconds threshold prevents showing meetings from the current session(jus in case)
       // where recording just stopped but hasn't been fully saved yet
       const cutoffTime = Date.now() - (7 * 24 * 60 * 60 * 1000);
       const secondsAgo = Date.now() - (15 * 1000);
 
-      // Check if we're in a recent stop window (within 2 minutes of stop)
-      const recentStopWindow = justStoppedTimestamp
-        ? Date.now() - parseInt(justStoppedTimestamp) < 2 * 60 * 1000
-        : false;
-
       const recentMeetings = meetings.filter(m => {
-        // Skip meeting that was just saved in this session
-        if (justSavedMeetingId && m.meetingId === justSavedMeetingId) {
-          console.log('[Recovery] Skipping just-saved meeting:', m.meetingId);
-          return false;
-        }
-
-        // Skip very recent meetings if stop is in progress
-        if (recentStopWindow && justStoppedKey) {
-          const meetingAge = Date.now() - m.lastUpdated;
-          if (meetingAge < 2 * 60 * 1000) {
-            console.log('[Recovery] Skipping meeting - stop in progress:', m.meetingId);
-            return false;
-          }
-        }
-
         const isWithinRetention = m.lastUpdated > cutoffTime; // Not older than 7 days
         const isOldEnough = m.lastUpdated < secondsAgo; // Older than 15 seconds
         return isWithinRetention && isOldEnough;

@@ -131,11 +131,6 @@ export function useRecordingStop(
     setIsRecordingDisabled(true);
     const stopStartTime = Date.now();
 
-    // Early session protection: Prevent recovery dialog during stop processing
-    const protectionKey = `stop-${stopStartTime}`;
-    sessionStorage.setItem('just_stopped_meeting_key', protectionKey);
-    sessionStorage.setItem('just_stopped_meeting_timestamp', stopStartTime.toString());
-
     try {
       console.log('Post-stop processing (new implementation)...', {
         stop_initiated_at: new Date(stopStartTime).toISOString(),
@@ -273,13 +268,6 @@ export function useRecordingStop(
           // Mark meeting as saved in IndexedDB (for recovery system)
           await markMeetingAsSaved();
 
-          // Update session protection with actual meeting ID
-          sessionStorage.setItem('just_saved_meeting_id', meetingId);
-          sessionStorage.setItem('just_saved_meeting_timestamp', Date.now().toString());
-          // Clear early protection (no longer needed)
-          sessionStorage.removeItem('just_stopped_meeting_key');
-          sessionStorage.removeItem('just_stopped_meeting_timestamp');
-
           // Clean up session storage
           sessionStorage.removeItem('last_recording_folder_path');
           sessionStorage.removeItem('last_recording_meeting_name');
@@ -327,12 +315,6 @@ export function useRecordingStop(
 
             // Reset to IDLE after navigation
             setStatus(RecordingStatus.IDLE);
-
-            // NEW: Clear session flags after navigation completes
-            setTimeout(() => {
-              sessionStorage.removeItem('just_saved_meeting_id');
-              sessionStorage.removeItem('just_saved_meeting_timestamp');
-            }, 1000);
           }, 2000);
           // Track meeting completion analytics
           try {
