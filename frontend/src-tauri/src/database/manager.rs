@@ -61,10 +61,60 @@ impl DatabaseManager {
             .join("meeting_minutes.db")
             .to_string_lossy()
             .to_string();
+
+        // WAL file paths for defensive cleanup
+        let wal_path = app_data_dir.join("meeting_minutes.sqlite-wal");
+        let shm_path = app_data_dir.join("meeting_minutes.sqlite-shm");
+
         log::info!("Tauri DB path: {}", tauri_db_path);
         log::info!("Legacy backend DB path: {}", backend_db_path);
 
-        Self::new(&tauri_db_path, &backend_db_path).await
+        // Try to open database with defensive WAL handling
+        match Self::new(&tauri_db_path, &backend_db_path).await {
+            Ok(db_manager) => {
+                log::info!("Database opened successfully");
+                Ok(db_manager)
+            }
+            Err(e) => {
+                // Check if error is due to corrupted WAL file
+                let error_msg = e.to_string();
+                if error_msg.contains("malformed") || error_msg.contains("corrupt") {
+                    log::warn!("Database appears corrupted, likely due to orphaned WAL file. Attempting recovery...");
+                    log::warn!("Error details: {}", error_msg);
+
+                    // Delete potentially corrupted WAL/SHM files
+                    if wal_path.exists() {
+                        match fs::remove_file(&wal_path) {
+                            Ok(_) => log::info!("Removed orphaned WAL file: {:?}", wal_path),
+                            Err(e) => log::warn!("Failed to remove WAL file: {}", e),
+                        }
+                    }
+                    if shm_path.exists() {
+                        match fs::remove_file(&shm_path) {
+                            Ok(_) => log::info!("Removed orphaned SHM file: {:?}", shm_path),
+                            Err(e) => log::warn!("Failed to remove SHM file: {}", e),
+                        }
+                    }
+
+                    // Retry connection without WAL files
+                    log::info!("Retrying database connection after WAL cleanup...");
+                    match Self::new(&tauri_db_path, &backend_db_path).await {
+                        Ok(db_manager) => {
+                            log::info!("Database opened successfully after WAL recovery");
+                            Ok(db_manager)
+                        }
+                        Err(retry_err) => {
+                            log::error!("Database connection failed even after WAL cleanup: {}", retry_err);
+                            Err(retry_err)
+                        }
+                    }
+                } else {
+                    // Not a WAL-related error, propagate original error
+                    log::error!("Database connection failed: {}", error_msg);
+                    Err(e)
+                }
+            }
+        }
     }
 
     /// Check if this is the first launch (sqlite database doesn't exist yet)
@@ -129,5 +179,30 @@ impl DatabaseManager {
                 Err(err)
             }
         }
+    }
+
+    /// Cleanup database connection and checkpoint WAL
+    /// This should be called on application shutdown to ensure:
+    /// - All WAL changes are written to the main database file
+    /// - The .wal and .shm files are deleted
+    /// - Connection pool is gracefully closed
+    pub async fn cleanup(&self) -> Result<()> {
+        log::info!("Starting database cleanup...");
+
+        // Force checkpoint of WAL to main database file and remove WAL file
+        // TRUNCATE mode: checkpoints all pages AND deletes the WAL file
+        match sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&self.pool)
+            .await
+        {
+            Ok(_) => log::info!("WAL checkpoint completed successfully"),
+            Err(e) => log::warn!("WAL checkpoint failed (non-fatal): {}", e),
+        }
+
+        // Close the connection pool gracefully
+        self.pool.close().await;
+        log::info!("Database connection pool closed");
+
+        Ok(())
     }
 }

@@ -713,13 +713,27 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
             if let tauri::RunEvent::Exit = event {
-                log::info!("Application exiting, cleaning up sidecar...");
+                log::info!("Application exiting, cleaning up resources...");
                 tauri::async_runtime::block_on(async {
+                    // Clean up database connection and checkpoint WAL
+                    if let Some(app_state) = _app_handle.try_state::<state::AppState>() {
+                        log::info!("Starting database cleanup...");
+                        if let Err(e) = app_state.db_manager.cleanup().await {
+                            log::error!("Failed to cleanup database: {}", e);
+                        } else {
+                            log::info!("Database cleanup completed successfully");
+                        }
+                    } else {
+                        log::warn!("AppState not available for database cleanup (likely first launch)");
+                    }
+
+                    // Clean up sidecar
+                    log::info!("Cleaning up sidecar...");
                     if let Err(e) = summary::summary_engine::force_shutdown_sidecar().await {
                         log::error!("Failed to force shutdown sidecar: {}", e);
                     }
                 });
-                log::info!("Sidecar cleanup complete");
+                log::info!("Application cleanup complete");
             }
         });
 }
