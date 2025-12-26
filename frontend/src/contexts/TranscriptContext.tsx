@@ -98,19 +98,29 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
             const meetingId = `meeting-${Date.now()}`;
             setCurrentMeetingId(meetingId);
 
+            // Store in sessionStorage as fallback for markMeetingAsSaved
+            sessionStorage.setItem('indexeddb_current_meeting_id', meetingId);
+            console.log('[Recording Started] 💾 IndexedDB meeting ID stored:', meetingId);
+
             // Get meeting name
             const meetingName = await recordingService.getRecordingMeetingName();
+
+            // Use a better fallback that matches the backend's naming pattern
+            const effectiveTitle = meetingName || `Meeting ${new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-')}`;
 
             // Initialize meeting metadata in IndexedDB
             await indexedDBService.saveMeetingMetadata({
               meetingId,
-              title: meetingName || 'Untitled Meeting',
+              title: effectiveTitle,
               startTime: Date.now(),
               lastUpdated: Date.now(),
               transcriptCount: 0,
               savedToSQLite: false,
               folderPath: undefined // Will update shortly
             });
+
+            // Synchronize meeting title to state (fixes tray stop title issue)
+            setMeetingTitle(effectiveTitle);
 
             // Fetch folder path from backend and update metadata
             // This ensures folder path is persisted even if app crashes
@@ -478,14 +488,24 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
 
   // Mark current meeting as saved in IndexedDB
   const markMeetingAsSaved = useCallback(async () => {
-    if (currentMeetingId) {
-      try {
-        await indexedDBService.markMeetingSaved(currentMeetingId);
-        // Clear current meeting ID after marking as saved
-        setCurrentMeetingId(null);
-      } catch (error) {
-        console.error('Failed to mark meeting as saved in IndexedDB:', error);
-      }
+    // Try context state first, fallback to sessionStorage
+    const meetingId = currentMeetingId || sessionStorage.getItem('indexeddb_current_meeting_id');
+
+    if (!meetingId) {
+      console.error('[IndexedDB] ❌ Cannot mark meeting as saved: No meeting ID available!');
+      console.error('[IndexedDB] currentMeetingId:', currentMeetingId);
+      console.error('[IndexedDB] sessionStorage:', sessionStorage.getItem('indexeddb_current_meeting_id'));
+      return;
+    }
+
+    try {
+      await indexedDBService.markMeetingSaved(meetingId);
+
+      // Clear both sources
+      setCurrentMeetingId(null);
+      sessionStorage.removeItem('indexeddb_current_meeting_id');
+    } catch (error) {
+      console.error('[IndexedDB] ❌ Failed to mark meeting as saved:', error);
     }
   }, [currentMeetingId]);
 

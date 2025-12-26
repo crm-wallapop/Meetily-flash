@@ -5,7 +5,7 @@ import { motion } from 'framer-motion';
 import { RecordingControls } from '@/components/RecordingControls';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
-import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import { StatusOverlays } from '@/app/_components/StatusOverlays';
@@ -33,13 +33,18 @@ export default function Home() {
   const { transcriptModelConfig, selectedDevices } = useConfig();
   const recordingState = useRecordingState();
 
+  // Extract status from global state
+  const { status, isStopping, isProcessing, isSaving } = recordingState;
+
   // Hooks
   const { hasMicrophone } = usePermissionCheck();
   const { setIsMeetingActive, isCollapsed: sidebarCollapsed, refetchMeetings } = useSidebar();
   const { modals, messages, showModal, hideModal } = useModalState(transcriptModelConfig);
   const { isRecordingDisabled, setIsRecordingDisabled } = useRecordingStateSync(isRecording, setIsRecordingState, setIsMeetingActive);
   const { handleRecordingStart } = useRecordingStart(isRecording, setIsRecordingState, showModal);
-  const { handleRecordingStop, isStopping, isProcessingTranscript, isSavingTranscript, summaryStatus, setIsStopping } = useRecordingStop(
+
+  // Get handleRecordingStop function and setIsStopping (state comes from global context)
+  const { handleRecordingStop, setIsStopping } = useRecordingStop(
     setIsRecordingState,
     setIsRecordingDisabled
   );
@@ -68,7 +73,10 @@ export default function Home() {
       try {
         // Skip recovery check if currently recording or processing stop
         // This prevents the recovery dialog from showing when:
-        if (recordingState.isRecording || isStopping || isProcessingTranscript) {
+        if (recordingState.isRecording ||
+            status === RecordingStatus.STOPPING ||
+            status === RecordingStatus.PROCESSING_TRANSCRIPTS ||
+            status === RecordingStatus.SAVING) {
           console.log('Skipping recovery check - recording in progress or processing');
           return;
         }
@@ -96,7 +104,7 @@ export default function Home() {
     };
 
     performStartupChecks();
-  }, [checkForRecoverableTranscripts, recordingState.isRecording, isStopping, isProcessingTranscript]);
+  }, [checkForRecoverableTranscripts, recordingState.isRecording, status]);
 
   // Watch for recoverable meetings changes and show dialog once per session
   useEffect(() => {
@@ -178,7 +186,8 @@ export default function Home() {
     }
   }, [recordingState.isRecording]);
 
-  const isProcessingStop = summaryStatus === 'processing' || isProcessingTranscript;
+  // Computed values using global status
+  const isProcessingStop = status === RecordingStatus.PROCESSING_TRANSCRIPTS || isProcessing;
 
   return (
     <motion.div
@@ -211,7 +220,9 @@ export default function Home() {
         />
 
         {/* Recording controls - only show when permissions are granted or already recording and not showing status messages */}
-        {(hasMicrophone || isRecording) && !isProcessingStop && !isSavingTranscript && (
+        {(hasMicrophone || isRecording) &&
+         status !== RecordingStatus.PROCESSING_TRANSCRIPTS &&
+         status !== RecordingStatus.SAVING && (
           <div className="fixed bottom-12 left-0 right-0 z-10">
             <div
               className="flex justify-center pl-8 transition-[margin] duration-300"
@@ -244,8 +255,8 @@ export default function Home() {
 
         {/* Status Overlays - Processing and Saving */}
         <StatusOverlays
-          isProcessing={summaryStatus === 'processing' && !isRecording}
-          isSaving={isSavingTranscript}
+          isProcessing={status === RecordingStatus.PROCESSING_TRANSCRIPTS && !recordingState.isRecording}
+          isSaving={status === RecordingStatus.SAVING}
           sidebarCollapsed={sidebarCollapsed}
         />
       </div>

@@ -20,8 +20,8 @@ import { useRecordingStop } from '@/hooks/useRecordingStop';
 export function RecordingPostProcessingProvider({ children }: { children: React.ReactNode }) {
   // No-op functions since the global RecordingStateContext already handles state updates
   // These are only needed for the hook's local component state management
-  const setIsRecording = () => {};
-  const setIsRecordingDisabled = () => {};
+  const setIsRecording = () => { };
+  const setIsRecordingDisabled = () => { };
 
   const {
     handleRecordingStop,

@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { useConfig } from '@/contexts/ConfigContext';
+import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { recordingService } from '@/services/recordingService';
 import Analytics from '@/lib/analytics';
 import { showRecordingNotification } from '@/lib/recordingNotification';
@@ -34,6 +35,7 @@ export function useRecordingStart(
   const { clearTranscripts, setMeetingTitle } = useTranscripts();
   const { setIsMeetingActive } = useSidebar();
   const { selectedDevices } = useConfig();
+  const { setStatus } = useRecordingState();
 
   // Generate meeting title with timestamp
   const generateMeetingTitle = useCallback(() => {
@@ -100,6 +102,7 @@ export function useRecordingStart(
           showModal?.('modelSelector', 'Transcription model setup required');
           Analytics.trackButtonClick('start_recording_blocked_missing', 'home_page');
         }
+        setStatus(RecordingStatus.IDLE);
         return;
       }
 
@@ -107,6 +110,9 @@ export function useRecordingStart(
 
       const randomTitle = generateMeetingTitle();
       setMeetingTitle(randomTitle);
+
+      // Set STARTING status before initiating backend recording
+      setStatus(RecordingStatus.STARTING, 'Initializing recording...');
 
       // Start the actual backend recording
       console.log('Starting backend recording with meeting:', randomTitle);
@@ -118,6 +124,7 @@ export function useRecordingStart(
       console.log('Backend recording started successfully');
 
       // Update state after successful backend start
+      // Note: RECORDING status will be set by RecordingStateContext event listener
       console.log('Setting isRecordingState to true');
       setIsRecording(true); // This will also update the sidebar via the useEffect
       clearTranscripts(); // Clear previous transcripts when starting new recording
@@ -128,12 +135,13 @@ export function useRecordingStart(
       await showRecordingNotification();
     } catch (error) {
       console.error('Failed to start recording:', error);
+      setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Failed to start recording');
       setIsRecording(false); // Reset state on error
       Analytics.trackButtonClick('start_recording_error', 'home_page');
       // Re-throw so RecordingControls can handle device-specific errors
       throw error;
     }
-  }, [generateMeetingTitle, setMeetingTitle, setIsRecording, clearTranscripts, setIsMeetingActive, checkParakeetReady, checkIfModelDownloading, selectedDevices, showModal]);
+  }, [generateMeetingTitle, setMeetingTitle, setIsRecording, clearTranscripts, setIsMeetingActive, checkParakeetReady, checkIfModelDownloading, selectedDevices, showModal, setStatus]);
 
   // Check for autoStartRecording flag and start recording automatically
   useEffect(() => {
@@ -163,6 +171,7 @@ export function useRecordingStart(
               showModal?.('modelSelector', 'Transcription model setup required');
               Analytics.trackButtonClick('start_recording_blocked_missing', 'sidebar_auto');
             }
+            setStatus(RecordingStatus.IDLE);
             setIsAutoStarting(false);
             return;
           }
@@ -171,6 +180,9 @@ export function useRecordingStart(
           try {
             // Generate meeting title
             const generatedMeetingTitle = generateMeetingTitle();
+
+            // Set STARTING status before initiating backend recording
+            setStatus(RecordingStatus.STARTING, 'Initializing recording...');
 
             console.log('Auto-starting backend recording with meeting:', generatedMeetingTitle);
             const result = await recordingService.startRecordingWithDevices(
@@ -181,6 +193,7 @@ export function useRecordingStart(
             console.log('Auto-start backend recording result:', result);
 
             // Update UI state after successful backend start
+            // Note: RECORDING status will be set by RecordingStateContext event listener
             setMeetingTitle(generatedMeetingTitle);
             setIsRecording(true);
             clearTranscripts();
@@ -191,6 +204,7 @@ export function useRecordingStart(
             await showRecordingNotification();
           } catch (error) {
             console.error('Failed to auto-start recording:', error);
+            setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Failed to auto-start recording');
             alert('Failed to start recording. Check console for details.');
             Analytics.trackButtonClick('start_recording_error', 'sidebar_auto');
           } finally {
@@ -211,6 +225,9 @@ export function useRecordingStart(
     clearTranscripts,
     setIsMeetingActive,
     checkParakeetReady,
+    checkIfModelDownloading,
+    showModal,
+    setStatus,
   ]);
 
   // Listen for direct recording trigger from sidebar when already on home page
@@ -242,6 +259,7 @@ export function useRecordingStart(
           showModal?.('modelSelector', 'Transcription model setup required');
           Analytics.trackButtonClick('start_recording_blocked_missing', 'sidebar_direct');
         }
+        setStatus(RecordingStatus.IDLE);
         setIsAutoStarting(false);
         return;
       }
@@ -249,6 +267,9 @@ export function useRecordingStart(
       try {
         // Generate meeting title
         const generatedMeetingTitle = generateMeetingTitle();
+
+        // Set STARTING status before initiating backend recording
+        setStatus(RecordingStatus.STARTING, 'Initializing recording...');
 
         console.log('Starting backend recording with meeting:', generatedMeetingTitle);
         const result = await recordingService.startRecordingWithDevices(
@@ -259,6 +280,7 @@ export function useRecordingStart(
         console.log('Backend recording result:', result);
 
         // Update UI state after successful backend start
+        // Note: RECORDING status will be set by RecordingStateContext event listener
         setMeetingTitle(generatedMeetingTitle);
         setIsRecording(true);
         clearTranscripts();
@@ -269,6 +291,7 @@ export function useRecordingStart(
         await showRecordingNotification();
       } catch (error) {
         console.error('Failed to start recording from sidebar:', error);
+        setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Failed to start recording from sidebar');
         alert('Failed to start recording. Check console for details.');
         Analytics.trackButtonClick('start_recording_error', 'sidebar_direct');
       } finally {
@@ -291,6 +314,9 @@ export function useRecordingStart(
     clearTranscripts,
     setIsMeetingActive,
     checkParakeetReady,
+    checkIfModelDownloading,
+    showModal,
+    setStatus,
   ]);
 
   return {
