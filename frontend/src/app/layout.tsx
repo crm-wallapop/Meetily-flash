@@ -59,11 +59,20 @@ export default function RootLayout({
         setOnboardingCompleted(false)
       })
   }, [])
+
+  // Disable context menu in production
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'production') {
+      const handleContextMenu = (e: MouseEvent) => e.preventDefault();
+      document.addEventListener('contextmenu', handleContextMenu);
+      return () => document.removeEventListener('contextmenu', handleContextMenu);
+    }
+  }, []);
   useEffect(() => {
     // Listen for tray recording toggle request
     const unlisten = listen('request-recording-toggle', () => {
       console.log('[Layout] Received request-recording-toggle from tray');
-      
+
       if (showOnboarding) {
         toast.error("Please complete setup first", {
           description: "You need to finish onboarding before you can start recording."
