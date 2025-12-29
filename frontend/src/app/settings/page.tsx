@@ -1,28 +1,33 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { ArrowLeft, Settings2, Mic, Database as DatabaseIcon, SparkleIcon } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
+import { motion } from 'framer-motion';
 import { TranscriptSettings, TranscriptModelProps } from '@/components/TranscriptSettings';
 import { RecordingSettings } from '@/components/RecordingSettings';
 import { PreferenceSettings } from '@/components/PreferenceSettings';
 import { SummaryModelSettings } from '@/components/SummaryModelSettings';
 import { useConfig } from '@/contexts/ConfigContext';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 
-type SettingsTab = 'general' | 'recording' | 'Transcriptionmodels' | 'summaryModels';
+// Tabs configuration (constant)
+const TABS = [
+  { value: 'general', label: 'General', icon: Settings2 },
+  { value: 'recording', label: 'Recordings', icon: Mic },
+  { value: 'Transcriptionmodels', label: 'Transcription', icon: DatabaseIcon },
+  { value: 'summaryModels', label: 'Summary', icon: SparkleIcon }
+] as const;
 
 export default function SettingsPage() {
   const router = useRouter();
-  const { transcriptModelConfig, setTranscriptModelConfig } = useConfig()
-  const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+  const { transcriptModelConfig, setTranscriptModelConfig } = useConfig();
 
-  const tabs = [
-    { id: 'general' as const, label: 'General', icon: <Settings2 className="w-4 h-4" /> },
-    { id: 'recording' as const, label: 'Recordings', icon: <Mic className="w-4 h-4" /> },
-    { id: 'Transcriptionmodels' as const, label: 'Transcription', icon: <DatabaseIcon className="w-4 h-4" /> },
-    { id: 'summaryModels' as const, label: 'Summary', icon: <SparkleIcon className="w-4 h-4" /> }
-  ];
+  // Animation state for tabs
+  const [activeTab, setActiveTab] = useState('general');
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const [underlineStyle, setUnderlineStyle] = useState({ left: 0, width: 0 });
 
   // Load saved transcript configuration on mount
   useEffect(() => {
@@ -42,22 +47,18 @@ export default function SettingsPage() {
       }
     };
     loadTranscriptConfig();
-  }, []);
+  }, [setTranscriptModelConfig]);
 
-  // Handle configuration save
-  const handleSaveConfig = async (config: TranscriptModelProps) => {
-    try {
-      console.log('[SettingsPage] Saving transcript config:', config);
-      await invoke('api_save_transcript_config', {
-        provider: config.provider,
-        model: config.model,
-        apiKey: config.apiKey
-      });
-      console.log('[SettingsPage] ✅ Successfully saved transcript config');
-    } catch (error) {
-      console.error('[SettingsPage] ❌ Failed to save transcript config:', error);
+  // Update underline position when active tab changes
+  useLayoutEffect(() => {
+    const activeIndex = TABS.findIndex(tab => tab.value === activeTab);
+    const activeTabElement = tabRefs.current[activeIndex];
+
+    if (activeTabElement) {
+      const { offsetLeft, offsetWidth } = activeTabElement;
+      setUnderlineStyle({ left: offsetLeft, width: offsetWidth });
     }
-  };
+  }, [activeTab]);
 
   return (
     <div className="h-screen bg-gray-50 flex flex-col">
@@ -81,37 +82,47 @@ export default function SettingsPage() {
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-6xl mx-auto p-8 pt-6">
           {/* Tabs */}
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-            <div className="flex border-b border-gray-200 overflow-x-auto">
-              {tabs.map((tab) => (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-2 px-6 py-4 text-sm font-medium transition-colors whitespace-nowrap ${activeTab === tab.id
-                    ? 'border-b-2 border-blue-600 text-blue-600 bg-blue-50'
-                    : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
-                    }`}
-                >
-                  {tab.icon}
-                  {tab.label}
-                </button>
-              ))}
-            </div>
+          <Tabs value={activeTab} onValueChange={setActiveTab}>
+            <TabsList className="bg-transparent relative rounded-none border-b border-gray-200 p-0 h-auto">
+              {TABS.map((tab, index) => {
+                const Icon = tab.icon;
+                return (
+                  <TabsTrigger
+                    key={tab.value}
+                    value={tab.value}
+                    ref={el => { tabRefs.current[index] = el }}
+                    className="flex items-center gap-2 px-6 py-4 bg-transparent rounded-none border-0 data-[state=active]:bg-transparent data-[state=active]:text-blue-600 data-[state=active]:shadow-none text-gray-600 hover:text-gray-900 relative z-10"
+                  >
+                    <Icon className="w-4 h-4" />
+                    {tab.label}
+                  </TabsTrigger>
+                );
+              })}
 
-            {/* Tab Content */}
-            <div className="p-6">
-              {activeTab === 'general' && <PreferenceSettings />}
-              {activeTab === 'recording' && <RecordingSettings />}
-              {activeTab === 'Transcriptionmodels' && (
-                <TranscriptSettings
-                  transcriptModelConfig={transcriptModelConfig}
-                  setTranscriptModelConfig={setTranscriptModelConfig}
-                // onSave={handleSaveConfig}
-                />
-              )}
-              {activeTab === 'summaryModels' && <SummaryModelSettings />}
-            </div>
-          </div>
+              <motion.div
+                className="absolute bottom-0 z-20 h-0.5 bg-blue-600"
+                layoutId="underline"
+                style={{ left: underlineStyle.left, width: underlineStyle.width }}
+                transition={{ type: 'spring', stiffness: 400, damping: 40 }}
+              />
+            </TabsList>
+
+            <TabsContent value="general">
+              <PreferenceSettings />
+            </TabsContent>
+            <TabsContent value="recording">
+              <RecordingSettings />
+            </TabsContent>
+            <TabsContent value="Transcriptionmodels">
+              <TranscriptSettings
+                transcriptModelConfig={transcriptModelConfig}
+                setTranscriptModelConfig={setTranscriptModelConfig}
+              />
+            </TabsContent>
+            <TabsContent value="summaryModels">
+              <SummaryModelSettings />
+            </TabsContent>
+          </Tabs>
         </div>
       </div>
     </div>
