@@ -140,6 +140,25 @@ pub struct MeetingTranscript {
     pub duration: Option<f64>,
 }
 
+/// Meeting metadata without transcripts (for pagination)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MeetingMetadata {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder_path: Option<String>,
+}
+
+/// Paginated transcripts response with total count
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PaginatedTranscriptsResponse {
+    pub transcripts: Vec<MeetingTranscript>,
+    pub total_count: i64,
+    pub has_more: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SaveMeetingTitleRequest {
     pub meeting_id: String,
@@ -786,6 +805,94 @@ pub async fn api_get_meeting<R: Runtime>(
         Err(e) => {
             log_error!("Error retrieving meeting {}: {}", meeting_id, e);
             Err(format!("Failed to retrieve meeting: {}", e))
+        }
+    }
+}
+
+/// Get meeting metadata without transcripts (for pagination)
+#[tauri::command]
+pub async fn api_get_meeting_metadata<R: Runtime>(
+    _app: AppHandle<R>,
+    meeting_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<MeetingMetadata, String> {
+    log_info!("api_get_meeting_metadata called for meeting_id: {}", meeting_id);
+
+    let pool = state.db_manager.pool();
+
+    match MeetingsRepository::get_meeting_metadata(pool, &meeting_id).await {
+        Ok(Some(meeting)) => {
+            log_info!("Successfully retrieved meeting metadata {}", meeting_id);
+            Ok(MeetingMetadata {
+                id: meeting.id,
+                title: meeting.title,
+                created_at: meeting.created_at.0.to_rfc3339(),
+                updated_at: meeting.updated_at.0.to_rfc3339(),
+                folder_path: meeting.folder_path,
+            })
+        }
+        Ok(None) => {
+            log_warn!("Meeting not found: {}", meeting_id);
+            Err(format!("Meeting not found: {}", meeting_id))
+        }
+        Err(e) => {
+            log_error!("Error retrieving meeting metadata {}: {}", meeting_id, e);
+            Err(format!("Failed to retrieve meeting metadata: {}", e))
+        }
+    }
+}
+
+/// Get paginated transcripts for a meeting
+#[tauri::command]
+pub async fn api_get_meeting_transcripts<R: Runtime>(
+    _app: AppHandle<R>,
+    meeting_id: String,
+    limit: i64,
+    offset: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<PaginatedTranscriptsResponse, String> {
+    log_info!(
+        "api_get_meeting_transcripts called for meeting_id: {}, limit: {}, offset: {}",
+        meeting_id,
+        limit,
+        offset
+    );
+
+    let pool = state.db_manager.pool();
+
+    match MeetingsRepository::get_meeting_transcripts_paginated(pool, &meeting_id, limit, offset).await {
+        Ok((transcripts, total_count)) => {
+            log_info!(
+                "Successfully retrieved {} transcripts for meeting {} (total: {})",
+                transcripts.len(),
+                meeting_id,
+                total_count
+            );
+
+            // Convert Transcript to MeetingTranscript
+            let meeting_transcripts = transcripts
+                .into_iter()
+                .map(|t| MeetingTranscript {
+                    id: t.id,
+                    text: t.transcript,
+                    timestamp: t.timestamp,
+                    audio_start_time: t.audio_start_time,
+                    audio_end_time: t.audio_end_time,
+                    duration: t.duration,
+                })
+                .collect::<Vec<_>>();
+
+            let has_more = (offset + meeting_transcripts.len() as i64) < total_count;
+
+            Ok(PaginatedTranscriptsResponse {
+                transcripts: meeting_transcripts,
+                total_count,
+                has_more,
+            })
+        }
+        Err(e) => {
+            log_error!("Error retrieving transcripts for meeting {}: {}", meeting_id, e);
+            Err(format!("Failed to retrieve transcripts: {}", e))
         }
     }
 }

@@ -20,13 +20,27 @@ export default function PageContent({
   summaryData,
   shouldAutoGenerate = false,
   onAutoGenerateComplete,
-  onMeetingUpdated
+  onMeetingUpdated,
+  // Pagination props for efficient transcript loading
+  segments,
+  hasMore,
+  isLoadingMore,
+  totalCount,
+  loadedCount,
+  onLoadMore,
 }: {
   meeting: any;
   summaryData: Summary | null;
   shouldAutoGenerate?: boolean;
   onAutoGenerateComplete?: () => void;
   onMeetingUpdated?: () => Promise<void>;
+  // Pagination props
+  segments?: any[];
+  hasMore?: boolean;
+  isLoadingMore?: boolean;
+  totalCount?: number;
+  loadedCount?: number;
+  onLoadMore?: () => void;
 }) {
   console.log('📄 PAGE CONTENT: Initializing with data:', {
     meetingId: meeting.id,
@@ -145,6 +159,14 @@ export default function PageContent({
           onCopyTranscript={copyOperations.handleCopyTranscript}
           onOpenMeetingFolder={meetingOperations.handleOpenMeetingFolder}
           isRecording={isRecording}
+          // Pagination props for efficient loading
+          usePagination={true}
+          segments={segments}
+          hasMore={hasMore}
+          isLoadingMore={isLoadingMore}
+          totalCount={totalCount}
+          loadedCount={loadedCount}
+          onLoadMore={onLoadMore}
         />
 
           <SummaryPanel

@@ -8,6 +8,7 @@ import Analytics from "@/lib/analytics";
 import { invoke } from "@tauri-apps/api/core";
 import { LoaderIcon } from "lucide-react";
 import { useConfig } from "@/contexts/ConfigContext";
+import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
 
 interface MeetingDetailsResponse {
   id: string;
@@ -30,6 +31,20 @@ function MeetingDetailsContent() {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [shouldAutoGenerate, setShouldAutoGenerate] = useState<boolean>(false);
   const [hasCheckedAutoGen, setHasCheckedAutoGen] = useState<boolean>(false);
+
+  // Use pagination hook for efficient transcript loading
+  const {
+    metadata,
+    segments,
+    transcripts,
+    isLoading: isLoadingTranscripts,
+    isLoadingMore,
+    hasMore,
+    totalCount,
+    loadedCount,
+    loadMore,
+    error: transcriptError,
+  } = usePaginatedTranscripts({ meetingId: meetingId || '' });
 
   // Check if gemma3:1b model is available in Ollama
   const checkForGemmaModel = useCallback(async (): Promise<boolean> => {
@@ -99,26 +114,48 @@ function MeetingDetailsContent() {
     setHasCheckedAutoGen(true);
   }, [hasCheckedAutoGen, checkForGemmaModel, source, isAutoSummary]);
 
-  // Extract fetchMeetingDetails so it can be called from child components
+  // Sync meeting metadata from pagination hook to meeting details state
+  useEffect(() => {
+    if (metadata && (!meetingId || meetingId === 'intro-call')) {
+      // If invalid meeting ID, don't sync
+      return;
+    }
+
+    if (metadata) {
+      console.log('Meeting metadata loaded:', metadata);
+
+      // Build meeting details from metadata and paginated transcripts
+      setMeetingDetails({
+        id: metadata.id,
+        title: metadata.title,
+        created_at: metadata.created_at,
+        updated_at: metadata.updated_at,
+        transcripts: transcripts, // Paginated transcripts from hook
+      });
+
+      // Sync with sidebar context
+      setCurrentMeeting({ id: metadata.id, title: metadata.title });
+    }
+  }, [metadata, transcripts, meetingId, setCurrentMeeting]);
+
+  // Handle transcript loading errors
+  useEffect(() => {
+    if (transcriptError) {
+      console.error('Error loading transcripts:', transcriptError);
+      setError(transcriptError);
+    }
+  }, [transcriptError]);
+
+  // Extract fetchMeetingDetails for use in child components (now refetches via hook)
   const fetchMeetingDetails = useCallback(async () => {
     if (!meetingId || meetingId === 'intro-call') {
       return;
     }
 
-    try {
-      const data = await invoke('api_get_meeting', {
-        meetingId: meetingId,
-      }) as any;
-      console.log('Meeting details:', data);
-      setMeetingDetails(data);
-
-      // Sync with sidebar context
-      setCurrentMeeting({ id: data.id, title: data.title });
-    } catch (error) {
-      console.error('Error fetching meeting details:', error);
-      setError("Failed to load meeting details");
-    }
-  }, [meetingId, setCurrentMeeting]);
+    // The usePaginatedTranscripts hook automatically refetches when meetingId changes
+    // This function is kept for compatibility with onMeetingUpdated callback
+    console.log('fetchMeetingDetails called - pagination hook will handle refetch');
+  }, [meetingId]);
 
   // Reset states when meetingId changes (prevent race conditions)
   useEffect(() => {
@@ -264,17 +301,14 @@ function MeetingDetailsContent() {
 
     const loadData = async () => {
       try {
-        await Promise.all([
-          fetchMeetingDetails(),
-          fetchMeetingSummary()
-        ]);
+        await fetchMeetingSummary();
       } finally {
         setIsLoading(false);
       }
     };
 
     loadData();
-  }, [meetingId, fetchMeetingDetails]);
+  }, [meetingId]);
 
   // Auto-generation check: runs when meeting is loaded with no summary
   useEffect(() => {
@@ -315,7 +349,8 @@ function MeetingDetailsContent() {
     );
   }
 
-  if (isLoading || !meetingDetails) {
+  // Show loading spinner while initial data loads
+  if ((isLoading || isLoadingTranscripts) || !meetingDetails) {
     return <div className="flex items-center justify-center h-screen">
       <LoaderIcon className="animate-spin size-6 " />
     </div>;
@@ -332,6 +367,13 @@ function MeetingDetailsContent() {
       // Refetch meetings list to update sidebar
       await refetchMeetings();
     }}
+    // Pagination props for efficient transcript loading
+    segments={segments}
+    hasMore={hasMore}
+    isLoadingMore={isLoadingMore}
+    totalCount={totalCount}
+    loadedCount={loadedCount}
+    onLoadMore={loadMore}
   />;
 }
 

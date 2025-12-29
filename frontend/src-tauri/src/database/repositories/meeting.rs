@@ -108,6 +108,63 @@ impl MeetingsRepository {
         }
     }
 
+    /// Get meeting metadata without transcripts (for pagination)
+    pub async fn get_meeting_metadata(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<Option<MeetingModel>, SqlxError> {
+        if meeting_id.trim().is_empty() {
+            return Err(SqlxError::Protocol(
+                "meeting_id cannot be empty".to_string(),
+            ));
+        }
+
+        let meeting: Option<MeetingModel> =
+            sqlx::query_as("SELECT id, title, created_at, updated_at, folder_path FROM meetings WHERE id = ?")
+                .bind(meeting_id)
+                .fetch_optional(pool)
+                .await?;
+
+        Ok(meeting)
+    }
+
+    /// Get meeting transcripts with pagination support
+    pub async fn get_meeting_transcripts_paginated(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<Transcript>, i64), SqlxError> {
+        if meeting_id.trim().is_empty() {
+            return Err(SqlxError::Protocol(
+                "meeting_id cannot be empty".to_string(),
+            ));
+        }
+
+        // Get total count of transcripts for this meeting
+        let total: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM transcripts WHERE meeting_id = ?"
+        )
+        .bind(meeting_id)
+        .fetch_one(pool)
+        .await?;
+
+        // Get paginated transcripts ordered by audio_start_time
+        let transcripts = sqlx::query_as::<_, Transcript>(
+            "SELECT * FROM transcripts
+             WHERE meeting_id = ?
+             ORDER BY audio_start_time ASC
+             LIMIT ? OFFSET ?"
+        )
+        .bind(meeting_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+
+        Ok((transcripts, total.0))
+    }
+
     pub async fn update_meeting_title(
         pool: &SqlitePool,
         meeting_id: &str,

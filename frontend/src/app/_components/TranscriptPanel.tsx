@@ -1,4 +1,4 @@
-import { TranscriptView } from '@/components/TranscriptView';
+import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { PermissionWarning } from '@/components/PermissionWarning';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
@@ -9,6 +9,7 @@ import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
 import { ModalType } from '@/hooks/useModalState';
 import { useIsLinux } from '@/hooks/usePlatform';
+import { useMemo } from 'react';
 
 /**
  * TranscriptPanel Component
@@ -35,6 +36,18 @@ export function TranscriptPanel({
   const { isRecording, isPaused } = useRecordingState();
   const { checkPermissions, isChecking, hasSystemAudio, hasMicrophone } = usePermissionCheck();
   const isLinux = useIsLinux();
+
+  // Convert transcripts to segments for virtualized view
+  const segments = useMemo(() =>
+    transcripts.map(t => ({
+      id: t.id,
+      timestamp: t.audio_start_time ?? 0,
+      endTime: t.audio_end_time,
+      text: t.text,
+      confidence: t.confidence,
+    })),
+    [transcripts]
+  );
 
   return (
     <div ref={transcriptContainerRef} className="w-full border-r border-gray-200 bg-white flex flex-col overflow-y-auto">
@@ -92,13 +105,14 @@ export function TranscriptPanel({
       <div className="pb-20">
         <div className="flex justify-center">
           <div className="w-2/3 max-w-[750px]">
-            <TranscriptView
-              transcripts={transcripts}
+            <VirtualizedTranscriptView
+              segments={segments}
               isRecording={isRecording}
               isPaused={isPaused}
               isProcessing={isProcessingStop}
               isStopping={isStopping}
               enableStreaming={isRecording}
+              showConfidence={true}
             />
           </div>
         </div>
