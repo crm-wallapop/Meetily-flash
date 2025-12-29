@@ -1,15 +1,43 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode, useRef } from 'react';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
 import { SelectedDevices } from '@/components/DeviceSelection';
 import { configService, ModelConfig } from '@/services/configService';
+import { invoke } from '@tauri-apps/api/core';
 
 export interface OllamaModel {
   name: string;
   id: string;
   size: string;
   modified: string;
+}
+
+export interface StorageLocations {
+  database: string;
+  models: string;
+  recordings: string;
+}
+
+export interface NotificationSettings {
+  recording_notifications: boolean;
+  time_based_reminders: boolean;
+  meeting_reminders: boolean;
+  respect_do_not_disturb: boolean;
+  notification_sound: boolean;
+  system_permission_granted: boolean;
+  consent_given: boolean;
+  manual_dnd_mode: boolean;
+  notification_preferences: {
+    show_recording_started: boolean;
+    show_recording_stopped: boolean;
+    show_recording_paused: boolean;
+    show_recording_resumed: boolean;
+    show_transcription_complete: boolean;
+    show_meeting_reminders: boolean;
+    show_system_errors: boolean;
+    meeting_reminder_minutes: number[];
+  };
 }
 
 interface ConfigContextType {
@@ -41,6 +69,13 @@ interface ConfigContextType {
   // Summary configuration
   isAutoSummary: boolean;
   toggleIsAutoSummary: (checked: boolean) => void;
+
+  // Preference settings (lazy loaded)
+  notificationSettings: NotificationSettings | null;
+  storageLocations: StorageLocations | null;
+  isLoadingPreferences: boolean;
+  loadPreferences: () => Promise<void>;
+  updateNotificationSettings: (settings: NotificationSettings) => Promise<void>;
 }
 
 const ConfigContext = createContext<ConfigContextType | undefined>(undefined);
@@ -92,6 +127,12 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     return false;
   });
 
+  // Preference settings state (lazy loaded)
+  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
+  const [storageLocations, setStorageLocations] = useState<StorageLocations | null>(null);
+  const [isLoadingPreferences, setIsLoadingPreferences] = useState(false);
+  const preferencesLoadedRef = useRef(false);
+  const isLoadingRef = useRef(false);
 
   // Format size helper function for Ollama models
   const formatSize = (size: number): string => {
@@ -302,6 +343,66 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  // Lazy load preference settings (only loads if not already cached)
+  const loadPreferences = useCallback(async () => {
+    // If already loaded, don't reload
+    if (preferencesLoadedRef.current) {
+      return;
+    }
+
+    // If currently loading, don't start another load
+    if (isLoadingRef.current) {
+      return;
+    }
+
+    isLoadingRef.current = true;
+    setIsLoadingPreferences(true);
+    try {
+      // Load notification settings from backend
+      let settings: NotificationSettings | null = null;
+      try {
+        settings = await invoke<NotificationSettings>('get_notification_settings');
+        setNotificationSettings(settings);
+      } catch (notifError) {
+        console.error('[ConfigContext] Failed to load notification settings:', notifError);
+        // Use default values if notification settings fail to load
+        setNotificationSettings(null);
+      }
+
+      // Load storage locations
+      const [dbDir, modelsDir, recordingsDir] = await Promise.all([
+        invoke<string>('get_database_directory'),
+        invoke<string>('whisper_get_models_directory'),
+        invoke<string>('get_default_recordings_folder_path')
+      ]);
+
+      setStorageLocations({
+        database: dbDir,
+        models: modelsDir,
+        recordings: recordingsDir
+      });
+
+      // Mark as loaded
+      preferencesLoadedRef.current = true;
+    } catch (error) {
+      console.error('[ConfigContext] Failed to load preferences:', error);
+    } finally {
+      isLoadingRef.current = false;
+      setIsLoadingPreferences(false);
+    }
+  }, []);
+
+  // Update notification settings
+  const updateNotificationSettings = useCallback(async (settings: NotificationSettings) => {
+    try {
+      await invoke('set_notification_settings', { settings });
+      setNotificationSettings(settings);
+    } catch (error) {
+      console.error('[ConfigContext] Failed to update notification settings:', error);
+      throw error; // Re-throw so component can handle error
+    }
+  }, []);
+
   const value: ConfigContextType = useMemo(() => ({
     modelConfig,
     setModelConfig,
@@ -318,6 +419,11 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     models,
     modelOptions,
     error,
+    notificationSettings,
+    storageLocations,
+    isLoadingPreferences,
+    loadPreferences,
+    updateNotificationSettings,
   }), [
     modelConfig,
     isAutoSummary,
@@ -330,6 +436,11 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     models,
     modelOptions,
     error,
+    notificationSettings,
+    storageLocations,
+    isLoadingPreferences,
+    loadPreferences,
+    updateNotificationSettings,
   ]);
 
   return (
