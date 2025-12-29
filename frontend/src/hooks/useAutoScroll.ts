@@ -9,6 +9,7 @@ interface UseAutoScrollProps {
     activeSegmentId?: string;
     virtualizer?: Virtualizer<HTMLDivElement, Element>;
     virtualizationThreshold?: number;
+    disableAutoScroll?: boolean; // Completely disable auto-scroll behavior (for meeting details page)
 }
 
 interface UseAutoScrollReturn {
@@ -42,6 +43,7 @@ export function useAutoScroll({
     activeSegmentId,
     virtualizer,
     virtualizationThreshold = 10,
+    disableAutoScroll = false,
 }: UseAutoScrollProps): UseAutoScrollReturn {
     const useVirtualization = virtualizer && segments.length >= virtualizationThreshold;
     const [autoScroll, setAutoScroll] = useState(true);
@@ -128,6 +130,11 @@ export function useAutoScroll({
 
     // Auto-scroll to bottom when new segments arrive during recording
     useEffect(() => {
+        // EARLY RETURN: If auto-scroll is completely disabled (e.g., meeting details page)
+        if (disableAutoScroll) {
+            return;
+        }
+
         const segmentCount = segments.length;
         const prevCount = prevSegmentCountRef.current;
         const hasNewSegments = segmentCount > prevCount;
@@ -167,7 +174,7 @@ export function useAutoScroll({
                 isProgrammaticScrollRef.current = false;
             }, 150);
         }
-    }, [segments.length, isRecording, isPaused, useVirtualization, virtualizer, scrollRef, isNearBottom]);
+    }, [segments.length, isRecording, isPaused, useVirtualization, virtualizer, scrollRef, isNearBottom, disableAutoScroll]);
 
     // Auto-scroll to active segment (when clicking on search results, etc.)
     useEffect(() => {

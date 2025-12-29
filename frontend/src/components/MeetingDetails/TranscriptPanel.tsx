@@ -13,6 +13,7 @@ interface TranscriptPanelProps {
   onCopyTranscript: () => void;
   onOpenMeetingFolder: () => Promise<void>;
   isRecording: boolean;
+  disableAutoScroll?: boolean;
 
   // Optional pagination props (when using virtualization)
   usePagination?: boolean;
@@ -31,6 +32,7 @@ export function TranscriptPanel({
   onCopyTranscript,
   onOpenMeetingFolder,
   isRecording,
+  disableAutoScroll = false,
   usePagination = false,
   segments,
   hasMore,
@@ -75,6 +77,7 @@ export function TranscriptPanel({
           isStopping={false}
           enableStreaming={false}
           showConfidence={true}
+          disableAutoScroll={disableAutoScroll}
           hasMore={hasMore}
           isLoadingMore={isLoadingMore}
           totalCount={totalCount}

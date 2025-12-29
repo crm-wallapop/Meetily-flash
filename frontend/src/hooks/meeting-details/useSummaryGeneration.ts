@@ -354,6 +354,41 @@ export function useSummaryGeneration({
     onMeetingUpdated,
   ]);
 
+  // Helper function to fetch ALL transcripts for summary generation
+  const fetchAllTranscripts = useCallback(async (meetingId: string): Promise<Transcript[]> => {
+    try {
+      console.log('📊 Fetching all transcripts for meeting:', meetingId);
+
+      // First, get total count by fetching first page
+      const firstPage = await invokeTauri('api_get_meeting_transcripts', {
+        meetingId,
+        limit: 1,
+        offset: 0,
+      }) as { transcripts: Transcript[]; total_count: number; has_more: boolean };
+
+      const totalCount = firstPage.total_count;
+      console.log(`📊 Total transcripts in database: ${totalCount}`);
+
+      if (totalCount === 0) {
+        return [];
+      }
+
+      // Fetch all transcripts in one call
+      const allData = await invokeTauri('api_get_meeting_transcripts', {
+        meetingId,
+        limit: totalCount,
+        offset: 0,
+      }) as { transcripts: Transcript[]; total_count: number; has_more: boolean };
+
+      console.log(`✅ Fetched ${allData.transcripts.length} transcripts from database`);
+      return allData.transcripts;
+    } catch (error) {
+      console.error('❌ Error fetching all transcripts:', error);
+      toast.error('Failed to fetch transcripts for summary generation');
+      return [];
+    }
+  }, []);
+
   // Public API: Generate summary from transcripts
   const handleGenerateSummary = useCallback(async (customPrompt: string = '') => {
     // Check if model config is still loading
@@ -363,12 +398,18 @@ export function useSummaryGeneration({
       return;
     }
 
-    if (!transcripts.length) {
+    // CHANGE: Fetch ALL transcripts from database, not from pagination state
+    console.log('📊 Fetching all transcripts for summary generation...');
+    const allTranscripts = await fetchAllTranscripts(meeting.id);
+
+    if (!allTranscripts.length) {
       const error_msg = 'No transcripts available for summary';
       console.log(error_msg);
       toast.error(error_msg);
       return;
     }
+
+    console.log(`✅ Proceeding with ${allTranscripts.length} transcripts`);
 
     console.log('🚀 Starting summary generation with config:', {
       provider: modelConfig.provider,
@@ -516,12 +557,12 @@ export function useSummaryGeneration({
       return `[${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}]`;
     };
 
-    const fullTranscript = transcripts
+    const fullTranscript = allTranscripts
       .map(t => `${formatTime(t.audio_start_time, t.timestamp)} ${t.text}`)
       .join('\n');
 
     await processSummary({ transcriptText: fullTranscript, customPrompt });
-  }, [transcripts, processSummary, modelConfig, isModelConfigLoading, selectedTemplate]);
+  }, [meeting.id, fetchAllTranscripts, processSummary, modelConfig, isModelConfigLoading, selectedTemplate]);
 
   // Public API: Regenerate summary from original transcript
   const handleRegenerateSummary = useCallback(async () => {

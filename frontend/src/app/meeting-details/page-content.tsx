@@ -159,6 +159,7 @@ export default function PageContent({
           onCopyTranscript={copyOperations.handleCopyTranscript}
           onOpenMeetingFolder={meetingOperations.handleOpenMeetingFolder}
           isRecording={isRecording}
+          disableAutoScroll={true}
           // Pagination props for efficient loading
           usePagination={true}
           segments={segments}

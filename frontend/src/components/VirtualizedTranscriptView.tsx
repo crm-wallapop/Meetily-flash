@@ -25,6 +25,8 @@ export interface VirtualizedTranscriptViewProps {
     enableStreaming?: boolean;
     /** Show confidence indicators */
     showConfidence?: boolean;
+    /** Completely disable auto-scroll behavior (for meeting details page) */
+    disableAutoScroll?: boolean;
 
     // Pagination props (infinite scroll)
     hasMore?: boolean;
@@ -116,6 +118,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     isStopping = false,
     enableStreaming = false,
     showConfidence = true,
+    disableAutoScroll = false,
     hasMore = false,
     isLoadingMore = false,
     totalCount = 0,
@@ -151,6 +154,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         isPaused,
         virtualizer,
         virtualizationThreshold: VIRTUALIZATION_THRESHOLD,
+        disableAutoScroll,
     });
 
     // Streaming text effect hook (typewriter animation for new transcripts)

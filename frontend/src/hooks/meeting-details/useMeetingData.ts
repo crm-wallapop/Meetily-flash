@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { Transcript, Summary } from '@/types';
 import { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { CurrentMeeting, useSidebar } from '@/components/Sidebar/SidebarProvider';
@@ -13,7 +13,8 @@ interface UseMeetingDataProps {
 
 export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMeetingDataProps) {
   // State
-  const [transcripts] = useState<Transcript[]>(meeting.transcripts);
+  // Use prop directly since summary generation fetches transcripts independently
+  const transcripts = meeting.transcripts;
   const [meetingTitle, setMeetingTitle] = useState(meeting.title || '+ New Call');
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [isTitleDirty, setIsTitleDirty] = useState(false);
@@ -27,6 +28,12 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
 
   // Sidebar context
   const { setCurrentMeeting, setMeetings, meetings: sidebarMeetings } = useSidebar();
+
+  // Sync aiSummary state when summaryData prop changes (fixes display of fetched summaries)
+  useEffect(() => {
+    console.log('[useMeetingData] Syncing summary data from prop:', summaryData ? 'present' : 'null');
+    setAiSummary(summaryData);
+  }, [summaryData]); // Only trigger when parent prop changes, not when aiSummary changes
 
   // Handlers
   const handleTitleChange = useCallback((newTitle: string) => {
