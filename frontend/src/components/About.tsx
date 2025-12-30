@@ -11,7 +11,7 @@ import { toast } from 'sonner';
 
 
 export function About() {
-    const [currentVersion, setCurrentVersion] = useState<string>('0.1.1');
+    const [currentVersion, setCurrentVersion] = useState<string>('0.2.0');
     const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
     const [isChecking, setIsChecking] = useState(false);
     const [showUpdateDialog, setShowUpdateDialog] = useState(false);
@@ -52,16 +52,16 @@ export function About() {
             {/* Compact Header */}
             <div className="text-center">
                 <div className="mb-3">
-                    <Image 
-                        src="icon_128x128.png" 
-                        alt="Meetily Logo" 
-                        width={64} 
+                    <Image
+                        src="icon_128x128.png"
+                        alt="Meetily Logo"
+                        width={64}
                         height={64}
                         className="mx-auto"
                     />
                 </div>
                 {/* <h1 className="text-xl font-bold text-gray-900">Meetily</h1> */}
-                <span className="text-sm text-gray-500"> v{currentVersion} - Pre Release</span>
+                <span className="text-sm text-gray-500"> v{currentVersion}</span>
                 <p className="text-medium text-gray-600 mt-1">
                     Real-time notes and summaries that never leave your machine.
                 </p>
@@ -129,7 +129,7 @@ export function About() {
                 <p className="text-s text-gray-600">
                     If you're planning to build privacy-first custom AI agents or a fully tailored product for your <span className="font-bold">business</span>, we can help you build it.
                 </p>
-                <button 
+                <button
                     onClick={handleContactClick}
                     className="inline-flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded transition-colors duration-200 shadow-sm hover:shadow-md"
                 >
