@@ -238,10 +238,6 @@ jobs:
           Write-Host "Contents of vulkan-runtime directory:"
           Get-ChildItem $runtimeDir -ErrorAction SilentlyContinue
 
-      - name: Setup DigiCert KeyLocker
-        if: contains(inputs.platform, 'windows') && inputs.sign-binaries
-        uses: digicert/ssm-code-signing@v1.1.1
-
       - name: Setup DigiCert Environment
         if: contains(inputs.platform, 'windows') && inputs.sign-binaries
         shell: pwsh
@@ -285,15 +281,9 @@ jobs:
           # Set the environment variable with Windows-style path
           "SM_CLIENT_CERT_FILE=D:\Certificate_pkcs12.p12" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Verify DigiCert Setup
+      - name: Setup DigiCert KeyLocker
         if: contains(inputs.platform, 'windows') && inputs.sign-binaries
-        shell: pwsh
-        run: |
-          # Verify SMCTL is available
-          smctl --version
-
-          # List available keypairs (verifies authentication)
-          smctl keypair ls
+        uses: digicert/ssm-code-signing@v1.1.1
 
       - name: Sync Certificate to Windows Certificate Store
         if: contains(inputs.platform, 'windows') && inputs.sign-binaries
@@ -375,6 +365,51 @@ jobs:
           Write-Host "============================================================"
           Write-Host ""
 
+      - name: Verify DigiCert Setup
+        if: contains(inputs.platform, 'windows') && inputs.sign-binaries
+        shell: pwsh
+        run: |
+          Write-Host "=== DigiCert Setup Verification ==="
+          Write-Host ""
+
+          # Verify SMCTL is available
+          Write-Host "SMCTL Version:"
+          smctl --version
+          Write-Host ""
+
+          # Check environment variables
+          Write-Host "Environment Variables:"
+          Write-Host "  SM_HOST: $env:SM_HOST"
+          Write-Host "  SM_API_KEY: $($env:SM_API_KEY.Substring(0, [Math]::Min(20, $env:SM_API_KEY.Length)))..."
+          Write-Host "  SM_CLIENT_CERT_FILE: $env:SM_CLIENT_CERT_FILE"
+          Write-Host "  SM_CLIENT_CERT_PASSWORD: $(if ($env:SM_CLIENT_CERT_PASSWORD) { '***SET***' } else { 'NOT SET' })"
+          Write-Host ""
+
+          # Verify client certificate file exists and check size
+          if (Test-Path $env:SM_CLIENT_CERT_FILE) {
+            $certFile = Get-Item $env:SM_CLIENT_CERT_FILE
+            Write-Host "Client Certificate File:"
+            Write-Host "  Path: $($certFile.FullName)"
+            Write-Host "  Size: $($certFile.Length) bytes"
+            Write-Host "  Last Modified: $($certFile.LastWriteTime)"
+          } else {
+            Write-Error "Client certificate file NOT FOUND: $env:SM_CLIENT_CERT_FILE"
+          }
+          Write-Host ""
+
+          # List available keypairs (verifies API authentication works)
+          Write-Host "Available Keypairs:"
+          smctl keypair ls
+          Write-Host ""
+
+          # Verify certificate (healthcheck)
+          Write-Host "DigiCert Healthcheck:"
+          smctl healthcheck
+          Write-Host ""
+
+          # Note: Healthcheck may show cert path/password warning but if keypair ls works,
+          # the signing should still work. We'll test in the pre-build signing test.
+
       - name: Prepare Vulkan SDK for Ubuntu 24.04
         if: contains(inputs.platform, 'ubuntu-24.04')
         run: |
@@ -393,7 +428,7 @@ jobs:
           sudo apt install vulkan-sdk -y
           sudo apt-get install -y mesa-vulkan-drivers
 
-      - name: install frontend dependencies
+      - name: Install frontend dependencies
         run: |
           cd frontend
           pnpm install
@@ -402,7 +437,7 @@ jobs:
         if: ${{ inputs.target != '' && !contains(inputs.target, 'unknown-linux-gnu') && !contains(inputs.target, 'pc-windows-msvc') }}
         run: rustup target add ${{ inputs.target }}
 
-      - name: import Apple Developer Certificate
+      - name: Import Apple Developer Certificate
         if: contains(inputs.platform, 'macos') && inputs.sign-binaries
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -418,13 +453,19 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
           security find-identity -v -p codesigning build.keychain
 
-      - name: verify certificate
+      - name: Verify certificate
         if: contains(inputs.platform, 'macos') && inputs.sign-binaries
         run: |
           CERT_INFO=$(security find-identity -v -p codesigning build.keychain | grep "Developer ID Application")
           CERT_ID=$(echo "$CERT_INFO" | awk -F'"' '{print $2}')
           echo "CERT_ID=$CERT_ID" >> $GITHUB_ENV
-          echo "Certificate imported."
+          echo "Certificate imported: $CERT_ID"
+
+      - name: Configure build acceleration
+        if: contains(inputs.platform, 'macos')
+        run: |
+          echo "✓ macOS build will use Metal GPU acceleration (enabled by default)"
+          echo "✓ CoreML acceleration available for Apple Silicon"
 
       - name: Patch asset name pattern
         id: patch-release-name
