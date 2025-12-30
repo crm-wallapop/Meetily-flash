@@ -44,7 +44,7 @@ A privacy-first AI meeting assistant that captures, transcribes, and summarizes 
 
 ---
 
-> **🎉 New: Meetily PRO Available** - Looking for enhanced accuracy and advanced features? Check out our professional-grade solution with custom summary templates, advanced exports (PDF, DOCX), auto-meeting detection, built-in GDPR compliance, and many more. **This Community Edition remains forever free & open source**. [Learn more about PRO →](https://meetily.ai/pro/)
+> **🎉 New: Meetily PRO Available** - Looking for enhanced accuracy and advanced features? Check out our professional-grade solution with custom summary templates, advanced exports (PDF, DOCX), auto-meeting detection, built-in GDPR compliance, and many more. **This Community Edition remains forever free & open source**. [Learn more about PRO →](https://meetily.ai/downloads/)
 
 ---
 
@@ -111,20 +111,10 @@ Whether you're a defense consultant, enterprise executive, legal professional, o
 
 ### 🍎 **macOS**
 
-#### **macOS (Apple Silicon - M Series chips)**
-
 1. Download `meetily_0.2.0_aarch64.dmg` from [Releases](https://github.com/Zackriya-Solutions/meeting-minutes/releases/latest)
 2. Open the downloaded `.dmg` file
 3. Drag **Meetily** to your Applications folder
 4. Open **Meetily** from Applications folder
-
-#### **Alternative: Install via Homebrew**
-
-```bash
-# Install Meetily (single application - everything included!)
-brew tap zackriya-solutions/meetily
-brew install --cask meetily
-```
 
 ### 🐧 **Linux**
 
@@ -177,7 +167,7 @@ All data stays on your machine. Transcription models, recordings, and transcript
 Use your own OpenAI-compatible endpoint for AI summaries. Perfect for organizations with custom AI infrastructure or preferred providers.
 
 <p align="center">
-    <img src="docs/custom.png" width="650" height="700" style="border-radius: 10px;" alt="Custom OpenAI Endpoint Configuration" />
+    <img src="docs/custom.png" width="650" style="border-radius: 10px;" alt="Custom OpenAI Endpoint Configuration" />
 </p>
 
 ### 🎙️ Professional Audio Mixing
@@ -235,23 +225,17 @@ If you want to contribute to Meetily or build it from source, you'll need to hav
 
 For organizations needing 100+ users or managed compliance solutions, explore [Meetily Enterprise](https://meetily.ai/enterprise/).
 
-**Learn more about pricing and features:** [https://meetily.ai/pro/](https://meetily.ai/pro/)
+**Learn more about pricing and features:** [https://meetily.ai/downloads/](https://meetily.ai/downloads/)
 
 ## Contributing
 
 We welcome contributions from the community! If you have any questions or suggestions, please open an issue or submit a pull request. Please follow the established project structure and guidelines. For more details, refer to the [CONTRIBUTING.md](CONTRIBUTING.md) file.
 
+Thanks for all the contributions. Our community is what makes this project possible.
+
 ## License
 
 MIT License - Feel free to use this project for your own purposes.
-
-## Contributors
-
-Thanks for all the contributions. Our community is what makes this project possible. Below is the list of contributors:
-
-<a href="https://github.com/zackriya-solutions/meeting-minutes/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=zackriya-solutions/meeting-minutes" />
-</a>
 
 ## Acknowledgments
 
