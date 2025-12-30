@@ -42,6 +42,12 @@ A privacy-first AI meeting assistant that captures, transcribes, and summarizes 
 
 </div>
 
+---
+
+> **🎉 New: Meetily PRO Available** - Looking for enhanced accuracy and advanced features? Check out our professional-grade solution with custom summary templates, advanced exports (PDF, DOCX), auto-meeting detection, built-in GDPR compliance, and many more. **This Community Edition remains forever free & open source**. [Learn more about PRO →](https://meetily.ai/pro/)
+
+---
+
 <details>
 <summary>Table of Contents</summary>
 
@@ -52,7 +58,7 @@ A privacy-first AI meeting assistant that captures, transcribes, and summarizes 
 - [Key Features in Action](#key-features-in-action)
 - [System Architecture](#system-architecture)
 - [For Developers](#for-developers)
-- [Enterprise Solutions](#enterprise-solutions)
+- [Meetily PRO](#meetily-pro)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -93,6 +99,7 @@ Whether you're a defense consultant, enterprise executive, legal professional, o
 - **AI-Powered Summaries:** Generate summaries of your meetings using powerful language models.
 - **Multi-Platform:** Works on macOS, Windows, and Linux.
 - **Open Source:** Meetily is open source and free to use.
+- **Flexible AI Provider Support:** Choose from Ollama (local), Claude, Groq, OpenRouter, or use your own OpenAI-compatible endpoint.
 
 ## Installation
 
@@ -104,24 +111,20 @@ Whether you're a defense consultant, enterprise executive, legal professional, o
 
 ### 🍎 **macOS**
 
-Install via Homebrew:
+#### **macOS (Apple Silicon - M Series chips)**
+
+1. Download `meetily_0.2.0_aarch64.dmg` from [Releases](https://github.com/Zackriya-Solutions/meeting-minutes/releases/latest)
+2. Open the downloaded `.dmg` file
+3. Drag **Meetily** to your Applications folder
+4. Open **Meetily** from Applications folder
+
+#### **Alternative: Install via Homebrew**
 
 ```bash
 # Install Meetily (single application - everything included!)
 brew tap zackriya-solutions/meetily
 brew install --cask meetily
 ```
-
-**Upgrading from v0.0.5?**
-
-```bash
-brew update
-brew upgrade --cask meetily
-```
-
-Then open **Meetily** from Applications folder.
-
-> **⚠️ Data Migration:** The application will ask whether to import your old database through a popup window on first launch.
 
 ### 🐧 **Linux**
 
@@ -169,6 +172,14 @@ All data stays on your machine. Transcription models, recordings, and transcript
     <img src="docs/settings.png" width="650" style="border-radius: 10px;" alt="Local Transcription and storage" />
 </p>
 
+### 🌐 Custom OpenAI Endpoint Support
+
+Use your own OpenAI-compatible endpoint for AI summaries. Perfect for organizations with custom AI infrastructure or preferred providers.
+
+<p align="center">
+    <img src="docs/custom.png" width="650" height="700" style="border-radius: 10px;" alt="Custom OpenAI Endpoint Configuration" />
+</p>
+
 ### 🎙️ Professional Audio Mixing
 
 Capture microphone and system audio simultaneously with intelligent ducking and clipping prevention.
@@ -196,17 +207,35 @@ For more details, see the [Architecture documentation](docs/architecture.md).
 
 If you want to contribute to Meetily or build it from source, you'll need to have Rust and Node.js installed. For detailed build instructions, please see the [Building from Source guide](docs/BUILDING.md).
 
-## Enterprise Solutions
+## Meetily PRO
 
-**Meetily Enterprise** is available for on-premise deployment, giving organizations complete control over their meeting intelligence infrastructure. This enterprise version includes:
+**Meetily PRO** is a professional-grade solution with enhanced accuracy and advanced features for serious users and teams. Built on a different codebase with superior transcription models and enterprise-ready capabilities.
 
-- **100% On-Premise Deployment**: Your data never leaves your infrastructure
-- **Centralized Management**: Support for 100+ users with administrative controls
-- **Zero Vendor Lock-in**: Open source MIT license ensures complete ownership
-- **Compliance Ready**: Meet GDPR, SOX, HIPAA, and industry-specific requirements
-- **Custom Integration**: APIs and webhooks for enterprise systems
+### Key Advantages Over Community Edition:
 
-For enterprise solutions: [https://meetily.zackriya.com](https://meetily.zackriya.com)
+- **Enhanced Accuracy**: Superior transcription models for professional-grade accuracy
+- **Custom Summary Templates**: Tailor summaries to your specific workflow and needs
+- **Advanced Export Options**: PDF, DOCX, and Markdown exports with formatting
+- **Auto-detect and Join Meetings**: Automatic meeting detection and joining
+- **Speaker Identification**: Distinguish between speakers automatically *(Coming Soon)*
+- **Chat with Meetings**: AI-powered meeting insights and queries *(Coming Soon)*
+- **Calendar Integration**: Seamless integration with your calendar *(Coming Soon)*
+- **Self-Hosted Deployment**: Deploy on your own infrastructure for teams
+- **GDPR Compliance Built-In**: Privacy by design architecture with complete audit trails
+- **Priority Support**: Dedicated support for PRO users
+
+### Who is PRO for?
+
+- **Professionals** who need the highest accuracy for critical meetings
+- **Teams and organizations** (2-100 users) requiring self-hosted deployment
+- **Power users** who need advanced export formats and custom workflows
+- **Compliance-focused organizations** requiring GDPR readiness
+
+> **Note:** Meetily Community Edition remains **free & open source forever** with local transcription, AI summaries, and core features. PRO is a separate professional solution for users who need enhanced accuracy and advanced capabilities.
+
+For organizations needing 100+ users or managed compliance solutions, explore [Meetily Enterprise](https://meetily.ai/enterprise/).
+
+**Learn more about pricing and features:** [https://meetily.ai/pro/](https://meetily.ai/pro/)
 
 ## Contributing
 
@@ -216,15 +245,13 @@ We welcome contributions from the community! If you have any questions or sugges
 
 MIT License - Feel free to use this project for your own purposes.
 
-## Contributions
+## Contributors
 
 Thanks for all the contributions. Our community is what makes this project possible. Below is the list of contributors:
 
 <a href="https://github.com/zackriya-solutions/meeting-minutes/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=zackriya-solutions/meeting-minutes" />
 </a>
-
-We welcome contributions from the community! If you have any questions or suggestions, please open an issue or submit a pull request. Please follow the established project structure and guidelines. For more details, refer to the [CONTRIBUTING](CONTRIBUTING.md) file.
 
 ## Acknowledgments
 
