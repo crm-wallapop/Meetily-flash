@@ -44,7 +44,7 @@ A privacy-first AI meeting assistant that captures, transcribes, and summarizes 
 
 ---
 
-> **🎉 New: Meetily PRO Available** - Looking for enhanced accuracy and advanced features? Check out our professional-grade solution with custom summary templates, advanced exports (PDF, DOCX), auto-meeting detection, built-in GDPR compliance, and many more. **This Community Edition remains forever free & open source**. [Learn more about PRO →](https://meetily.ai/downloads/)
+> **🎉 New: Meetily PRO Available** - Looking for enhanced accuracy and advanced features? Check out our professional-grade solution with custom summary templates, advanced exports (PDF, DOCX), auto-meeting detection, built-in GDPR compliance, and many more. **This Community Edition remains forever free & open source**. [Learn more about PRO →](https://meetily.ai/pro/)
 
 ---
 
@@ -225,7 +225,7 @@ If you want to contribute to Meetily or build it from source, you'll need to hav
 
 For organizations needing 100+ users or managed compliance solutions, explore [Meetily Enterprise](https://meetily.ai/enterprise/).
 
-**Learn more about pricing and features:** [https://meetily.ai/downloads/](https://meetily.ai/downloads/)
+**Learn more about pricing and features:** [https://meetily.ai/pro/](https://meetily.ai/pro/)
 
 ## Contributing
 
