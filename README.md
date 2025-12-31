@@ -22,7 +22,7 @@
     </h3>
     <p align="center">
     Get latest <a href="https://www.zackriya.com/meetily-subscribe/"><b>Product updates</b></a> <br><br>
-    <a href="https://meetily.zackriya.com"><b>Website</b></a> •
+    <a href="https://meetily.ai"><b>Website</b></a> •
     <a href="https://www.linkedin.com/company/106363062/"><b>LinkedIn</b></a> •
     <a href="https://discord.gg/crRymMQBFH"><b>Meetily Discord</b></a> •
     <a href="https://discord.com/invite/vCFJvN4BwJ"><b>Privacy-First AI</b></a> •
@@ -198,6 +198,10 @@ For more details, see the [Architecture documentation](docs/architecture.md).
 If you want to contribute to Meetily or build it from source, you'll need to have Rust and Node.js installed. For detailed build instructions, please see the [Building from Source guide](docs/BUILDING.md).
 
 ## Meetily PRO
+
+<p align="center">
+    <img src="docs/pv2.0.png" width="650" style="border-radius: 10px;" alt="Device selection" />
+</p>
 
 **Meetily PRO** is a professional-grade solution with enhanced accuracy and advanced features for serious users and teams. Built on a different codebase with superior transcription models and enterprise-ready capabilities.
 
