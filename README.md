@@ -197,10 +197,10 @@ For more details, see the [Architecture documentation](docs/architecture.md).
 
 If you want to contribute to Meetily or build it from source, you'll need to have Rust and Node.js installed. For detailed build instructions, please see the [Building from Source guide](docs/BUILDING.md).
 
-## Meetily PRO
+## Meetily Pro
 
 <p align="center">
-    <img src="docs/pv2.0.png" width="650" style="border-radius: 10px;" alt="Device selection" />
+    <img src="docs/pv2.1.png" width="650" style="border-radius: 10px;" alt="Upcoming version" />
 </p>
 
 **Meetily PRO** is a professional-grade solution with enhanced accuracy and advanced features for serious users and teams. Built on a different codebase with superior transcription models and enterprise-ready capabilities.
