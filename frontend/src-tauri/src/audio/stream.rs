@@ -322,18 +322,32 @@ impl AudioStream {
 
         match self.backend {
             StreamBackend::Cpal(stream) => {
+                // CRITICAL: Pause the stream first to stop callbacks immediately
+                // This ensures closures stop executing before we drop the stream,
+                // allowing Arc references captured in callbacks to be released
+                if let Err(e) = stream.pause() {
+                    warn!("Failed to pause stream before drop: {}", e);
+                }
+                info!("Stream paused, now dropping to release callbacks");
                 drop(stream);
             }
             #[cfg(target_os = "macos")]
             StreamBackend::CoreAudio { task } => {
-                // Abort the processing task (which will drop the stream)
+                // Abort the processing task and wait briefly for cleanup
                 if let Some(task_handle) = task {
+                    info!("Aborting Core Audio task...");
                     task_handle.abort();
+                    // Give the runtime a moment to clean up the aborted task
+                    // This helps ensure Arc references in the closure are dropped
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    info!("Core Audio task aborted");
                 }
             }
         }
 
-        info!("Audio stream stopped for device: {}", self.device.name);
+        // Explicitly drop self.device Arc reference
+        drop(self.device);
+        info!("Audio stream stopped and device reference dropped");
         Ok(())
     }
 }

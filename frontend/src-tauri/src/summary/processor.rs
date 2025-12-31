@@ -1,15 +1,25 @@
 use crate::summary::llm_client::{generate_summary, LLMProvider};
 use crate::summary::templates;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::Client;
+use std::path::PathBuf;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-/// Rough token count estimation (4 characters ≈ 1 token)
+// Compile regex once and reuse (significant performance improvement for repeated calls)
+static THINKING_TAG_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?s)<think(?:ing)?>.*?</think(?:ing)?>").unwrap()
+});
+
+/// Rough token count estimation using character count
 pub fn rough_token_count(s: &str) -> usize {
-    (s.chars().count() as f64 / 4.0).ceil() as usize
+    let char_count = s.chars().count();
+    (char_count as f64 * 0.35).ceil() as usize
 }
 
 /// Chunks text into overlapping segments based on token count
+/// Uses character-based chunking for proper Unicode support
 ///
 /// # Arguments
 /// * `text` - The text to chunk
@@ -28,10 +38,13 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
         return vec![];
     }
 
-    // Convert token-based sizes to character-based sizes (4 chars ≈ 1 token)
-    let chunk_size_chars = chunk_size_tokens * 4;
-    let overlap_chars = overlap_tokens * 4;
+    // Convert token-based sizes to character-based sizes
+    // Using ~2.85 chars per token (inverse of 0.35 tokens per char from rough_token_count)
+    let chars_per_token = 1.0 / 0.35;
+    let chunk_size_chars = (chunk_size_tokens as f64 * chars_per_token).ceil() as usize;
+    let overlap_chars = (overlap_tokens as f64 * chars_per_token).ceil() as usize;
 
+    // Collect characters for indexing (needed for proper Unicode support)
     let chars: Vec<char> = text.chars().collect();
     let total_chars = chars.len();
 
@@ -41,32 +54,38 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
     }
 
     let mut chunks = Vec::new();
-    let mut current_pos = 0;
+    let mut start_char = 0;
     // Step is the size of the non-overlapping part of the window
     let step = chunk_size_chars.saturating_sub(overlap_chars).max(1);
 
-    while current_pos < total_chars {
-        let mut end_pos = std::cmp::min(current_pos + chunk_size_chars, total_chars);
+    while start_char < total_chars {
+        let end_char = (start_char + chunk_size_chars).min(total_chars);
 
-        // Try to find a whitespace boundary to avoid splitting words
-        if end_pos < total_chars {
-            let mut boundary = end_pos;
-            while boundary > current_pos && !chars[boundary].is_whitespace() {
-                boundary -= 1;
-            }
-            if boundary > current_pos {
-                end_pos = boundary;
+        // Convert character indices to byte indices for string slicing
+        let start_byte: usize = chars[..start_char].iter().map(|c| c.len_utf8()).sum();
+        let mut end_byte: usize = chars[..end_char].iter().map(|c| c.len_utf8()).sum();
+
+        // Try to break at sentence or word boundary for cleaner chunks
+        if end_char < total_chars {
+            let slice = &text[start_byte..end_byte];
+            // Look for sentence boundary (period followed by space)
+            if let Some(last_period) = slice.rfind(". ") {
+                end_byte = start_byte + last_period + 2;
+            } else if let Some(last_space) = slice.rfind(' ') {
+                // Fall back to word boundary (space)
+                end_byte = start_byte + last_space + 1;
             }
         }
 
-        let chunk: String = chars[current_pos..end_pos].iter().collect();
-        chunks.push(chunk);
+        // Extract chunk
+        chunks.push(text[start_byte..end_byte].to_string());
 
-        if end_pos == total_chars {
+        if end_char >= total_chars {
             break;
         }
 
-        current_pos += step;
+        // Move to next chunk with overlap (in character units)
+        start_char += step;
     }
 
     info!("Created {} chunks from text", chunks.len());
@@ -81,9 +100,8 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
 /// # Returns
 /// Cleaned markdown string
 pub fn clean_llm_markdown_output(markdown: &str) -> String {
-    // Remove <think>...</think> or <thinking>...</thinking> blocks
-    let re = Regex::new(r"(?s)<think(?:ing)?>.*?</think(?:ing)?>").unwrap();
-    let without_thinking = re.replace_all(markdown, "");
+    // Remove <think>...</think> or <thinking>...</thinking> blocks using cached regex
+    let without_thinking = THINKING_TAG_REGEX.replace_all(markdown, "");
 
     let trimmed = without_thinking.trim();
 
@@ -129,6 +147,12 @@ pub fn extract_meeting_name_from_markdown(markdown: &str) -> Option<String> {
 /// * `template_id` - Template identifier (e.g., "daily_standup", "standard_meeting")
 /// * `token_threshold` - Token limit for single-pass processing (default 4000)
 /// * `ollama_endpoint` - Optional custom Ollama endpoint
+/// * `custom_openai_endpoint` - Optional custom OpenAI-compatible endpoint
+/// * `max_tokens` - Optional max tokens for completion (CustomOpenAI provider)
+/// * `temperature` - Optional temperature (CustomOpenAI provider)
+/// * `top_p` - Optional top_p (CustomOpenAI provider)
+/// * `app_data_dir` - Optional app data directory (BuiltInAI provider)
+/// * `cancellation_token` - Optional cancellation token to stop processing
 ///
 /// # Returns
 /// Tuple of (final_summary_markdown, number_of_chunks_processed)
@@ -142,7 +166,19 @@ pub async fn generate_meeting_summary(
     template_id: &str,
     token_threshold: usize,
     ollama_endpoint: Option<&str>,
+    custom_openai_endpoint: Option<&str>,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    app_data_dir: Option<&PathBuf>,
+    cancellation_token: Option<&CancellationToken>,
 ) -> Result<(String, i64), String> {
+    // Check cancellation at the start
+    if let Some(token) = cancellation_token {
+        if token.is_cancelled() {
+            return Err("Summary generation was cancelled".to_string());
+        }
+    }
     info!(
         "Starting summary generation with provider: {:?}, model: {}",
         provider, model_name
@@ -155,8 +191,9 @@ pub async fn generate_meeting_summary(
     let successful_chunk_count: i64;
 
     // Strategy: Use single-pass for cloud providers or short transcripts
-    // Use multi-level chunking for Ollama with long transcripts
-    if provider != &LLMProvider::Ollama || total_tokens < token_threshold {
+    // Use multi-level chunking for Ollama/BuiltInAI with long transcripts
+    // Note: CustomOpenAI is treated like cloud providers (unlimited context)
+    if (provider != &LLMProvider::Ollama && provider != &LLMProvider::BuiltInAI) || total_tokens < token_threshold {
         info!(
             "Using single-pass summarization (tokens: {}, threshold: {})",
             total_tokens, token_threshold
@@ -179,7 +216,15 @@ pub async fn generate_meeting_summary(
         let user_prompt_template_chunk = "Provide a concise but comprehensive summary of the following transcript chunk. Capture all key points, decisions, action items, and mentioned individuals.\n\n<transcript_chunk>\n{}\n</transcript_chunk>";
 
         for (i, chunk) in chunks.iter().enumerate() {
-            info!("⏲️ Processing chunk {}/{}", i + 1, num_chunks);
+            // Check for cancellation before processing each chunk
+            if let Some(token) = cancellation_token {
+                if token.is_cancelled() {
+                    info!("Summary generation cancelled during chunk {}/{}", i + 1, num_chunks);
+                    return Err("Summary generation was cancelled".to_string());
+                }
+            }
+
+            info!("Processing chunk {}/{}", i + 1, num_chunks);
             let user_prompt_chunk = user_prompt_template_chunk.replace("{}", chunk.as_str());
 
             match generate_summary(
@@ -190,6 +235,12 @@ pub async fn generate_meeting_summary(
                 system_prompt_chunk,
                 &user_prompt_chunk,
                 ollama_endpoint,
+                custom_openai_endpoint,
+                max_tokens,
+                temperature,
+                top_p,
+                app_data_dir,
+                cancellation_token,
             )
             .await
             {
@@ -198,7 +249,11 @@ pub async fn generate_meeting_summary(
                     info!("✓ Chunk {}/{} processed successfully", i + 1, num_chunks);
                 }
                 Err(e) => {
-                    error!("⚠️ Failed processing chunk {}/{}: {}", i + 1, num_chunks, e);
+                    // Check if error is due to cancellation
+                    if e.contains("cancelled") {
+                        return Err(e);
+                    }
+                    error!("Failed processing chunk {}/{}: {}", i + 1, num_chunks, e);
                 }
             }
         }
@@ -235,6 +290,12 @@ pub async fn generate_meeting_summary(
                 system_prompt_combine,
                 &user_prompt_combine,
                 ollama_endpoint,
+                custom_openai_endpoint,
+                max_tokens,
+                temperature,
+                top_p,
+                app_data_dir,
+                cancellation_token,
             )
             .await?
         } else {
@@ -288,6 +349,14 @@ pub async fn generate_meeting_summary(
         final_user_prompt.push_str("\n</user_context>");
     }
 
+    // Check cancellation before final summary generation
+    if let Some(token) = cancellation_token {
+        if token.is_cancelled() {
+            info!("Summary generation cancelled before final summary");
+            return Err("Summary generation was cancelled".to_string());
+        }
+    }
+
     let raw_markdown = generate_summary(
         client,
         provider,
@@ -296,6 +365,12 @@ pub async fn generate_meeting_summary(
         &final_system_prompt,
         &final_user_prompt,
         ollama_endpoint,
+        custom_openai_endpoint,
+        max_tokens,
+        temperature,
+        top_p,
+        app_data_dir,
+        cancellation_token,
     )
     .await?;
 

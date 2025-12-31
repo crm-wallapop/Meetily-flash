@@ -13,7 +13,14 @@ use std::sync::{
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::task::JoinHandle;
 
-use super::{parse_audio_device, RecordingManager, DeviceEvent, DeviceMonitorType};
+use super::{
+    parse_audio_device,
+    default_input_device,   // Get default microphone
+    default_output_device,  // Get default system audio
+    RecordingManager,
+    DeviceEvent,
+    DeviceMonitorType
+};
 
 // Import transcription modules
 use super::transcription::{
@@ -34,6 +41,9 @@ static IS_RECORDING: AtomicBool = AtomicBool::new(false);
 // Global recording manager and transcription task to keep them alive during recording
 static RECORDING_MANAGER: Mutex<Option<RecordingManager>> = Mutex::new(None);
 static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+
+// Listener ID for proper cleanup - prevents microphone from staying active after recording stops
+static TRANSCRIPT_LISTENER_ID: Mutex<Option<tauri::EventId>> = Mutex::new(None);
 
 // ============================================================================
 // PUBLIC TYPES
@@ -82,11 +92,12 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     if let Err(validation_error) = transcription::validate_transcription_model_ready(&app).await {
         error!("Model validation failed: {}", validation_error);
 
-        // Emit actionable error event for frontend to show model selector
+        // Emit error event for frontend - actionable: false to show toast instead of modal
+        // (download progress is already shown in top-right toast)
         let _ = app.emit("transcription-error", serde_json::json!({
             "error": validation_error,
-            "userMessage": "Recording cannot start: No transcription models are available. Please download a model to enable transcription.",
-            "actionable": true
+            "userMessage": "Recording cannot start: Transcription model is still downloading. Please wait for the download to complete.",
+            "actionable": false
         }));
 
         return Err(validation_error);
@@ -98,6 +109,109 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // Create new recording manager
     let mut manager = RecordingManager::new();
+
+    // Load recording preferences to get auto_save AND device preferences
+    let (auto_save, preferred_mic_name, preferred_system_name) =
+        match super::recording_preferences::load_recording_preferences(&app).await {
+            Ok(prefs) => {
+                info!("📋 Loaded recording preferences: auto_save={}, preferred_mic={:?}, preferred_system={:?}",
+                      prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device);
+                (prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device)
+            }
+            Err(e) => {
+                warn!("Failed to load recording preferences, using defaults: {}", e);
+                (true, None, None)
+            }
+        };
+
+    // ============================================================================
+    // MICROPHONE DEVICE RESOLUTION: Preference → Default → Error
+    // ============================================================================
+    let microphone_device = match preferred_mic_name {
+        Some(pref_name) => {
+            info!("🎤 Attempting to use preferred microphone: '{}'", pref_name);
+            match parse_audio_device(&pref_name) {
+                Ok(device) => {
+                    info!("✅ Using preferred microphone: '{}'", device.name);
+                    Some(Arc::new(device))
+                }
+                Err(e) => {
+                    warn!("⚠️ Preferred microphone '{}' not available: {}", pref_name, e);
+                    warn!("   Falling back to system default microphone...");
+                    match default_input_device() {
+                        Ok(device) => {
+                            info!("✅ Using default microphone: '{}'", device.name);
+                            Some(Arc::new(device))
+                        }
+                        Err(default_err) => {
+                            error!("❌ No microphone available (preferred and default both failed)");
+                            return Err(format!(
+                                "No microphone device available. Preferred device '{}' not found, and default microphone unavailable: {}",
+                                pref_name, default_err
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        None => {
+            info!("🎤 No microphone preference set, using system default");
+            match default_input_device() {
+                Ok(device) => {
+                    info!("✅ Using default microphone: '{}'", device.name);
+                    Some(Arc::new(device))
+                }
+                Err(e) => {
+                    error!("❌ No default microphone available");
+                    return Err(format!("No microphone device available: {}", e));
+                }
+            }
+        }
+    };
+
+    // ============================================================================
+    // SYSTEM AUDIO DEVICE RESOLUTION: Preference → Default → None (optional)
+    // ============================================================================
+    let system_device = match preferred_system_name {
+        Some(pref_name) => {
+            info!("🔊 Attempting to use preferred system audio: '{}'", pref_name);
+            match parse_audio_device(&pref_name) {
+                Ok(device) => {
+                    info!("✅ Using preferred system audio: '{}'", device.name);
+                    Some(Arc::new(device))
+                }
+                Err(e) => {
+                    warn!("⚠️ Preferred system audio '{}' not available: {}", pref_name, e);
+                    warn!("   Falling back to system default...");
+                    match default_output_device() {
+                        Ok(device) => {
+                            info!("✅ Using default system audio: '{}'", device.name);
+                            Some(Arc::new(device))
+                        }
+                        Err(default_err) => {
+                            warn!("⚠️ No system audio available (preferred and default both failed): {}", default_err);
+                            warn!("   Recording will continue with microphone only");
+                            None // System audio is optional
+                        }
+                    }
+                }
+            }
+        }
+        None => {
+            info!("🔊 No system audio preference set, using system default");
+            match default_output_device() {
+                Ok(device) => {
+                    info!("✅ Using default system audio: '{}'", device.name);
+                    Some(Arc::new(device))
+                }
+                Err(e) => {
+                    warn!("⚠️ No default system audio available: {}", e);
+                    warn!("   Recording will continue with microphone only");
+                    None // System audio is optional
+                }
+            }
+        }
+    };
 
     // Always ensure a meeting name is set so incremental saver initializes
     let effective_meeting_name = meeting_name.clone().unwrap_or_else(|| {
@@ -116,9 +230,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         let _ = app_for_error.emit("recording-error", error.user_message());
     });
 
-    // Start recording with default devices
+    // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
     let transcription_receiver = manager
-        .start_recording_with_defaults()
+        .start_recording(microphone_device, system_device, auto_save)
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
 
@@ -142,11 +256,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // CRITICAL: Listen for transcript-update events and save to recording manager
     // This enables transcript history persistence for page reload sync
-    let app_for_listener = app.clone();
-    tokio::spawn(async move {
+    // Store listener ID for cleanup during stop_recording to ensure microphone is released
+    {
         use tauri::Listener;
-
-        app_for_listener.listen("transcript-update", move |event: tauri::Event| {
+        let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
             // Parse the transcript update from the event payload
             if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
                 // Create structured transcript segment
@@ -169,9 +282,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
                 }
             }
         });
-
+        let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
+        *global_listener = Some(listener_id);
         info!("✅ Transcript-update event listener registered for history persistence");
-    });
+    }
 
     // Emit success event
     app.emit("recording-started", serde_json::json!({
@@ -221,11 +335,12 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     if let Err(validation_error) = transcription::validate_transcription_model_ready(&app).await {
         error!("Model validation failed: {}", validation_error);
 
-        // Emit actionable error event for frontend to show model selector
+        // Emit error event for frontend - actionable: false to show toast instead of modal
+        // (download progress is already shown in top-right toast)
         let _ = app.emit("transcription-error", serde_json::json!({
             "error": validation_error,
-            "userMessage": "Recording cannot start: No transcription models are available. Please download a model to enable transcription.",
-            "actionable": true
+            "userMessage": "Recording cannot start: Transcription model is still downloading. Please wait for the download to complete.",
+            "actionable": false
         }));
 
         return Err(validation_error);
@@ -255,6 +370,18 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Create new recording manager
     let mut manager = RecordingManager::new();
 
+    // Load recording preferences to check auto_save setting
+    let auto_save = match super::recording_preferences::load_recording_preferences(&app).await {
+        Ok(prefs) => {
+            info!("📋 Loaded recording preferences: auto_save={}", prefs.auto_save);
+            prefs.auto_save
+        }
+        Err(e) => {
+            warn!("Failed to load recording preferences, defaulting to auto_save=true: {}", e);
+            true // Default to saving if preferences can't be loaded
+        }
+    };
+
     // Always ensure a meeting name is set so incremental saver initializes
     let effective_meeting_name = meeting_name.clone().unwrap_or_else(|| {
         let now = chrono::Local::now();
@@ -271,9 +398,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         let _ = app_for_error.emit("recording-error", error.user_message());
     });
 
-    // Start recording with specified devices
+    // Start recording with specified devices and auto_save setting
     let transcription_receiver = manager
-        .start_recording(mic_device, system_device)
+        .start_recording(mic_device, system_device, auto_save)
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
 
@@ -297,11 +424,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // CRITICAL: Listen for transcript-update events and save to recording manager
     // This enables transcript history persistence for page reload sync
-    let app_for_listener = app.clone();
-    tokio::spawn(async move {
+    // Store listener ID for cleanup during stop_recording to ensure microphone is released
+    {
         use tauri::Listener;
-
-        app_for_listener.listen("transcript-update", move |event: tauri::Event| {
+        let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
             // Parse the transcript update from the event payload
             if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
                 // Create structured transcript segment
@@ -324,9 +450,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 }
             }
         });
-
+        let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
+        *global_listener = Some(listener_id);
         info!("✅ Transcript-update event listener registered for history persistence");
-    });
+    }
 
     // Emit success event
     app.emit("recording-started", serde_json::json!({
@@ -401,6 +528,16 @@ pub async fn stop_recording<R: Runtime>(
         }
     }
 
+    // Step 1.5: Clean up transcript listener to release microphone
+    // Unlisten transcript-update event to prevent lingering references
+    {
+        use tauri::Listener;
+        if let Some(listener_id) = TRANSCRIPT_LISTENER_ID.lock().unwrap().take() {
+            app.unlisten(listener_id);
+            info!("✅ Transcript-update listener removed");
+        }
+    }
+
     // Step 2: Signal transcription workers to finish processing ALL queued chunks
     let _ = app.emit(
         "recording-shutdown-progress",
@@ -443,14 +580,21 @@ pub async fn stop_recording<R: Runtime>(
             }
         });
 
-        // Wait indefinitely for transcription completion - no 30 second timeout!
-        match task_handle.await {
-            Ok(()) => {
+        // Wait up to 10 minutes for transcription completion to prevent indefinite hangs
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(600), // 10 minutes max
+            task_handle
+        ).await {
+            Ok(Ok(())) => {
                 info!("✅ ALL transcription chunks processed successfully - no data lost");
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!("⚠️ Transcription task completed with error: {:?}", e);
                 // Continue anyway - the worker may have processed most chunks
+            }
+            Err(_) => {
+                warn!("⏱️ Transcription timeout (10 minutes) reached, continuing shutdown to prevent indefinite hang");
+                // Continue shutdown even on timeout - better to lose some chunks than hang forever
             }
         }
 
@@ -472,16 +616,27 @@ pub async fn stop_recording<R: Runtime>(
 
     info!("🧠 All transcript chunks processed. Now safely unloading transcription model...");
 
-    // Determine which provider was used and unload the appropriate model
-    let config = match crate::api::api::api_get_transcript_config(
-        app.clone(),
-        app.clone().state(),
-        None,
+    // Determine which provider was used and unload the appropriate model (with timeout)
+    let config = match tokio::time::timeout(
+        tokio::time::Duration::from_secs(30), // 30 seconds max for DB operation
+        crate::api::api::api_get_transcript_config(
+            app.clone(),
+            app.clone().state(),
+            None,
+        )
     )
     .await
     {
-        Ok(Some(config)) => Some(config.provider),
-        _ => None,
+        Ok(Ok(Some(config))) => Some(config.provider),
+        Ok(Ok(None)) => None,
+        Ok(Err(e)) => {
+            warn!("⚠️ Failed to get transcript config: {:?}", e);
+            None
+        }
+        Err(_) => {
+            warn!("⏱️ Transcript config timeout (30s), continuing shutdown");
+            None
+        }
     };
 
     match config.as_deref() {
@@ -659,15 +814,22 @@ pub async fn stop_recording<R: Runtime>(
         let meeting_folder = manager.get_meeting_folder();
         let meeting_name = manager.get_meeting_name();
 
-        match manager.save_recording_only(&app).await {
-            Ok(_) => {
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(300), // 5 minutes max for file I/O
+            manager.save_recording_only(&app)
+        ).await {
+            Ok(Ok(_)) => {
                 info!("✅ Recording data saved successfully during cleanup");
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!(
                     "⚠️ Error during recording cleanup (transcripts preserved): {}",
                     e
                 );
+                // Don't fail shutdown - transcripts are already preserved
+            }
+            Err(_) => {
+                warn!("⏱️ File I/O timeout (5 minutes) reached during save, continuing shutdown");
                 // Don't fail shutdown - transcripts are already preserved
             }
         }

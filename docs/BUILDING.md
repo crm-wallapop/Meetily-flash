@@ -53,28 +53,34 @@ sudo pacman -S base-devel cmake git
 
 ### 🧠 Understanding Auto-Detection
 
-The build scripts (`dev-gpu.sh` and `build-gpu.sh`) call `scripts/auto-detect-gpu.js` which automatically detects your hardware and selects the best acceleration method.
+The build scripts (`dev-gpu.sh` and `build-gpu.sh`) orchestrate the entire build process. Here's how they work:
+
+1.  **Detect location:** Find `package.json` (works from project root or `frontend/`)
+2.  **Auto-detect GPU:** Run `scripts/auto-detect-gpu.js` (or use `TAURI_GPU_FEATURE` if set)
+3.  **Build Sidecar:** Build `llama-helper` with the detected feature (debug or release)
+4.  **Copy Binary:** Copy the built sidecar to `src-tauri/binaries` with the target triple
+5.  **Run Tauri:** Call `npm run tauri:dev` or `tauri:build` with the feature flag passed via env var
 
 #### Detection Priority
 
-| Priority | Hardware | What It Checks | Result |
-|----------|----------|----------------|--------|
-| 1️⃣ | **NVIDIA CUDA** | `nvidia-smi` exists + (`CUDA_PATH` or `nvcc` found) | `--features cuda` |
-| 2️⃣ | **AMD ROCm** | `rocm-smi` exists + (`ROCM_PATH` or `hipcc` found) | `--features hipblas` |
-| 3️⃣ | **Vulkan** | `vulkaninfo` exists + `VULKAN_SDK` + `BLAS_INCLUDE_DIRS` set | `--features vulkan` |
-| 4️⃣ | **OpenBLAS** | `BLAS_INCLUDE_DIRS` set | `--features openblas` |
-| 5️⃣ | **CPU-only** | None of the above | (no features, pure CPU) |
+| Priority | Hardware        | What It Checks                                               | Result                  |
+| -------- | --------------- | ------------------------------------------------------------ | ----------------------- |
+| 1️⃣       | **NVIDIA CUDA** | `nvidia-smi` exists + (`CUDA_PATH` or `nvcc` found)          | `--features cuda`       |
+| 2️⃣       | **AMD ROCm**    | `rocm-smi` exists + (`ROCM_PATH` or `hipcc` found)           | `--features hipblas`    |
+| 3️⃣       | **Vulkan**      | `vulkaninfo` exists + `VULKAN_SDK` + `BLAS_INCLUDE_DIRS` set | `--features vulkan`     |
+| 4️⃣       | **OpenBLAS**    | `BLAS_INCLUDE_DIRS` set                                      | `--features openblas`   |
+| 5️⃣       | **CPU-only**    | None of the above                                            | (no features, pure CPU) |
 
 #### Common Scenarios
 
-| Your System | Auto-Detection Result | Why |
-|-------------|----------------------|-----|
-| Clean Linux install | CPU-only | No GPU SDK detected |
-| NVIDIA GPU + drivers only | CPU-only | CUDA toolkit not installed |
-| NVIDIA GPU + CUDA toolkit | **CUDA acceleration** ✅ | Full detection successful |
-| AMD GPU + ROCm | **HIPBlas acceleration** ✅ | Full detection successful |
-| Vulkan drivers only | CPU-only | Vulkan SDK + env vars needed |
-| Vulkan SDK configured | **Vulkan acceleration** ✅ | All requirements met |
+| Your System               | Auto-Detection Result       | Why                          |
+| ------------------------- | --------------------------- | ---------------------------- |
+| Clean Linux install       | CPU-only                    | No GPU SDK detected          |
+| NVIDIA GPU + drivers only | CPU-only                    | CUDA toolkit not installed   |
+| NVIDIA GPU + CUDA toolkit | **CUDA acceleration** ✅    | Full detection successful    |
+| AMD GPU + ROCm            | **HIPBlas acceleration** ✅ | Full detection successful    |
+| Vulkan drivers only       | CPU-only                    | Vulkan SDK + env vars needed |
+| Vulkan SDK configured     | **Vulkan acceleration** ✅  | All requirements met         |
 
 > 💡 **Key Insight:** Having GPU drivers alone isn't enough. You need the **development SDK** (CUDA toolkit, ROCm, or Vulkan SDK) for acceleration.
 
@@ -113,12 +119,15 @@ CMAKE_POSITION_INDEPENDENT_CODE=ON \
 ```
 
 > 💡 **Finding Your Compute Capability:**
+>
 > ```bash
 > nvidia-smi --query-gpu=compute_cap --format=csv
 > ```
+>
 > Convert `7.5` → `75`, `8.6` → `86`, etc.
 
 **Why these flags?**
+
 - `CMAKE_CUDA_ARCHITECTURES`: Optimizes for your specific GPU
 - `CMAKE_CUDA_STANDARD=17`: Ensures C++17 compatibility
 - `CMAKE_POSITION_INDEPENDENT_CODE=ON`: Fixes linking issues on modern systems
@@ -189,33 +198,34 @@ hipcc --version     # Shows ROCm version
 
 #### Manual Feature Override
 
-Want to force a specific acceleration method? Use these commands:
+Want to force a specific acceleration method? Use the `TAURI_GPU_FEATURE` environment variable with the shell scripts:
 
 ```bash
 # Force CUDA (ignore auto-detection)
-pnpm run tauri:dev:cuda
-pnpm run tauri:build:cuda
+TAURI_GPU_FEATURE=cuda ./dev-gpu.sh
+TAURI_GPU_FEATURE=cuda ./build-gpu.sh
 
 # Force Vulkan
-pnpm run tauri:dev:vulkan
-pnpm run tauri:build:vulkan
+TAURI_GPU_FEATURE=vulkan ./dev-gpu.sh
+TAURI_GPU_FEATURE=vulkan ./build-gpu.sh
 
 # Force ROCm (HIPBlas)
-pnpm run tauri:dev:hipblas
-pnpm run tauri:build:hipblas
+TAURI_GPU_FEATURE=hipblas ./dev-gpu.sh
+TAURI_GPU_FEATURE=hipblas ./build-gpu.sh
 
 # Force CPU-only (for testing)
-pnpm run tauri:dev:cpu
-pnpm run tauri:build:cpu
+TAURI_GPU_FEATURE="" ./dev-gpu.sh
+TAURI_GPU_FEATURE="" ./build-gpu.sh
 
 # Force OpenBLAS (CPU-optimized)
-pnpm run tauri:dev:openblas
-pnpm run tauri:build:openblas
+TAURI_GPU_FEATURE=openblas ./dev-gpu.sh
+TAURI_GPU_FEATURE=openblas ./build-gpu.sh
 ```
 
 #### Build Output Location
 
 After successful build:
+
 ```
 src-tauri/target/release/bundle/appimage/Meetily_<version>_amd64.AppImage
 ```
@@ -225,10 +235,12 @@ src-tauri/target/release/bundle/appimage/Meetily_<version>_amd64.AppImage
 ### 🧭 Troubleshooting
 
 #### "CUDA toolkit not found"
+
 - **Fix:** Install `nvidia-cuda-toolkit` or set `CUDA_PATH` environment variable
 - **Check:** `nvcc --version` should work
 
 #### "Vulkan detected but missing dependencies"
+
 - **Fix:** Set both `VULKAN_SDK` and `BLAS_INCLUDE_DIRS` environment variables
 - **Example:**
   ```bash
@@ -237,10 +249,12 @@ src-tauri/target/release/bundle/appimage/Meetily_<version>_amd64.AppImage
   ```
 
 #### "AppImage build stripping symbols"
+
 - **Fix:** Already handled! `build-gpu.sh` sets `NO_STRIP=true` automatically
 - **Why:** Prevents runtime errors from missing symbols
 
 #### Build works but no GPU acceleration
+
 - **Check detection:** Look at the build output for GPU detection messages
 - **Verify:** `nvidia-smi` (NVIDIA) or `rocm-smi` (AMD) should work
 - **Missing SDK:** Install the development toolkit, not just drivers
@@ -285,10 +299,10 @@ The application will be built with Metal GPU acceleration automatically.
 
 ### 1. Install Dependencies
 
-*   **Node.js:** Download and install from [nodejs.org](https://nodejs.org/).
-*   **Rust:** Install from [rust-lang.org](https://www.rust-lang.org/tools/install).
-*   **Visual Studio Build Tools:** Install the "Desktop development with C++" workload from the Visual Studio Installer.
-*   **CMake:** Download and install from [cmake.org](https://cmake.org/download/).
+- **Node.js:** Download and install from [nodejs.org](https://nodejs.org/).
+- **Rust:** Install from [rust-lang.org](https://www.rust-lang.org/tools/install).
+- **Visual Studio Build Tools:** Install the "Desktop development with C++" workload from the Visual Studio Installer.
+- **CMake:** Download and install from [cmake.org](https://cmake.org/download/).
 
 ### 2. Build and Run
 

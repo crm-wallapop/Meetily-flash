@@ -136,7 +136,9 @@ This document provides a quick overview of all available CI/CD workflows in this
 - Creates GitHub Release (draft)
 - Version tags from `tauri.conf.json`
 - Uploads release assets
-- All platforms with optimized bundles
+- **macOS and Windows only** (Linux excluded from production releases)
+- Auto-generates `latest.json` for Tauri updater
+- **Auto-increment versioning**: If tag exists, auto-increments (e.g., `0.1.1` -> `0.1.1.1` -> `0.1.1.2`, up to `.100`)
 
 **Triggers:**
 - Manual dispatch only
@@ -147,8 +149,18 @@ This document provides a quick overview of all available CI/CD workflows in this
 
 **Outputs:**
 - GitHub Release (draft)
-- All platform installers
+- macOS: DMG installer, app.tar.gz (updater), .sig
+- Windows: MSI installer (signed), NSIS installer (signed), .sig files
+- Updater manifest: latest.json
 - Release notes auto-generated
+
+**Version Behavior:**
+- If `v0.1.1` tag doesn't exist: creates `v0.1.1`
+- If `v0.1.1` exists: creates `v0.1.1.1`
+- If `v0.1.1.1` exists: creates `v0.1.1.2`
+- Maximum: `v0.1.1.100` (then update `tauri.conf.json`)
+
+**Note:** Linux builds are not included in releases. Use `build-linux.yml` for Linux testing.
 
 ---
 
@@ -244,7 +256,7 @@ Standalone (don't use build.yml):
 | `build-windows.yml` | Windows | Optional | Medium | 30 days | Windows dev |
 | `build-linux.yml` | Linux | Optional | Medium | 30 days | Linux dev |
 | `build-test.yml` | All | ON | Slow | 30 days | Pre-release |
-| `release.yml` | All | REQUIRED | Slow | Permanent | Release |
+| `release.yml` | macOS + Windows | REQUIRED | Slow | Permanent | Release |
 
 ---
 

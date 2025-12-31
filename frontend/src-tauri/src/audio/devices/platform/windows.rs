@@ -10,7 +10,7 @@ pub fn configure_windows_audio(host: &cpal::Host) -> Result<Vec<AudioDevice>> {
 
     // Get WASAPI devices
     if let Ok(wasapi_host) = cpal::host_from_id(cpal::HostId::Wasapi) {
-        info!("Using WASAPI host for Windows audio device enumeration");
+        debug!("Using WASAPI host for Windows audio device enumeration");
 
         // Add output devices (including loopback)
         if let Ok(output_devices) = wasapi_host.output_devices() {
@@ -89,7 +89,7 @@ pub fn configure_windows_audio(host: &cpal::Host) -> Result<Vec<AudioDevice>> {
         }
     }
 
-    info!("Found {} Windows audio devices", devices.len());
+    debug!("Found {} Windows audio devices", devices.len());
     Ok(devices)
 }
 

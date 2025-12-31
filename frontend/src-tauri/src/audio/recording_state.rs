@@ -166,6 +166,12 @@ impl RecordingState {
         // CRITICAL: Clear audio sender to close the pipeline channel
         // This ensures the pipeline loop exits properly after processing all chunks
         *self.audio_sender.lock().unwrap() = None;
+        // CRITICAL: Clear device references to release microphone/speaker
+        // Without this, Arc<AudioDevice> references persist and keep the mic active
+        *self.microphone_device.lock().unwrap() = None;
+        *self.system_device.lock().unwrap() = None;
+        *self.disconnected_device.lock().unwrap() = None;
+        log::info!("Recording stopped, device references cleared");
     }
 
     pub fn pause_recording(&self) -> Result<()> {

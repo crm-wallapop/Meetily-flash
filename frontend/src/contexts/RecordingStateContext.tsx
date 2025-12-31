@@ -1,8 +1,7 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { recordingService } from '@/services/recordingService';
 
 /**
  * Recording state synchronized with backend
@@ -13,17 +12,38 @@ import { listen } from '@tauri-apps/api/event';
  * 3. Comprehensive state for future features (reconnection, etc.)
  */
 
+// Recording lifecycle status enum
+export enum RecordingStatus {
+  IDLE = 'idle',                          // Not recording
+  STARTING = 'starting',                  // Initiating recording
+  RECORDING = 'recording',                // Active recording
+  STOPPING = 'stopping',                  // Stop initiated, waiting for backend
+  PROCESSING_TRANSCRIPTS = 'processing',  // Transcription completion wait
+  SAVING = 'saving',                      // Saving to database
+  COMPLETED = 'completed',                // Successfully saved
+  ERROR = 'error'                         // Error occurred
+}
+
 interface RecordingState {
   isRecording: boolean;           // Is a recording session active
   isPaused: boolean;              // Is the recording paused
   isActive: boolean;              // Is actively recording (recording && !paused)
   recordingDuration: number | null;  // Total duration including pauses
   activeDuration: number | null;     // Active recording time (excluding pauses)
+
+  // NEW: Lifecycle status
+  status: RecordingStatus;
+  statusMessage?: string;  // Optional message for current status
 }
 
 interface RecordingStateContextType extends RecordingState {
-  // No additional methods needed for now - state is read-only from components
-  // Backend commands (start/stop/pause/resume) are called directly via invoke
+  // NEW: Setters for status management
+  setStatus: (status: RecordingStatus, message?: string) => void;
+
+  // Computed helpers (derived from status)
+  isStopping: boolean;
+  isProcessing: boolean;
+  isSaving: boolean;
 }
 
 const RecordingStateContext = createContext<RecordingStateContextType | null>(null);
@@ -43,9 +63,22 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     isActive: false,
     recordingDuration: null,
     activeDuration: null,
+    status: RecordingStatus.IDLE,  // NEW: Initialize with IDLE status
+    statusMessage: undefined,       // NEW: No message initially
   });
 
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // NEW: Status setter with logging
+  const setStatus = useCallback((status: RecordingStatus, message?: string) => {
+    console.log(`[RecordingState] Status: ${state.status} → ${status}`, message || '');
+
+    setState(prev => ({
+      ...prev,
+      status,
+      statusMessage: message,
+    }));
+  }, [state.status, state.isRecording, state.isPaused]);
 
   /**
    * Sync recording state with backend
@@ -53,21 +86,16 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
    */
   const syncWithBackend = async () => {
     try {
-      const backendState = await invoke('get_recording_state') as {
-        is_recording: boolean;
-        is_paused: boolean;
-        is_active: boolean;
-        recording_duration: number | null;
-        active_duration: number | null;
-      };
+      const backendState = await recordingService.getRecordingState();
 
-      setState({
+      setState(prev => ({
+        ...prev,
         isRecording: backendState.is_recording,
         isPaused: backendState.is_paused,
         isActive: backendState.is_active,
         recordingDuration: backendState.recording_duration,
         activeDuration: backendState.active_duration,
-      });
+      }));
 
       console.log('[RecordingStateContext] Synced with backend:', backendState);
     } catch (error) {
@@ -109,35 +137,51 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     const setupListeners = async () => {
       try {
         // Recording started
-        const unlistenStarted = await listen('recording-started', (event) => {
-          console.log('[RecordingStateContext] Recording started event:', event.payload);
+        const unlistenStarted = await recordingService.onRecordingStarted(() => {
+          console.log('[RecordingStateContext] Recording started event');
           setState(prev => ({
             ...prev,
             isRecording: true,
             isPaused: false,
             isActive: true,
+            status: RecordingStatus.RECORDING,  // NEW: Set status to RECORDING
           }));
           startPolling();
         });
         unsubscribers.push(unlistenStarted);
 
         // Recording stopped
-        const unlistenStopped = await listen('recording-stopped', (event) => {
-          console.log('[RecordingStateContext] Recording stopped event:', event.payload);
-          setState({
-            isRecording: false,
-            isPaused: false,
-            isActive: false,
-            recordingDuration: null,
-            activeDuration: null,
+        const unlistenStopped = await recordingService.onRecordingStopped((payload) => {
+          console.log('[RecordingStateContext] Recording stopped event:', payload);
+          setState(prev => {
+            // Set status to STOPPING if not already in stop flow
+            // This ensures smooth UI transition for tray/keyboard stops
+            const newStatus = [
+              RecordingStatus.STOPPING,
+              RecordingStatus.PROCESSING_TRANSCRIPTS,
+              RecordingStatus.SAVING
+            ].includes(prev.status)
+              ? prev.status  // Already in stop flow
+              : RecordingStatus.STOPPING;  // New stop, transition smoothly
+
+            return {
+              ...prev,
+              status: newStatus,
+              statusMessage: newStatus === RecordingStatus.STOPPING ? 'Stopping recording...' : prev.statusMessage,
+              isRecording: false,
+              isPaused: false,
+              isActive: false,
+              recordingDuration: null,
+              activeDuration: null,
+            };
           });
           stopPolling();
         });
         unsubscribers.push(unlistenStopped);
 
         // Recording paused
-        const unlistenPaused = await listen('recording-paused', (event) => {
-          console.log('[RecordingStateContext] Recording paused event:', event.payload);
+        const unlistenPaused = await recordingService.onRecordingPaused(() => {
+          console.log('[RecordingStateContext] Recording paused event');
           setState(prev => ({
             ...prev,
             isPaused: true,
@@ -147,8 +191,8 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         unsubscribers.push(unlistenPaused);
 
         // Recording resumed
-        const unlistenResumed = await listen('recording-resumed', (event) => {
-          console.log('[RecordingStateContext] Recording resumed event:', event.payload);
+        const unlistenResumed = await recordingService.onRecordingResumed(() => {
+          console.log('[RecordingStateContext] Recording resumed event');
           setState(prev => ({
             ...prev,
             isPaused: false,
@@ -181,8 +225,17 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     syncWithBackend();
   }, []);
 
+  // NEW: Computed helpers from status
+  const contextValue = useMemo(() => ({
+    ...state,
+    setStatus,
+    isStopping: state.status === RecordingStatus.STOPPING,
+    isProcessing: state.status === RecordingStatus.PROCESSING_TRANSCRIPTS,
+    isSaving: state.status === RecordingStatus.SAVING,
+  }), [state, setStatus]);
+
   return (
-    <RecordingStateContext.Provider value={state}>
+    <RecordingStateContext.Provider value={contextValue}>
       {children}
     </RecordingStateContext.Provider>
   );

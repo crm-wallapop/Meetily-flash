@@ -42,6 +42,7 @@ pub mod console_utils;
 pub mod database;
 pub mod notifications;
 pub mod ollama;
+pub mod onboarding;
 pub mod openrouter;
 pub mod parakeet_engine;
 pub mod state;
@@ -50,7 +51,7 @@ pub mod tray;
 pub mod utils;
 pub mod whisper_engine;
 
-use audio::{list_audio_devices, AudioDevice};
+use audio::{list_audio_devices, AudioDevice, trigger_audio_permission};
 use log::{error as log_error, info as log_info};
 use notifications::commands::NotificationManagerState;
 use std::sync::Arc;
@@ -284,6 +285,12 @@ async fn get_audio_devices() -> Result<Vec<AudioDevice>, String> {
 }
 
 #[tauri::command]
+async fn trigger_microphone_permission() -> Result<bool, String> {
+    trigger_audio_permission()
+        .map_err(|e| format!("Failed to trigger microphone permission: {}", e))
+}
+
+#[tauri::command]
 async fn start_recording_with_devices<R: Runtime>(
     app: AppHandle<R>,
     mic_device_name: Option<String>,
@@ -393,11 +400,14 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(whisper_engine::parallel_commands::ParallelProcessorState::new())
         .manage(Arc::new(RwLock::new(
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
         )) as NotificationManagerState<tauri::Wry>)
         .manage(audio::init_system_audio_state())
+        .manage(summary::summary_engine::ModelManagerState(Arc::new(tokio::sync::Mutex::new(None))))
         .setup(|_app| {
             log::info!("Application setup complete");
 
@@ -449,6 +459,18 @@ pub fn run() {
             tauri::async_runtime::spawn(async {
                 if let Err(e) = parakeet_engine::commands::parakeet_init().await {
                     log::error!("Failed to initialize Parakeet engine on startup: {}", e);
+                }
+            });
+
+            // Initialize ModelManager for summary engine (async, non-blocking)
+            let app_handle_for_model_manager = _app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match summary::summary_engine::commands::init_model_manager_at_startup(&app_handle_for_model_manager).await {
+                    Ok(_) => log::info!("ModelManager initialized successfully at startup"),
+                    Err(e) => {
+                        log::warn!("Failed to initialize ModelManager at startup: {}", e);
+                        log::warn!("ModelManager will be lazy-initialized on first use");
+                    }
                 }
             });
 
@@ -535,6 +557,7 @@ pub fn run() {
             parakeet_engine::commands::parakeet_transcribe_audio,
             parakeet_engine::commands::parakeet_get_models_directory,
             parakeet_engine::commands::parakeet_download_model,
+            parakeet_engine::commands::parakeet_retry_download,
             parakeet_engine::commands::parakeet_cancel_download,
             parakeet_engine::commands::parakeet_delete_corrupted_model,
             parakeet_engine::commands::open_parakeet_models_folder,
@@ -551,6 +574,7 @@ pub fn run() {
             whisper_engine::parallel_commands::prepare_audio_chunks,
             whisper_engine::parallel_commands::test_parallel_processing_setup,
             get_audio_devices,
+            trigger_microphone_permission,
             start_recording_with_devices,
             start_recording_with_devices_and_meeting,
             start_audio_level_monitoring,
@@ -571,6 +595,10 @@ pub fn run() {
             audio::recording_commands::attempt_device_reconnect,
             // Playback device detection (Bluetooth warning)
             audio::recording_commands::get_active_audio_output,
+            // Audio recovery commands (for transcript recovery feature)
+            audio::incremental_saver::recover_audio_from_checkpoints,
+            audio::incremental_saver::cleanup_checkpoints,
+            audio::incremental_saver::has_audio_checkpoints,
             console_utils::show_console,
             console_utils::hide_console,
             console_utils::toggle_console,
@@ -593,20 +621,36 @@ pub fn run() {
             api::api_get_transcript_api_key,
             api::api_delete_meeting,
             api::api_get_meeting,
+            api::api_get_meeting_metadata,
+            api::api_get_meeting_transcripts,
             api::api_save_meeting_title,
             api::api_save_transcript,
             api::open_meeting_folder,
             api::test_backend_connection,
             api::debug_backend_connection,
             api::open_external_url,
+            // Custom OpenAI commands
+            api::api_save_custom_openai_config,
+            api::api_get_custom_openai_config,
+            api::api_test_custom_openai_connection,
             // Summary commands
             summary::api_process_transcript,
             summary::api_get_summary,
             summary::api_save_meeting_summary,
+            summary::api_cancel_summary,
             // Template commands
             summary::api_list_templates,
             summary::api_get_template_details,
             summary::api_validate_template,
+            // Built-in AI commands
+            summary::summary_engine::builtin_ai_list_models,
+            summary::summary_engine::builtin_ai_get_model_info,
+            summary::summary_engine::builtin_ai_download_model,
+            summary::summary_engine::builtin_ai_cancel_download,
+            summary::summary_engine::builtin_ai_delete_model,
+            summary::summary_engine::builtin_ai_is_model_ready,
+            summary::summary_engine::builtin_ai_get_available_summary_model,
+            summary::summary_engine::builtin_ai_get_recommended_model,
             openrouter::get_openrouter_models,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,
@@ -645,11 +689,12 @@ pub fn run() {
             // Screen Recording permission commands
             audio::permissions::check_screen_recording_permission_command,
             audio::permissions::request_screen_recording_permission_command,
-            // audio::permissions::trigger_system_audio_permission_command,
+            audio::permissions::trigger_system_audio_permission_command,
             // Database import commands
             database::commands::check_first_launch,
             database::commands::select_legacy_database_path,
             database::commands::detect_legacy_database,
+            database::commands::check_default_legacy_database,
             database::commands::check_homebrew_database,
             database::commands::import_and_initialize_database,
             database::commands::initialize_fresh_database,
@@ -657,10 +702,40 @@ pub fn run() {
             database::commands::get_database_directory,
             database::commands::open_database_folder,
             whisper_engine::commands::open_models_folder,
+            // Onboarding commands
+            onboarding::get_onboarding_status,
+            onboarding::save_onboarding_status_cmd,
+            onboarding::reset_onboarding_status_cmd,
+            onboarding::complete_onboarding,
             // System settings commands
             #[cfg(target_os = "macos")]
             utils::open_system_settings,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                log::info!("Application exiting, cleaning up resources...");
+                tauri::async_runtime::block_on(async {
+                    // Clean up database connection and checkpoint WAL
+                    if let Some(app_state) = _app_handle.try_state::<state::AppState>() {
+                        log::info!("Starting database cleanup...");
+                        if let Err(e) = app_state.db_manager.cleanup().await {
+                            log::error!("Failed to cleanup database: {}", e);
+                        } else {
+                            log::info!("Database cleanup completed successfully");
+                        }
+                    } else {
+                        log::warn!("AppState not available for database cleanup (likely first launch)");
+                    }
+
+                    // Clean up sidecar
+                    log::info!("Cleaning up sidecar...");
+                    if let Err(e) = summary::summary_engine::force_shutdown_sidecar().await {
+                        log::error!("Failed to force shutdown sidecar: {}", e);
+                    }
+                });
+                log::info!("Application cleanup complete");
+            }
+        });
 }

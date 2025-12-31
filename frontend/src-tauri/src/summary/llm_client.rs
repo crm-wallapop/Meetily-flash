@@ -1,6 +1,11 @@
 use reqwest::{header, Client};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
+
+const REQUEST_TIMEOUT_DURATION: Duration = Duration::from_secs(300);
 
 // Generic structure for OpenAI-compatible API chat messages
 #[derive(Debug, Serialize)]
@@ -14,6 +19,12 @@ pub struct ChatMessage {
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
 }
 
 // Generic structure for OpenAI-compatible API chat responses
@@ -60,6 +71,8 @@ pub enum LLMProvider {
     Groq,
     Ollama,
     OpenRouter,
+    BuiltInAI,
+    CustomOpenAI,
 }
 
 impl LLMProvider {
@@ -71,6 +84,8 @@ impl LLMProvider {
             "groq" => Ok(Self::Groq),
             "ollama" => Ok(Self::Ollama),
             "openrouter" => Ok(Self::OpenRouter),
+            "builtin-ai" | "local-llama" | "localllama" => Ok(Self::BuiltInAI),
+            "custom-openai" => Ok(Self::CustomOpenAI),
             _ => Err(format!("Unsupported LLM provider: {}", s)),
         }
     }
@@ -86,6 +101,12 @@ impl LLMProvider {
 /// * `system_prompt` - System instructions for the LLM
 /// * `user_prompt` - User query/content to process
 /// * `ollama_endpoint` - Optional custom Ollama endpoint (defaults to localhost:11434)
+/// * `custom_openai_endpoint` - Optional custom OpenAI-compatible endpoint
+/// * `max_tokens` - Optional max tokens (for CustomOpenAI provider)
+/// * `temperature` - Optional temperature (for CustomOpenAI provider)
+/// * `top_p` - Optional top_p (for CustomOpenAI provider)
+/// * `app_data_dir` - Optional app data directory (for BuiltInAI provider)
+/// * `cancellation_token` - Optional token to cancel the request
 ///
 /// # Returns
 /// The generated summary text or an error message
@@ -97,7 +118,36 @@ pub async fn generate_summary(
     system_prompt: &str,
     user_prompt: &str,
     ollama_endpoint: Option<&str>,
+    custom_openai_endpoint: Option<&str>,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    app_data_dir: Option<&PathBuf>,
+    cancellation_token: Option<&CancellationToken>,
 ) -> Result<String, String> {
+    // Check if cancelled before starting
+    if let Some(token) = cancellation_token {
+        if token.is_cancelled() {
+            return Err("Summary generation was cancelled".to_string());
+        }
+    }
+
+    // Handle BuiltInAI provider separately (uses local sidecar, no HTTP API)
+    if provider == &LLMProvider::BuiltInAI {
+        let app_data_dir = app_data_dir
+            .ok_or_else(|| "app_data_dir is required for BuiltInAI provider".to_string())?;
+
+        return crate::summary::summary_engine::generate_with_builtin(
+            app_data_dir,
+            model_name,
+            system_prompt,
+            user_prompt,
+            cancellation_token,
+        )
+        .await
+        .map_err(|e| e.to_string());
+    }
+
     let (api_url, mut headers) = match provider {
         LLMProvider::OpenAI => (
             "https://api.openai.com/v1/chat/completions".to_string(),
@@ -120,6 +170,14 @@ pub async fn generate_summary(
                 header::HeaderMap::new(),
             )
         }
+        LLMProvider::CustomOpenAI => {
+            let endpoint = custom_openai_endpoint
+                .ok_or_else(|| "Custom OpenAI endpoint not configured".to_string())?;
+            (
+                format!("{}/chat/completions", endpoint.trim_end_matches('/')),
+                header::HeaderMap::new(),
+            )
+        }
         LLMProvider::Claude => {
             let mut header_map = header::HeaderMap::new();
             header_map.insert(
@@ -135,6 +193,10 @@ pub async fn generate_summary(
                     .map_err(|_| "Invalid anthropic version".to_string())?,
             );
             ("https://api.anthropic.com/v1/messages".to_string(), header_map)
+        }
+        LLMProvider::BuiltInAI => {
+            // This case is handled earlier with early returns
+            unreachable!("BuiltInAI is handled before this match statement")
         }
     };
 
@@ -156,6 +218,13 @@ pub async fn generate_summary(
 
     // Build request body based on provider
     let request_body = if provider != &LLMProvider::Claude {
+        // For CustomOpenAI, apply optional parameters if provided
+        let (max_tokens_val, temperature_val, top_p_val) = if provider == &LLMProvider::CustomOpenAI {
+            (max_tokens, temperature, top_p)
+        } else {
+            (None, None, None)
+        };
+
         serde_json::json!(ChatRequest {
             model: model_name.to_string(),
             messages: vec![
@@ -168,6 +237,9 @@ pub async fn generate_summary(
                     content: user_prompt.to_string(),
                 }
             ],
+            max_tokens: max_tokens_val,
+            temperature: temperature_val,
+            top_p: top_p_val,
         })
     } else {
         serde_json::json!(ClaudeRequest {
@@ -183,14 +255,39 @@ pub async fn generate_summary(
 
     info!("🐞 LLM Request to {}: model={}", provider_name(provider), model_name);
 
-    // Send request
-    let response = client
+    // Send request with timeout and cancellation support
+    let request_future = client
         .post(api_url)
         .headers(headers)
         .json(&request_body)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to send request to LLM: {}", e))?;
+        .timeout(REQUEST_TIMEOUT_DURATION)
+        .send();
+
+    // Use tokio::select to race between cancellation and request completion
+    let response = if let Some(token) = cancellation_token {
+        tokio::select! {
+            result = request_future => {
+                result.map_err(|e| {
+                    if e.is_timeout() {
+                        format!("LLM request timed out after 60 seconds")
+                    } else {
+                        format!("Failed to send request to LLM: {}", e)
+                    }
+                })?
+            }
+            _ = token.cancelled() => {
+                return Err("Summary generation was cancelled".to_string());
+            }
+        }
+    } else {
+        request_future.await.map_err(|e| {
+            if e.is_timeout() {
+                format!("LLM request timed out after 60 seconds")
+            } else {
+                format!("Failed to send request to LLM: {}", e)
+            }
+        })?
+    };
 
     if !response.status().is_success() {
         let error_body = response
@@ -242,6 +339,8 @@ fn provider_name(provider: &LLMProvider) -> &str {
         LLMProvider::Claude => "Claude",
         LLMProvider::Groq => "Groq",
         LLMProvider::Ollama => "Ollama",
+        LLMProvider::BuiltInAI => "Built-in AI",
         LLMProvider::OpenRouter => "OpenRouter",
+        LLMProvider::CustomOpenAI => "Custom OpenAI",
     }
 }

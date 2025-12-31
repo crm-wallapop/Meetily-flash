@@ -120,9 +120,9 @@ export default function AnalyticsDataModal({ isOpen, onClose, onConfirmDisable }
           <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
             <h4 className="font-semibold text-gray-900 mb-2">Example Event:</h4>
             <pre className="text-xs text-gray-700 overflow-x-auto">
-{`{
+              {`{
   "event": "meeting_ended",
-  "app_version": "0.1.1",
+  "app_version": "0.2.0",
   "transcription_provider": "parakeet",
   "transcription_model": "parakeet-tdt-0.6b-v3-int8",
   "summary_provider": "ollama",

@@ -1,7 +1,7 @@
 {
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
     "productName": "meetily",
-    "version": "0.1.1",
+    "version": "0.2.0",
     "identifier": "com.meetily.ai",
     "build": {
         "frontendDist": "../out",
@@ -9,17 +9,18 @@
         "beforeDevCommand": "pnpm dev",
         "beforeBuildCommand": "pnpm build"
     },
-
     "app": {
-        "windows": [{
-            "title": "meetily",
-            "width": 1100,
-            "height": 700,
-            "resizable": true,
-            "fullscreen": false,
-            "theme": "Light",
-            "decorations": true
-        }],
+        "windows": [
+            {
+                "title": "meetily",
+                "width": 1100,
+                "height": 700,
+                "resizable": true,
+                "fullscreen": false,
+                "theme": "Light",
+                "decorations": true
+            }
+        ],
         "macOSPrivateApi": true,
         "security": {
             "csp": {
@@ -34,42 +35,60 @@
                     "$APPDATA/**"
                 ]
             },
-            "capabilities": [{
-                "identifier": "main",
-                "description": "Main window capability with file system and media access",
-                "windows": ["main"],
-                "permissions": [
-                    "fs:default",
-                    "fs:allow-read-file",
-                    "fs:read-all",
-                    "fs:write-all",
-                    "fs:allow-app-read",
-                    "fs:allow-app-write",
-                    "fs:allow-download-write",
-                    "fs:allow-download-read",
-                    "fs:scope-download",
-                    "core:path:default",
-                    "core:event:default",
-                    "core:window:default",
-                    "core:app:default",
-                    "core:resources:default",
-                    "core:menu:default",
-                    "core:tray:default",
-                    "core:window:allow-set-title",
-                    "store:default",
-                    "notification:default",
-                    "notification:allow-is-permission-granted",
-                    {
-                        "identifier": "fs:scope",
-                        "allow": [{ "path": "$APPDATA/*" }]
-                    }
-                ]
-            }]
+            "capabilities": [
+                {
+                    "identifier": "main",
+                    "description": "Main window capability with file system and media access",
+                    "windows": [
+                        "main"
+                    ],
+                    "permissions": [
+                        "fs:default",
+                        "fs:allow-read-file",
+                        "fs:read-all",
+                        "fs:write-all",
+                        "fs:allow-app-read",
+                        "fs:allow-app-write",
+                        "fs:allow-download-write",
+                        "fs:allow-download-read",
+                        "fs:scope-download",
+                        "core:path:default",
+                        "core:event:default",
+                        "core:window:default",
+                        "core:app:default",
+                        "core:resources:default",
+                        "core:menu:default",
+                        "core:tray:default",
+                        "core:window:allow-set-title",
+                        "store:default",
+                        "notification:default",
+                        "notification:allow-is-permission-granted",
+                        "updater:default",
+                        "process:default",
+                        {
+                            "identifier": "fs:scope",
+                            "allow": [
+                                {
+                                    "path": "$APPDATA/*"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
         }
     },
     "bundle": {
         "active": true,
-        "targets": "all",
+        "targets": [
+            "deb",
+            "appimage",
+            "msi",
+            "nsis",
+            "app",
+            "dmg"
+        ],
+        "createUpdaterArtifacts": true,
         "icon": [
             "icons/icon.png",
             "icons/app_icon.icns",
@@ -77,6 +96,25 @@
         ],
         "resources": [
             "templates/*.json"
-        ]
+        ],
+        "externalBin": [
+            "binaries/llama-helper"
+        ],
+        "macOS": {
+            "entitlements": "entitlements.plist",
+            "signingIdentity": "-",
+            "hardenedRuntime": true
+        },
+        "windows": {
+            "signCommand": "powershell -ExecutionPolicy Bypass -File scripts/sign-windows.ps1 -FilePath %1"
+        }
+    },
+    "plugins": {
+        "updater": {
+            "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVDQTYzMUQ3ODc5N0M4MkEKUldRcXlKZUgxekdtN09DRkVWSHNpZlJseEVOUmpNd1dDSTNaLzZ3MXJGTnY3WW1pdnlOYjBpbkIK",
+            "endpoints": [
+                "https://github.com/Zackriya-Solutions/meeting-minutes/releases/latest/download/latest.json"
+            ]
+        }
     }
 }

@@ -84,3 +84,27 @@ export interface SummaryDataResponse {
   _section_order?: string[];
   [key: string]: any; // For legacy section data
 }
+
+// Pagination types for optimized transcript loading
+export interface MeetingMetadata {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  folder_path?: string;
+}
+
+export interface PaginatedTranscriptsResponse {
+  transcripts: Transcript[];
+  total_count: number;
+  has_more: boolean;
+}
+
+// Transcript segment data for virtualized display
+export interface TranscriptSegmentData {
+  id: string;
+  timestamp: number; // audio_start_time in seconds
+  endTime?: number; // audio_end_time in seconds
+  text: string;
+  confidence?: number;
+}

@@ -82,6 +82,27 @@ pub async fn detect_legacy_database(selected_path: String) -> Result<Option<Stri
     Ok(None)
 }
 
+/// Check for legacy database in the default app data directory
+#[tauri::command]
+pub async fn check_default_legacy_database(app: AppHandle) -> Result<Option<String>, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+
+    let legacy_db = app_data_dir.join("meeting_minutes.db");
+    info!("Checking for default legacy database at: {:?}", legacy_db);
+
+    if legacy_db.exists() && legacy_db.is_file() {
+        let path_str = legacy_db.to_string_lossy().to_string();
+        info!("Found default legacy database: {}", path_str);
+        Ok(Some(path_str))
+    } else {
+        info!("No default legacy database found");
+        Ok(None)
+    }
+}
+
 /// Check if the Homebrew database exists and return its size
 /// This is specifically for detecting old Python backend installations
 #[tauri::command]
@@ -164,9 +185,32 @@ pub async fn initialize_fresh_database(app: AppHandle) -> Result<(), String> {
         })?;
 
     // Update app state with the new manager
-    app.manage(AppState { db_manager });
+    app.manage(AppState { db_manager: db_manager.clone() });
 
-    info!("Fresh database initialized successfully");
+    // Set default model configuration for fresh installs
+    let pool = db_manager.pool();
+    
+    // Default Summary Model: Built-in AI (Gemma 3 1B)
+    if let Err(e) = crate::database::repositories::setting::SettingsRepository::save_model_config(
+        pool,
+        "builtin-ai",
+        "gemma3:1b",
+        "large-v3", // Default whisper model (unused for builtin but required)
+        None,
+    ).await {
+        error!("Failed to set default summary model config: {}", e);
+    }
+
+    // Default Transcription Model: Parakeet
+    if let Err(e) = crate::database::repositories::setting::SettingsRepository::save_transcript_config(
+        pool,
+        "parakeet",
+        "parakeet-tdt-0.6b-v3-int8",
+    ).await {
+        error!("Failed to set default transcription model config: {}", e);
+    }
+
+    info!("Fresh database initialized successfully with default models");
 
     // Emit event to notify frontend that database is ready
     app.emit("database-initialized", ())

@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { Summary, SummaryResponse } from '@/types';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
@@ -10,23 +10,37 @@ import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
 // Custom hooks
 import { useMeetingData } from '@/hooks/meeting-details/useMeetingData';
 import { useSummaryGeneration } from '@/hooks/meeting-details/useSummaryGeneration';
-import { useModelConfiguration } from '@/hooks/meeting-details/useModelConfiguration';
 import { useTemplates } from '@/hooks/meeting-details/useTemplates';
 import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
 import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperations';
+import { useConfig } from '@/contexts/ConfigContext';
 
 export default function PageContent({
   meeting,
   summaryData,
   shouldAutoGenerate = false,
   onAutoGenerateComplete,
-  onMeetingUpdated
+  onMeetingUpdated,
+  // Pagination props for efficient transcript loading
+  segments,
+  hasMore,
+  isLoadingMore,
+  totalCount,
+  loadedCount,
+  onLoadMore,
 }: {
   meeting: any;
   summaryData: Summary | null;
   shouldAutoGenerate?: boolean;
   onAutoGenerateComplete?: () => void;
   onMeetingUpdated?: () => Promise<void>;
+  // Pagination props
+  segments?: any[];
+  hasMore?: boolean;
+  isLoadingMore?: boolean;
+  totalCount?: number;
+  loadedCount?: number;
+  onLoadMore?: () => void;
 }) {
   console.log('📄 PAGE CONTENT: Initializing with data:', {
     meetingId: meeting.id,
@@ -39,23 +53,52 @@ export default function PageContent({
   const [isRecording] = useState(false);
   const [summaryResponse] = useState<SummaryResponse | null>(null);
 
+  // Ref to store the modal open function from SummaryGeneratorButtonGroup
+  const openModelSettingsRef = useRef<(() => void) | null>(null);
+
   // Sidebar context
   const { serverAddress } = useSidebar();
 
+  // Get model config from ConfigContext
+  const { modelConfig, setModelConfig } = useConfig();
+
   // Custom hooks
   const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
-  const modelConfig = useModelConfiguration({ serverAddress });
   const templates = useTemplates();
+
+  // Callback to register the modal open function
+  const handleRegisterModalOpen = (openFn: () => void) => {
+    console.log('📝 Registering modal open function in PageContent');
+    openModelSettingsRef.current = openFn;
+  };
+
+  // Callback to trigger modal open (called from error handler)
+  const handleOpenModelSettings = () => {
+    console.log('🔔 Opening model settings from PageContent');
+    if (openModelSettingsRef.current) {
+      openModelSettingsRef.current();
+    } else {
+      console.warn('⚠️ Modal open function not yet registered');
+    }
+  };
+
+  // Model config save handler (ConfigContext updates automatically via events)
+  const handleSaveModelConfig = async (config?: any) => {
+    // The actual save happens in the modal via api_save_model_config
+    // ConfigContext will be updated via event listener
+    console.log('[PageContent] Model config saved, context will update via event');
+  };
 
   const summaryGeneration = useSummaryGeneration({
     meeting,
     transcripts: meetingData.transcripts,
-    modelConfig: modelConfig.modelConfig,
-    isModelConfigLoading: modelConfig.isLoading,
+    modelConfig: modelConfig,
+    isModelConfigLoading: false, // ConfigContext loads on mount
     selectedTemplate: templates.selectedTemplate,
     onMeetingUpdated,
     updateMeetingTitle: meetingData.updateMeetingTitle,
     setAiSummary: meetingData.setAiSummary,
+    onOpenModelSettings: handleOpenModelSettings,
   });
 
   const copyOperations = useCopyOperations({
@@ -77,20 +120,27 @@ export default function PageContent({
 
   // Auto-generate summary when flag is set
   useEffect(() => {
+    let cancelled = false;
+
     const autoGenerate = async () => {
-      if (shouldAutoGenerate && meetingData.transcripts.length > 0) {
-        console.log(`🤖 Auto-generating summary with ${modelConfig.modelConfig.provider}/${modelConfig.modelConfig.model}...`);
+      if (shouldAutoGenerate && meetingData.transcripts.length > 0 && !cancelled) {
+        console.log(`🤖 Auto-generating summary with ${modelConfig.provider}/${modelConfig.model}...`);
         await summaryGeneration.handleGenerateSummary('');
 
-        // Notify parent that auto-generation is complete
-        if (onAutoGenerateComplete) {
+        // Notify parent that auto-generation is complete (only if not cancelled)
+        if (onAutoGenerateComplete && !cancelled) {
           onAutoGenerateComplete();
         }
       }
     };
 
     autoGenerate();
-  }, [shouldAutoGenerate]); // Only trigger when flag changes
+
+    // Cleanup: cancel if component unmounts or meeting changes
+    return () => {
+      cancelled = true;
+    };
+  }, [shouldAutoGenerate, meeting.id]); // Re-run if meeting changes
 
   return (
     <motion.div
@@ -100,8 +150,6 @@ export default function PageContent({
       className="flex flex-col h-screen bg-gray-50"
     >
       <div className="flex flex-1 overflow-hidden">
-      
-
         <TranscriptPanel
           transcripts={meetingData.transcripts}
           customPrompt={customPrompt}
@@ -109,9 +157,17 @@ export default function PageContent({
           onCopyTranscript={copyOperations.handleCopyTranscript}
           onOpenMeetingFolder={meetingOperations.handleOpenMeetingFolder}
           isRecording={isRecording}
+          disableAutoScroll={true}
+          // Pagination props for efficient loading
+          usePagination={true}
+          segments={segments}
+          hasMore={hasMore}
+          isLoadingMore={isLoadingMore}
+          totalCount={totalCount}
+          loadedCount={loadedCount}
+          onLoadMore={onLoadMore}
         />
-
-          <SummaryPanel
+        <SummaryPanel
           meeting={meeting}
           meetingTitle={meetingData.meetingTitle}
           onTitleChange={meetingData.handleTitleChange}
@@ -127,10 +183,11 @@ export default function PageContent({
           aiSummary={meetingData.aiSummary}
           summaryStatus={summaryGeneration.summaryStatus}
           transcripts={meetingData.transcripts}
-          modelConfig={modelConfig.modelConfig}
-          setModelConfig={modelConfig.setModelConfig}
-          onSaveModelConfig={modelConfig.handleSaveModelConfig}
+          modelConfig={modelConfig}
+          setModelConfig={setModelConfig}
+          onSaveModelConfig={handleSaveModelConfig}
           onGenerateSummary={summaryGeneration.handleGenerateSummary}
+          onStopGeneration={summaryGeneration.handleStopGeneration}
           customPrompt={customPrompt}
           summaryResponse={summaryResponse}
           onSaveSummary={meetingData.handleSaveSummary}
@@ -142,9 +199,9 @@ export default function PageContent({
           availableTemplates={templates.availableTemplates}
           selectedTemplate={templates.selectedTemplate}
           onTemplateSelect={templates.handleTemplateSelection}
-          isModelConfigLoading={modelConfig.isLoading}
+          isModelConfigLoading={false}
+          onOpenModelSettings={handleRegisterModalOpen}
         />
-
       </div>
     </motion.div>
   );

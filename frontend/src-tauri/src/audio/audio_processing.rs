@@ -26,10 +26,16 @@ pub fn sanitize_filename(name: &str) -> String {
 
 /// Create a meeting folder with timestamp and return the path
 /// Creates structure: base_path/MeetingName_YYYY-MM-DD_HH-MM/
-///                    ├── .checkpoints/  (for incremental saves)
+///                    ├── .checkpoints/  (for incremental saves, optional)
+///
+/// # Arguments
+/// * `base_path` - Base directory for meetings
+/// * `meeting_name` - Name of the meeting
+/// * `create_checkpoints_dir` - Whether to create .checkpoints/ subdirectory (only needed when auto_save is true)
 pub fn create_meeting_folder(
     base_path: &PathBuf,
     meeting_name: &str,
+    create_checkpoints_dir: bool,
 ) -> Result<PathBuf> {
     let timestamp = Utc::now().format("%Y-%m-%d_%H-%M").to_string();
     let sanitized_name = sanitize_filename(meeting_name);
@@ -39,11 +45,14 @@ pub fn create_meeting_folder(
     // Create main meeting folder
     std::fs::create_dir_all(&meeting_folder)?;
 
-    // Create hidden .checkpoints subfolder for temporary checkpoint files
-    let checkpoints_dir = meeting_folder.join(".checkpoints");
-    std::fs::create_dir_all(&checkpoints_dir)?;
-
-    log::info!("Created meeting folder: {}", meeting_folder.display());
+    // Only create .checkpoints subdirectory if requested (when auto_save is true)
+    if create_checkpoints_dir {
+        let checkpoints_dir = meeting_folder.join(".checkpoints");
+        std::fs::create_dir_all(&checkpoints_dir)?;
+        log::info!("Created meeting folder with checkpoints: {}", meeting_folder.display());
+    } else {
+        log::info!("Created meeting folder without checkpoints: {}", meeting_folder.display());
+    }
 
     Ok(meeting_folder)
 }
@@ -469,13 +478,19 @@ pub fn average_noise_spectrum(audio: &[f32]) -> f32 {
 pub fn audio_to_mono(audio: &[f32], channels: u16) -> Vec<f32> {
     let mut mono_samples = Vec::with_capacity(audio.len() / channels as usize);
 
+    // For microphone arrays (> 2 channels), only use first 2 channels
+    // Many microphone arrays have auxiliary channels for beam-forming/noise cancellation
+    // that can contain anti-phase signals. Averaging all channels can cause destructive
+    // interference resulting in near-zero output.
+    let effective_channels = if channels > 2 { 2 } else { channels };
+
     // Iterate over the audio slice in chunks, each containing `channels` samples
     for chunk in audio.chunks(channels as usize) {
-        // Sum the samples from all channels in the current chunk
-        let sum: f32 = chunk.iter().sum();
+        // Sum only the first effective_channels (typically 1-2 for mic arrays)
+        let sum: f32 = chunk.iter().take(effective_channels as usize).sum();
 
-        // Calculate the averagechannelsono sample
-        let mono_sample = sum / channels as f32;
+        // Calculate the average mono sample using effective channel count
+        let mono_sample = sum / effective_channels as f32;
 
         // Store the computed mono sample
         mono_samples.push(mono_sample);
