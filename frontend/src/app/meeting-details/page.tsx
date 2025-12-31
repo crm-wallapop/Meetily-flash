@@ -259,7 +259,6 @@ function MeetingDetailsContent() {
               typeof section === 'object' &&
               'title' in section &&
               'blocks' in section) {
-
               const typedSection = section as { title?: string; blocks?: any[] };
 
               // Ensure blocks is an array before mapping

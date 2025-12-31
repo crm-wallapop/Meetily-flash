@@ -191,8 +191,8 @@ export function useSummaryGeneration({
 
           // Check if this is a "model is required" error
           const isModelRequiredError = errorMessage.includes('model is required') ||
-                                        errorMessage.includes('"model":"required"') ||
-                                        errorMessage.toLowerCase().includes('model') && errorMessage.toLowerCase().includes('required');
+            errorMessage.includes('"model":"required"') ||
+            errorMessage.toLowerCase().includes('model') && errorMessage.toLowerCase().includes('required');
 
           // Show error toast
           toast.error(`Failed to ${isRegeneration ? 'regenerate' : 'generate'} summary`, {

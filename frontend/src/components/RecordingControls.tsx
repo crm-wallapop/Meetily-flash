@@ -57,7 +57,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const [transcriptionErrors, setTranscriptionErrors] = useState(0);
   const [isValidatingModel, setIsValidatingModel] = useState(false);
   const [speechDetected, setSpeechDetected] = useState(false);
-  const [deviceError, setDeviceError] = useState<{title: string, message: string} | null>(null);
+  const [deviceError, setDeviceError] = useState<{ title: string, message: string } | null>(null);
 
   const currentTime = 0;
   const duration = 0;
@@ -144,23 +144,19 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       const dataDir = await appDataDir();
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const savePath = `${dataDir}/recording-${timestamp}.wav`;
-      
       console.log('Saving recording to:', savePath);
       console.log('About to call stop_recording command');
-      const result = await invoke('stop_recording', { 
+      const result = await invoke('stop_recording', {
         args: {
           save_path: savePath
         }
       });
       console.log('stop_recording command completed successfully:', result);
-      
       setRecordingPath(savePath);
       // setShowPlayback(true);
       setIsProcessing(false);
-      
       // Track successful transcription
       Analytics.trackTranscriptionSuccess();
-      
       onRecordingStop(true);
     } catch (error) {
       console.error('Failed to stop recording:', error);
@@ -284,7 +280,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           let isActionable = false;
 
           if (typeof event.payload === 'object' && event.payload !== null) {
-            const payload = event.payload as {error: string, userMessage: string, actionable: boolean};
+            const payload = event.payload as { error: string, userMessage: string, actionable: boolean };
             errorMessage = payload.userMessage || payload.error;
             isActionable = payload.actionable || false;
           } else {
@@ -343,7 +339,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     };
   }, [onRecordingStop, onTranscriptionError]);
 
-    return (
+  return (
     <TooltipProvider>
       <div className="flex flex-col space-y-2">
         <div className="flex items-center space-x-2 bg-white rounded-full shadow-lg px-4 py-2">
@@ -401,9 +397,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                             handleStartRecording();
                           }}
                           disabled={isStarting || isProcessing || isRecordingDisabled || isValidatingModel}
-                          className={`w-12 h-12 flex items-center justify-center ${
-                            isStarting || isProcessing || isValidatingModel ? 'bg-gray-400' : 'bg-red-500 hover:bg-red-600'
-                          } rounded-full text-white transition-colors relative`}
+                          className={`w-12 h-12 flex items-center justify-center ${isStarting || isProcessing || isValidatingModel ? 'bg-gray-400' : 'bg-red-500 hover:bg-red-600'
+                            } rounded-full text-white transition-colors relative`}
                         >
                           {isValidatingModel ? (
                             <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
@@ -432,11 +427,10 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                               }
                             }}
                             disabled={isPausing || isResuming || isStopping}
-                            className={`w-10 h-10 flex items-center justify-center ${
-                              isPausing || isResuming || isStopping
-                                ? 'bg-gray-200 border-2 border-gray-300 text-gray-400'
-                                : 'bg-white border-2 border-gray-300 text-gray-600 hover:border-gray-400 hover:bg-gray-50'
-                            } rounded-full transition-colors relative`}
+                            className={`w-10 h-10 flex items-center justify-center ${isPausing || isResuming || isStopping
+                              ? 'bg-gray-200 border-2 border-gray-300 text-gray-400'
+                              : 'bg-white border-2 border-gray-300 text-gray-600 hover:border-gray-400 hover:bg-gray-50'
+                              } rounded-full transition-colors relative`}
                           >
                             {isPaused ? <Play size={16} /> : <Pause size={16} />}
                             {(isPausing || isResuming) && (
@@ -459,9 +453,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                               handleStopRecording();
                             }}
                             disabled={isStopping || isPausing || isResuming}
-                            className={`w-10 h-10 flex items-center justify-center ${
-                              isStopping || isPausing || isResuming ? 'bg-gray-400' : 'bg-red-500 hover:bg-red-600'
-                            } rounded-full text-white transition-colors relative`}
+                            className={`w-10 h-10 flex items-center justify-center ${isStopping || isPausing || isResuming ? 'bg-gray-400' : 'bg-red-500 hover:bg-red-600'
+                              } rounded-full text-white transition-colors relative`}
                           >
                             <Square size={16} />
                             {isStopping && (
@@ -482,9 +475,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                     {barHeights.map((height, index) => (
                       <div
                         key={index}
-                        className={`w-1 rounded-full transition-all duration-200 ${
-                          isPaused ? 'bg-orange-500' : 'bg-red-500'
-                        }`}
+                        className={`w-1 rounded-full transition-all duration-200 ${isPaused ? 'bg-orange-500' : 'bg-red-500'
+                          }`}
                         style={{
                           height: isRecording && !isPaused ? height : '4px',
                           opacity: isPaused ? 0.6 : 1,
@@ -498,38 +490,38 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           )}
         </div>
 
-      {/* Show validation status only */}
-      {isValidatingModel && (
-        <div className="text-xs text-gray-600 text-center mt-2">
-          Validating speech recognition...
-        </div>
-      )}
+        {/* Show validation status only */}
+        {isValidatingModel && (
+          <div className="text-xs text-gray-600 text-center mt-2">
+            Validating speech recognition...
+          </div>
+        )}
 
-      {/* Device error alert */}
-      {deviceError && (
-        <Alert variant="destructive" className="mt-4 border-red-300 bg-red-50">
-          <AlertCircle className="h-5 w-5 text-red-600" />
-          <button
-            onClick={() => setDeviceError(null)}
-            className="absolute right-3 top-3 text-red-600 hover:text-red-800 transition-colors"
-            aria-label="Close alert"
-          >
-            <X className="h-4 w-4" />
-          </button>
-          <AlertTitle className="text-red-800 font-semibold mb-2">
-            {deviceError.title}
-          </AlertTitle>
-          <AlertDescription className="text-red-700">
-            {deviceError.message.split('\n').map((line, i) => (
-              <div key={i} className={i > 0 ? 'ml-2' : ''}>
-                {line}
-              </div>
-            ))}
-          </AlertDescription>
-        </Alert>
-      )}
+        {/* Device error alert */}
+        {deviceError && (
+          <Alert variant="destructive" className="mt-4 border-red-300 bg-red-50">
+            <AlertCircle className="h-5 w-5 text-red-600" />
+            <button
+              onClick={() => setDeviceError(null)}
+              className="absolute right-3 top-3 text-red-600 hover:text-red-800 transition-colors"
+              aria-label="Close alert"
+            >
+              <X className="h-4 w-4" />
+            </button>
+            <AlertTitle className="text-red-800 font-semibold mb-2">
+              {deviceError.title}
+            </AlertTitle>
+            <AlertDescription className="text-red-700">
+              {deviceError.message.split('\n').map((line, i) => (
+                <div key={i} className={i > 0 ? 'ml-2' : ''}>
+                  {line}
+                </div>
+              ))}
+            </AlertDescription>
+          </Alert>
+        )}
 
-      {/* {showPlayback && recordingPath && (
+        {/* {showPlayback && recordingPath && (
         <div className="text-sm text-gray-600 px-4">
           Recording saved to: {recordingPath}
         </div>

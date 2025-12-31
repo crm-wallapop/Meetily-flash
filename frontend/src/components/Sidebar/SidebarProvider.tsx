@@ -86,7 +86,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const fetchMeetings = React.useCallback(async () => {
     if (serverAddress) {
       try {
-        const meetings = await invoke('api_get_meetings') as Array<{id: string, title: string}>;
+        const meetings = await invoke('api_get_meetings') as Array<{ id: string, title: string }>;
         const transformedMeetings = meetings.map((meeting: any) => ({
           id: meeting.id,
           title: meeting.title
@@ -107,11 +107,8 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const fetchSettings = async () => {
-        
-        setServerAddress('http://localhost:5167');
-        setTranscriptServerAddress('http://127.0.0.1:8178/stream');
-        
-      
+      setServerAddress('http://localhost:5167');
+      setTranscriptServerAddress('http://127.0.0.1:8178/stream');
     };
     fetchSettings();
   }, []);
@@ -127,7 +124,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     },
   ];
 
- 
 
   const toggleCollapse = () => {
     setIsCollapsed(!isCollapsed);
@@ -166,7 +162,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     }
     // The actual recording start/stop is handled in the Home component
   };
-  
+
   // Function to search through meeting transcripts
   const searchTranscripts = async (query: string) => {
     if (!query.trim()) {

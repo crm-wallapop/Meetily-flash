@@ -32,7 +32,7 @@ interface SummaryGeneratorButtonGroupProps {
   onStopGeneration: () => void;
   customPrompt: string;
   summaryStatus: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
-  availableTemplates: Array<{id: string, name: string, description: string}>;
+  availableTemplates: Array<{ id: string, name: string, description: string }>;
   selectedTemplate: string;
   onTemplateSelect: (templateId: string, templateName: string) => void;
   hasTranscripts?: boolean;
@@ -269,8 +269,8 @@ export function SummaryGeneratorButtonGroup({
             isModelConfigLoading
               ? 'Loading model configuration...'
               : isCheckingModels
-              ? 'Checking models...'
-              : 'Generate AI Summary'
+                ? 'Checking models...'
+                : 'Generate AI Summary'
           }
         >
           {isCheckingModels || isModelConfigLoading ? (
@@ -286,7 +286,7 @@ export function SummaryGeneratorButtonGroup({
           )}
         </Button>
       )}
-      
+
       {/* Settings button */}
       <Dialog open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen}>
         <DialogTrigger asChild>
@@ -316,8 +316,6 @@ export function SummaryGeneratorButtonGroup({
           />
         </DialogContent>
       </Dialog>
-
-      
 
       {/* Template selector dropdown */}
       {availableTemplates.length > 0 && (

@@ -74,9 +74,9 @@ export default function Home() {
         // Skip recovery check if currently recording or processing stop
         // This prevents the recovery dialog from showing when:
         if (recordingState.isRecording ||
-            status === RecordingStatus.STOPPING ||
-            status === RecordingStatus.PROCESSING_TRANSCRIPTS ||
-            status === RecordingStatus.SAVING) {
+          status === RecordingStatus.STOPPING ||
+          status === RecordingStatus.PROCESSING_TRANSCRIPTS ||
+          status === RecordingStatus.SAVING) {
           console.log('Skipping recovery check - recording in progress or processing');
           return;
         }
@@ -221,37 +221,37 @@ export default function Home() {
 
         {/* Recording controls - only show when permissions are granted or already recording and not showing status messages */}
         {(hasMicrophone || isRecording) &&
-         status !== RecordingStatus.PROCESSING_TRANSCRIPTS &&
-         status !== RecordingStatus.SAVING && (
-          <div className="fixed bottom-12 left-0 right-0 z-10">
-            <div
-              className="flex justify-center pl-8 transition-[margin] duration-300"
-              style={{
-                marginLeft: sidebarCollapsed ? '4rem' : '16rem'
-              }}
-            >
-              <div className="w-2/3 max-w-[750px] flex justify-center">
-                <div className="bg-white rounded-full shadow-lg flex items-center">
-                  <RecordingControls
-                    isRecording={recordingState.isRecording}
-                    onRecordingStop={(callApi = true) => handleRecordingStop(callApi)}
-                    onRecordingStart={handleRecordingStart}
-                    onTranscriptReceived={() => { }} // Not actually used by RecordingControls
-                    onStopInitiated={() => setIsStopping(true)}
-                    barHeights={barHeights}
-                    onTranscriptionError={(message) => {
-                      showModal('errorAlert', message);
-                    }}
-                    isRecordingDisabled={isRecordingDisabled}
-                    isParentProcessing={isProcessingStop}
-                    selectedDevices={selectedDevices}
-                    meetingName={meetingTitle}
-                  />
+          status !== RecordingStatus.PROCESSING_TRANSCRIPTS &&
+          status !== RecordingStatus.SAVING && (
+            <div className="fixed bottom-12 left-0 right-0 z-10">
+              <div
+                className="flex justify-center pl-8 transition-[margin] duration-300"
+                style={{
+                  marginLeft: sidebarCollapsed ? '4rem' : '16rem'
+                }}
+              >
+                <div className="w-2/3 max-w-[750px] flex justify-center">
+                  <div className="bg-white rounded-full shadow-lg flex items-center">
+                    <RecordingControls
+                      isRecording={recordingState.isRecording}
+                      onRecordingStop={(callApi = true) => handleRecordingStop(callApi)}
+                      onRecordingStart={handleRecordingStart}
+                      onTranscriptReceived={() => { }} // Not actually used by RecordingControls
+                      onStopInitiated={() => setIsStopping(true)}
+                      barHeights={barHeights}
+                      onTranscriptionError={(message) => {
+                        showModal('errorAlert', message);
+                      }}
+                      isRecordingDisabled={isRecordingDisabled}
+                      isParentProcessing={isProcessingStop}
+                      selectedDevices={selectedDevices}
+                      meetingName={meetingTitle}
+                    />
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
 
         {/* Status Overlays - Processing and Saving */}
         <StatusOverlays

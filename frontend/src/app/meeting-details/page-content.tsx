@@ -150,8 +150,6 @@ export default function PageContent({
       className="flex flex-col h-screen bg-gray-50"
     >
       <div className="flex flex-1 overflow-hidden">
-      
-
         <TranscriptPanel
           transcripts={meetingData.transcripts}
           customPrompt={customPrompt}
@@ -169,8 +167,7 @@ export default function PageContent({
           loadedCount={loadedCount}
           onLoadMore={onLoadMore}
         />
-
-          <SummaryPanel
+        <SummaryPanel
           meeting={meeting}
           meetingTitle={meetingData.meetingTitle}
           onTitleChange={meetingData.handleTitleChange}
@@ -205,7 +202,6 @@ export default function PageContent({
           isModelConfigLoading={false}
           onOpenModelSettings={handleRegisterModalOpen}
         />
-
       </div>
     </motion.div>
   );
