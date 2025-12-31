@@ -1,7 +1,8 @@
+-- Migration: Add PRO License and Custom OpenAI Configuration (RSA-based)
+
 -- This column stores: {endpoint, apiKey, model, maxTokens, temperature, topP}
 ALTER TABLE settings ADD COLUMN customOpenAIConfig TEXT;
 
--- Migration: Add PRO License [Not needed for the app to work, But only for compatibility with PRO]
 -- Drop and recreate licensing table with RSA structure
 DROP TABLE IF EXISTS licensing;
 
