@@ -1,4 +1,4 @@
--- Migration: Add grace_period column to licensing table [Not needed for the app to work, But only for compatibility with PRO]
+-- Migration: Add grace_period column to licensing table
 -- This allows per-license grace period configuration instead of using a global constant
 
 -- Add grace_period column (stores seconds of grace period after expiry)
