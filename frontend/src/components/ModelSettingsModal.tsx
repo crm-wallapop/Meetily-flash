@@ -343,7 +343,7 @@ export function ModelSettingsModal({
   // Sync custom OpenAI state from modelConfig (context or props)
   useEffect(() => {
     if (modelConfig.provider === 'custom-openai') {
-      console.log('🔄 Syncing custom OpenAI fields from ConfigContext:', {
+      console.log('Syncing custom OpenAI fields from ConfigContext:', {
         endpoint: modelConfig.customOpenAIEndpoint,
         model: modelConfig.customOpenAIModel,
         hasApiKey: !!modelConfig.customOpenAIApiKey,
