@@ -151,7 +151,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: frontend/src-tauri/binaries/ffmpeg-*
-          key: ${{ runner.os }}-ffmpeg-${{ hashFiles('frontend/src-tauri/build.rs') }}
+          key: ${{ runner.os }}-ffmpeg-${{ hashFiles('frontend/src-tauri/build.rs', 'frontend/src-tauri/build/ffmpeg.rs') }}
           restore-keys: |
             ${{ runner.os }}-ffmpeg-
 
