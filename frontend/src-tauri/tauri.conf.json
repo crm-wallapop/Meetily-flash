@@ -98,7 +98,8 @@
             "templates/*.json"
         ],
         "externalBin": [
-            "binaries/llama-helper"
+            "binaries/llama-helper",
+            "binaries/ffmpeg"
         ],
         "macOS": {
             "entitlements": "entitlements.plist",

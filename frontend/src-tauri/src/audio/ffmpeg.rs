@@ -24,6 +24,51 @@ pub fn find_ffmpeg_path() -> Option<PathBuf> {
 fn find_ffmpeg_path_internal() -> Option<PathBuf> {
     debug!("Starting search for ffmpeg executable");
 
+    // ============================================================
+    // PRIORITY 1: Bundled Binary (Production)
+    // ============================================================
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_folder) = exe_path.parent() {
+            let bundled = exe_folder.join(EXECUTABLE_NAME);
+            if bundled.exists() && bundled.is_file() {
+                debug!("Found bundled ffmpeg: {:?}", bundled);
+                return Some(bundled);
+            }
+        }
+    }
+
+    // ============================================================
+    // PRIORITY 2: Development Mode (Debug Builds)
+    // ============================================================
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+            let target = std::env::var("TARGET")
+                .or_else(|_| std::env::var("HOST")).ok();
+
+            if let Some(target_triple) = target {
+                let name = if target_triple.contains("windows") {
+                    format!("ffmpeg-{}.exe", target_triple)
+                } else {
+                    format!("ffmpeg-{}", target_triple)
+                };
+
+                let dev_binary = PathBuf::from(manifest_dir)
+                    .join("binaries")
+                    .join(name);
+
+                if dev_binary.exists() {
+                    debug!("Found dev ffmpeg: {:?}", dev_binary);
+                    return Some(dev_binary);
+                }
+            }
+        }
+    }
+
+    // ============================================================
+    // PRIORITY 3: Fallback to Existing Logic
+    // ============================================================
+
     // Check if `ffmpeg` is in the PATH environment variable
     if let Ok(path) = which(EXECUTABLE_NAME) {
         debug!("Found ffmpeg in PATH: {:?}", path);
