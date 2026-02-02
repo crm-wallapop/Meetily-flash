@@ -103,20 +103,6 @@ export function ModelManager({
         });
 
         setModels(modelsWithDownloadState);
-
-        // Auto-select first available model on initial load
-        if (!hasUserSelection && !selectedModel) {
-          const recommendedModel = modelsWithDownloadState.find(m =>
-            m.name === 'base' && m.status === 'Available'
-          );
-          const anyAvailable = modelsWithDownloadState.find(m => m.status === 'Available');
-          const toSelect = recommendedModel || anyAvailable;
-
-          if (toSelect && onModelSelect) {
-            onModelSelect(toSelect.name);
-          }
-        }
-
         setInitialized(true);
       } catch (err) {
         console.error('Failed to initialize Whisper:', err);
