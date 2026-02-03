@@ -70,6 +70,15 @@ interface ConfigContextType {
   isAutoSummary: boolean;
   toggleIsAutoSummary: (checked: boolean) => void;
 
+  // Provider-specific API keys
+  providerApiKeys: {
+    claude: string | null;
+    groq: string | null;
+    openai: string | null;
+    openrouter: string | null;
+  };
+  updateProviderApiKey: (provider: string, apiKey: string | null) => void;
+
   // Preference settings (lazy loaded)
   notificationSettings: NotificationSettings | null;
   storageLocations: StorageLocations | null;
@@ -94,6 +103,20 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     provider: 'parakeet',
     model: 'parakeet-tdt-0.6b-v3-int8',
     apiKey: null
+  });
+
+  // Provider-specific API keys (loaded once at startup)
+  // Note: Gemini omitted for now - add when UI support is added
+  const [providerApiKeys, setProviderApiKeys] = useState<{
+    claude: string | null;
+    groq: string | null;
+    openai: string | null;
+    openrouter: string | null;
+  }>({
+    claude: null,
+    groq: null,
+    openai: null,
+    openrouter: null,
   });
 
   // Ollama models list and error state
@@ -259,6 +282,33 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     fetchModelConfig();
   }, []);
 
+  // Load all provider API keys on mount
+  useEffect(() => {
+    const loadAllApiKeys = async () => {
+      try {
+        const providers = ['claude', 'groq', 'openai', 'openrouter'];
+        const keys = await Promise.all(
+          providers.map(p =>
+            invoke<string>('api_get_api_key', { provider: p })
+              .catch(() => null) // Gracefully handle missing keys
+          )
+        );
+
+        setProviderApiKeys({
+          claude: keys[0],
+          groq: keys[1],
+          openai: keys[2],
+          openrouter: keys[3],
+        });
+        console.log('[ConfigContext] Loaded provider API keys');
+      } catch (error) {
+        console.error('[ConfigContext] Failed to load provider API keys:', error);
+      }
+    };
+
+    loadAllApiKeys();
+  }, []);
+
   // Listen for model config updates from other components
   useEffect(() => {
     const setupListener = async () => {
@@ -266,6 +316,11 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       const unlisten = await listen<ModelConfig>('model-config-updated', (event) => {
         console.log('[ConfigContext] Received model-config-updated event:', event.payload);
         setModelConfig(event.payload);
+
+        // Update provider-specific key when config changes
+        if (event.payload.apiKey && event.payload.provider !== 'custom-openai') {
+          updateProviderApiKey(event.payload.provider, event.payload.apiKey);
+        }
       });
       return unlisten;
     };
@@ -343,6 +398,11 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  // Update individual provider API key
+  const updateProviderApiKey = useCallback((provider: string, apiKey: string | null) => {
+    setProviderApiKeys(prev => ({ ...prev, [provider]: apiKey }));
+  }, []);
+
   // Lazy load preference settings (only loads if not already cached)
   const loadPreferences = useCallback(async () => {
     // If already loaded, don't reload
@@ -408,6 +468,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     setModelConfig,
     isAutoSummary,
     toggleIsAutoSummary,
+    providerApiKeys,
+    updateProviderApiKey,
     transcriptModelConfig,
     setTranscriptModelConfig,
     selectedDevices,
@@ -428,6 +490,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     modelConfig,
     isAutoSummary,
     toggleIsAutoSummary,
+    providerApiKeys,
+    updateProviderApiKey,
     transcriptModelConfig,
     selectedDevices,
     selectedLanguage,

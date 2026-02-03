@@ -68,6 +68,8 @@ export function ModelSettingsModal({
   const configContext = useConfig();
   const modelConfig = configContext?.modelConfig || propsModelConfig;
   const setModelConfig = configContext?.setModelConfig || propsSetModelConfig;
+  const providerApiKeys = configContext?.providerApiKeys;
+  const updateProviderApiKey = configContext?.updateProviderApiKey;
 
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [error, setError] = useState<string>('');
@@ -149,13 +151,6 @@ export function ModelSettingsModal({
       setApiKey(null);
     }
   };
-
-  // Sync apiKey from parent when it changes
-  useEffect(() => {
-    if (modelConfig.apiKey !== apiKey) {
-      setApiKey(modelConfig.apiKey || null);
-    }
-  }, [modelConfig.apiKey]);
 
   // Auto-unlock when API key becomes empty, 
   useEffect(() => {
@@ -367,6 +362,17 @@ export function ModelSettingsModal({
     }
   }, [ollamaEndpoint, lastFetchedEndpoint, modelConfig.provider]);
 
+  // Sync local apiKey state when provider changes
+  useEffect(() => {
+    if (providerApiKeys && requiresApiKey && modelConfig.provider !== 'custom-openai') {
+      const correctKey = providerApiKeys[modelConfig.provider as keyof typeof providerApiKeys];
+      if (correctKey !== apiKey) {
+        setApiKey(correctKey || '');
+        setIsApiKeyLocked(!!correctKey?.trim());
+      }
+    }
+  }, [modelConfig.provider, providerApiKeys, requiresApiKey]);
+
   // Manual fetch function for Ollama models
   const fetchOllamaModels = async (silent = false) => {
     const trimmedEndpoint = ollamaEndpoint.trim();
@@ -516,6 +522,11 @@ export function ModelSettingsModal({
     };
     setModelConfig(updatedConfig);
     console.log('ModelSettingsModal - handleSave - Updated ModelConfig:', updatedConfig);
+
+    // Update provider-specific key in context
+    if (updateProviderApiKey && updatedConfig.apiKey && updatedConfig.provider !== 'custom-openai') {
+      updateProviderApiKey(updatedConfig.provider, updatedConfig.apiKey);
+    }
 
     onSave(updatedConfig);
   };
@@ -682,7 +693,7 @@ export function ModelSettingsModal({
                   provider,
                   model: defaultModel,
                 });
-                fetchApiKey(provider);
+                // API key is now synced automatically via useEffect watching providerApiKeys
 
                 // Load OpenRouter models only when OpenRouter is selected
                 if (provider === 'openrouter') {
