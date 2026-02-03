@@ -95,7 +95,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   const [modelConfig, setModelConfig] = useState<ModelConfig>({
     provider: 'ollama',
     model: 'llama3.2:latest',
-    whisperModel: 'large-v3'
+    whisperModel: 'large-v3',
+    ollamaEndpoint: null
   });
 
   // Transcript model configuration state
@@ -273,6 +274,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
             provider: data.provider,
             model: data.model || prev.model,
             whisperModel: data.whisperModel || prev.whisperModel,
+            ollamaEndpoint: data.ollamaEndpoint,
           }));
         }
       } catch (error) {
