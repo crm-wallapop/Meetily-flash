@@ -50,14 +50,11 @@ pub fn ensure_ffmpeg_binary() {
 
             // Verify downloaded binary works
             if !verify_ffmpeg_binary(&binary_path) {
-                println!("cargo:warning=⚠️  Downloaded FFmpeg binary verification failed!");
-                println!("cargo:warning=⚠️  Build will continue, but runtime fallback may be needed");
+                panic!("⚠️  Downloaded FFmpeg binary verification failed!");
             }
         }
         Err(e) => {
-            println!("cargo:warning=⚠️  Failed to download FFmpeg: {}", e);
-            println!("cargo:warning=⚠️  Build will continue, but FFmpeg will be downloaded at runtime");
-            println!("cargo:warning=💡 Manual fix: Download FFmpeg and place at: {}", binary_path.display());
+            panic!("⚠️  Failed to download FFmpeg: {}", e);
         }
     }
 }
@@ -97,7 +94,7 @@ fn download_and_extract_ffmpeg(
     // Download to temp file
     let temp_dir = std::env::temp_dir();
     let archive_filename = url.split('/').last().unwrap_or("ffmpeg-archive");
-    let archive_path = temp_dir.join(format!("ffmpeg-build-{}", archive_filename));
+    let archive_path = temp_dir.join(format!("ffmpeg-build-{}-{}", target, archive_filename));
 
     {
         let mut file = std::fs::File::create(&archive_path)
@@ -159,7 +156,7 @@ fn extract_ffmpeg_from_archive(
     target: &str,
     output_path: &std::path::PathBuf,
 ) -> Result<(), String> {
-    let extract_dir = std::env::temp_dir().join("ffmpeg-extract");
+    let extract_dir = std::env::temp_dir().join(format!("ffmpeg-extract-{}", target));
 
     // Clean old extraction directory
     let _ = std::fs::remove_dir_all(&extract_dir);
@@ -222,9 +219,17 @@ fn extract_zip(
         let mut file = archive.by_index(i)
             .map_err(|e| format!("Failed to read ZIP entry {}: {}", i, e))?;
 
-        let outpath = extract_dir.join(file.name());
+        // Use enclosed_name() to prevent Zip Slip path traversal attacks
+        let outpath = match file.enclosed_name() {
+            Some(name) => extract_dir.join(name),
+            None => {
+                // Skip entries with path traversal sequences (e.g., "../")
+                println!("cargo:warning=⚠️  Skipping suspicious ZIP entry: {}", file.name());
+                continue;
+            }
+        };
 
-        if file.name().ends_with('/') {
+        if file.is_dir() {
             // Directory
             std::fs::create_dir_all(&outpath)
                 .map_err(|e| format!("Failed to create directory: {}", e))?;
