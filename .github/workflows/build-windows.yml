@@ -665,8 +665,6 @@ jobs:
         with:
           path: frontend/src-tauri/binaries/ffmpeg-*.exe
           key: ${{ runner.os }}-ffmpeg-${{ hashFiles('frontend/src-tauri/build.rs', 'frontend/src-tauri/build/ffmpeg.rs') }}
-          restore-keys: |
-            ${{ runner.os }}-ffmpeg-
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
