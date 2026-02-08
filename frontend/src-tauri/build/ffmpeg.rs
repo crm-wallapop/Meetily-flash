@@ -123,25 +123,25 @@ fn download_and_extract_ffmpeg(
 
 /// Get FFmpeg download URL for specific target triple
 fn get_ffmpeg_url_for_target(target: &str) -> Result<String, String> {
-    // Platform-specific URLs from official FFmpeg binary providers
+    // Platform-specific URLs
     let url = if target.contains("windows") {
-        // Gyan.dev - Community FFmpeg builds for Windows
-        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+        // Windows
+        "https://github.com/Zackriya-Solutions/ffmpeg-binaries/releases/download/0.0.1/ffmpeg-8.0.1-essentials_build.zip"
     } else if target.contains("apple") {
         if target.contains("aarch64") {
             // Apple Silicon (M1/M2/M3)
-            "https://www.osxexperts.net/ffmpeg80arm.zip"
+            "https://github.com/Zackriya-Solutions/ffmpeg-binaries/releases/download/0.0.1/ffmpeg80arm.zip"
         } else {
             // Intel Mac
-            "https://evermeet.cx/ffmpeg/getrelease/zip"
+            "https://github.com/Zackriya-Solutions/ffmpeg-binaries/releases/download/0.0.1/ffmpeg-8.0.1.zip"
         }
     } else if target.contains("linux") {
         if target.contains("aarch64") || target.contains("arm") {
             // Linux ARM64
-            "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz"
+            "https://github.com/Zackriya-Solutions/ffmpeg-binaries/releases/download/0.0.1/ffmpeg-release-arm64-static.tar.xz"
         } else {
             // Linux x86_64
-            "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+            "https://github.com/Zackriya-Solutions/ffmpeg-binaries/releases/download/0.0.1/ffmpeg-release-amd64-static.tar.xz"
         }
     } else {
         return Err(format!("Unsupported target platform: {}", target));
