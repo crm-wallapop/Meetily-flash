@@ -596,6 +596,22 @@ export function ModelSettingsModal({
     }
   }, [modelConfig.provider, apiKey]);
 
+  // Restore cached model when async model lists become available
+  useEffect(() => {
+    const providerModels = modelOptions[modelConfig.provider];
+    if (!providerModels || providerModels.length === 0) return;
+
+    // If current model is already valid, nothing to do
+    if (modelConfig.model && providerModels.includes(modelConfig.model)) return;
+
+    // Try to restore from localStorage cache
+    const map = JSON.parse(localStorage.getItem('providerModelMap') || '{}');
+    const cachedModel = map[modelConfig.provider];
+    if (cachedModel && providerModels.includes(cachedModel)) {
+      setModelConfig((prev: ModelConfig) => ({ ...prev, model: cachedModel }));
+    }
+  }, [models, openRouterModels, builtinAiModels, openaiModels, claudeModels, groqModels, modelConfig.provider]);
+
   const handleSave = async () => {
     // For custom-openai provider, save the custom config first
     if (modelConfig.provider === 'custom-openai') {
@@ -634,6 +650,13 @@ export function ModelSettingsModal({
     };
     setModelConfig(updatedConfig);
     console.log('ModelSettingsModal - handleSave - Updated ModelConfig:', updatedConfig);
+
+    // Persist confirmed model choice to per-provider cache
+    if (updatedConfig.model) {
+      const map = JSON.parse(localStorage.getItem('providerModelMap') || '{}');
+      map[updatedConfig.provider] = updatedConfig.model;
+      localStorage.setItem('providerModelMap', JSON.stringify(map));
+    }
 
     // Update provider-specific key in context
     if (updateProviderApiKey && updatedConfig.apiKey && updatedConfig.provider !== 'custom-openai') {
@@ -794,16 +817,27 @@ export function ModelSettingsModal({
                 // Clear error state when switching providers
                 setError('');
 
-                // Get safe default model
+                // Save current provider's model to localStorage before switching
+                const map = JSON.parse(localStorage.getItem('providerModelMap') || '{}');
+                if (modelConfig.model) {
+                  map[modelConfig.provider] = modelConfig.model;
+                  localStorage.setItem('providerModelMap', JSON.stringify(map));
+                }
+
+                // Try to restore cached model for the new provider
+                const savedModel = map[provider];
                 const providerModels = modelOptions[provider];
                 const defaultModel = providerModels && providerModels.length > 0
                   ? providerModels[0]
-                  : ''; // Fallback to empty string instead of undefined
+                  : '';
+                const model = (savedModel && providerModels?.includes(savedModel))
+                  ? savedModel
+                  : defaultModel;
 
                 setModelConfig({
                   ...modelConfig,
                   provider,
-                  model: defaultModel,
+                  model,
                 });
                 // API key is now synced automatically via useEffect watching providerApiKeys
 

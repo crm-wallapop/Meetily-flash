@@ -210,10 +210,11 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
                   endpoint: customConfig.endpoint,
                   model: customConfig.model,
                 });
+                const resolvedModel = customConfig.model || data.model || '';
                 setModelConfig(prev => ({
                   ...prev,
                   provider: data.provider,
-                  model: customConfig.model || data.model || prev.model,
+                  model: resolvedModel || prev.model,
                   whisperModel: data.whisperModel || prev.whisperModel,
                   customOpenAIEndpoint: customConfig.endpoint,
                   customOpenAIModel: customConfig.model,
@@ -222,6 +223,14 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
                   temperature: customConfig.temperature,
                   topP: customConfig.topP,
                 }));
+
+                // Seed per-provider model cache from DB
+                if (resolvedModel) {
+                  const map = JSON.parse(localStorage.getItem('providerModelMap') || '{}');
+                  map[data.provider] = resolvedModel;
+                  localStorage.setItem('providerModelMap', JSON.stringify(map));
+                }
+
                 return; // Early return
               }
             } catch (err) {
@@ -237,6 +246,13 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
             whisperModel: data.whisperModel || prev.whisperModel,
             ollamaEndpoint: data.ollamaEndpoint,
           }));
+
+          // Seed per-provider model cache from DB
+          if (data.model) {
+            const map = JSON.parse(localStorage.getItem('providerModelMap') || '{}');
+            map[data.provider] = data.model;
+            localStorage.setItem('providerModelMap', JSON.stringify(map));
+          }
         }
       } catch (error) {
         console.error('Failed to fetch saved model config in ConfigContext:', error);
