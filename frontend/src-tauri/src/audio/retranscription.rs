@@ -106,12 +106,16 @@ pub async fn start_retranscription<R: Runtime>(
 }
 
 /// Supported audio extensions for file discovery
-const AUDIO_EXTENSIONS: &[&str] = &["mp4", "m4a", "wav", "mp3", "flac", "ogg", "aac"];
+const AUDIO_EXTENSIONS: &[&str] = &["mp4", "m4a", "wav", "mp3", "flac", "ogg", "aac", "mkv", "webm", "wma"];
 
 /// Find audio file in meeting folder
 /// Tries common names first, then scans for any file with an audio extension
 fn find_audio_file(folder: &Path) -> Result<PathBuf> {
-    let candidates = ["audio.mp4", "audio.m4a", "audio.wav", "audio.mp3", "audio.flac", "audio.ogg", "recording.mp4"];
+    let candidates = [
+        "audio.mp4", "audio.m4a", "audio.wav", "audio.mp3",
+        "audio.flac", "audio.ogg", "recording.mp4",
+        "audio.mkv", "audio.webm", "audio.wma",
+    ];
 
     for name in candidates {
         let path = folder.join(name);
@@ -977,7 +981,11 @@ mod tests {
         assert!(AUDIO_EXTENSIONS.contains(&"flac"));
         assert!(AUDIO_EXTENSIONS.contains(&"ogg"));
         assert!(AUDIO_EXTENSIONS.contains(&"aac"));
-        assert!(!AUDIO_EXTENSIONS.contains(&"wma"));
+        // FFmpeg-backed formats
+        assert!(AUDIO_EXTENSIONS.contains(&"mkv"));
+        assert!(AUDIO_EXTENSIONS.contains(&"webm"));
+        assert!(AUDIO_EXTENSIONS.contains(&"wma"));
+        // Non-audio formats
         assert!(!AUDIO_EXTENSIONS.contains(&"txt"));
         assert!(!AUDIO_EXTENSIONS.contains(&"pdf"));
     }

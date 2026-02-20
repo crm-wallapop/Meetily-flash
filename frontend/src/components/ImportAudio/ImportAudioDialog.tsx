@@ -94,19 +94,13 @@ export function ImportAudioDialog({
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const handleImportComplete = useCallback((result: ImportResult) => {
-    toast.success(`Import complete! ${result.segments_count} segments created.`, {
-      action: {
-        label: 'View Meeting',
-        onClick: () => router.push(`/meeting-details?id=${result.meeting_id}`),
-      },
-      duration: 10000,
-    });
+    toast.success(`Import complete! ${result.segments_count} segments created.`);
 
-    // Refresh meetings list
+    // Refresh meetings list then navigate to the imported meeting
     refetchMeetings();
-
     onComplete?.();
     onOpenChange(false);
+    router.push(`/meeting-details?id=${result.meeting_id}`);
   }, [router, refetchMeetings, onComplete, onOpenChange]);
 
   const handleImportError = useCallback((error: string) => {
@@ -370,7 +364,7 @@ export function ImportAudioDialog({
                       </>
                     )}
                   </Button>
-                  <p className="text-sm text-gray-500 mt-2">MP4, WAV, MP3, FLAC, OGG</p>
+                  <p className="text-sm text-gray-500 mt-2">MP4, WAV, MP3, FLAC, OGG, MKV, WebM, WMA</p>
                 </div>
               )}
 

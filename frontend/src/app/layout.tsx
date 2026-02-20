@@ -33,7 +33,7 @@ const sourceSans3 = Source_Sans_3({
 // export { metadata } from './metadata'
 
 // Audio file extensions for drag-drop filtering
-const AUDIO_EXTENSIONS = ['mp4', 'm4a', 'wav', 'mp3', 'flac', 'ogg', 'aac'];
+const AUDIO_EXTENSIONS = ['mp4', 'm4a', 'wav', 'mp3', 'flac', 'ogg', 'aac', 'mkv', 'webm', 'wma'];
 
 export default function RootLayout({
   children,
@@ -113,7 +113,7 @@ export default function RootLayout({
       setShowImportDialog(true);
     } else if (paths.length > 0) {
       toast.error('Please drop an audio file', {
-        description: 'Supported formats: MP4, WAV, MP3, FLAC, OGG'
+        description: 'Supported formats: MP4, WAV, MP3, FLAC, OGG, MKV, WebM, WMA'
       });
     }
   }, []);

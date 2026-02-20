@@ -33,7 +33,7 @@ static IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
 const VAD_REDEMPTION_TIME_MS: u32 = 2000;
 
 /// Supported audio file extensions
-const AUDIO_EXTENSIONS: &[&str] = &["mp4", "m4a", "wav", "mp3", "flac", "ogg", "aac"];
+const AUDIO_EXTENSIONS: &[&str] = &["mp4", "m4a", "wav", "mp3", "flac", "ogg", "aac", "mkv", "webm", "wma"];
 
 /// Information about a selected audio file
 #[derive(Debug, Clone, Serialize, Deserialize)]
