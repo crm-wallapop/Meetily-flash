@@ -7,6 +7,7 @@ import { ButtonGroup } from '@/components/ui/button-group';
 import { Copy, FolderOpen, RefreshCw } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
+import { useConfig } from '@/contexts/ConfigContext';
 
 
 interface TranscriptButtonGroupProps {
@@ -26,6 +27,7 @@ export function TranscriptButtonGroup({
   meetingFolderPath,
 }: TranscriptButtonGroupProps) {
   const router = useRouter();
+  const { betaFeatures } = useConfig();
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
 
   const handleRetranscribeComplete = useCallback(() => {
@@ -63,7 +65,7 @@ export function TranscriptButtonGroup({
           <span className="hidden lg:inline">Recording</span>
         </Button>
 
-        {meetingId && meetingFolderPath && (
+        {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
           <Button
             size="sm"
             variant="outline"
@@ -80,7 +82,7 @@ export function TranscriptButtonGroup({
         )}
       </ButtonGroup>
 
-      {meetingId && meetingFolderPath && (
+      {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
         <RetranscribeDialog
           open={showRetranscribeDialog}
           onOpenChange={setShowRetranscribeDialog}
