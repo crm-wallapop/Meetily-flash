@@ -136,7 +136,6 @@ export function RetranscribeDialog({
           if (event.payload.meeting_id === meetingId) {
             await Analytics.track('enhance_transcript_completed', {
               success: 'true',
-              meeting_id: meetingId,
               duration_seconds: event.payload.duration_seconds.toString(),
               segments_count: event.payload.segments_count.toString()
             });
@@ -162,11 +161,7 @@ export function RetranscribeDialog({
         'retranscription-error',
         async (event) => {
           if (event.payload.meeting_id === meetingId) {
-            await Analytics.track('enhance_transcript_completed', {
-              success: 'false',
-              meeting_id: meetingId,
-              error_message: event.payload.error
-            });
+            await Analytics.trackError('enhance_transcript_failed', event.payload.error);
 
             setIsProcessing(false);
             setError(event.payload.error);
@@ -200,8 +195,8 @@ export function RetranscribeDialog({
     setProgress(null);
 
     try {
+      const languageToSend = isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang;
       await Analytics.track('enhance_transcript_started', {
-        meeting_id: meetingId,
         language: isParakeetModel ? 'auto' : (selectedLang === 'auto' ? 'auto' : selectedLang),
         model_provider: selectedModelDetails?.provider || '',
         model_name: selectedModelDetails?.name || ''
@@ -210,7 +205,7 @@ export function RetranscribeDialog({
       await invoke('start_retranscription_command', {
         meetingId,
         meetingFolderPath,
-        language: isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang,
+        language: languageToSend,
         model: selectedModelDetails?.name || null,
         provider: selectedModelDetails?.provider || null,
       });
@@ -219,11 +214,7 @@ export function RetranscribeDialog({
       const errorMsg = typeof err === 'string' ? err : (err?.message || String(err));
       setError(errorMsg);
 
-      await Analytics.track('enhance_transcript_completed', {
-        success: 'false',
-        meeting_id: meetingId,
-        error_message: errorMsg
-      });
+      await Analytics.trackError('enhance_transcript_failed', errorMsg);
     }
   };
 
@@ -291,8 +282,8 @@ export function RetranscribeDialog({
             {isProcessing
               ? progress?.message || 'Processing audio...'
               : error
-              ? 'An error occurred during retranscription'
-              : 'Re-process the audio with different language settings'}
+                ? 'An error occurred during retranscription'
+                : 'Re-process the audio with different language settings'}
           </DialogDescription>
         </DialogHeader>
 

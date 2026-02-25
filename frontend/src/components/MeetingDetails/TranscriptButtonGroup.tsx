@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
 import { Copy, FolderOpen, RefreshCw } from 'lucide-react';
@@ -16,6 +15,7 @@ interface TranscriptButtonGroupProps {
   onOpenMeetingFolder: () => Promise<void>;
   meetingId?: string;
   meetingFolderPath?: string | null;
+  onRefetchTranscripts?: () => Promise<void>;
 }
 
 
@@ -25,14 +25,17 @@ export function TranscriptButtonGroup({
   onOpenMeetingFolder,
   meetingId,
   meetingFolderPath,
+  onRefetchTranscripts,
 }: TranscriptButtonGroupProps) {
-  const router = useRouter();
   const { betaFeatures } = useConfig();
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
 
-  const handleRetranscribeComplete = useCallback(() => {
-    router.refresh();
-  }, [router]);
+  const handleRetranscribeComplete = useCallback(async () => {
+    // Refetch transcripts to show the updated data
+    if (onRefetchTranscripts) {
+      await onRefetchTranscripts();
+    }
+  }, [onRefetchTranscripts]);
 
   return (
     <div className="flex items-center justify-center w-full gap-2">

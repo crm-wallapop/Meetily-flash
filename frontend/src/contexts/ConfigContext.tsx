@@ -137,7 +137,13 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   });
 
   // Language preference state
-  const [selectedLanguage, setSelectedLanguage] = useState('auto-translate');
+  const [selectedLanguage, setSelectedLanguage] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('primaryLanguage');
+      return saved || 'auto';
+    }
+    return 'auto';
+  });
 
   // UI preferences state
   const [showConfidenceIndicator, setShowConfidenceIndicator] = useState<boolean>(() => {
@@ -342,24 +348,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     loadDevicePreferences();
   }, []);
 
-  // Load language preference on mount
-  useEffect(() => {
-    const loadLanguagePreference = async () => {
-      try {
-        const language = await configService.getLanguagePreference();
-        if (language) {
-          setSelectedLanguage(language);
-          console.log('Loaded language preference:', language);
-        }
-      } catch (error) {
-        console.log('No language preference found or failed to load, using default (auto-translate):', error);
-        // Default to 'auto-translate' (Auto Detect with English translation) if no preference is saved
-        setSelectedLanguage('auto-translate');
-      }
-    };
-    loadLanguagePreference();
-  }, []);
-
   // Calculate model options based on available models
   const modelOptions: Record<ModelConfig['provider'], string[]> = {
     ollama: models.map(model => model.name),
@@ -469,6 +457,18 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Wrapper for setSelectedLanguage that persists to localStorage and syncs to Rust
+  const handleSetSelectedLanguage = useCallback((lang: string) => {
+    setSelectedLanguage(lang);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('primaryLanguage', lang);
+    }
+    // Sync with Rust in-memory state for live recording
+    invoke('set_language_preference', { language: lang }).catch(err =>
+      console.error('Failed to sync language preference to Rust:', err)
+    );
+  }, []);
+
   const value: ConfigContextType = useMemo(() => ({
     modelConfig,
     setModelConfig,
@@ -481,7 +481,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     selectedDevices,
     setSelectedDevices,
     selectedLanguage,
-    setSelectedLanguage,
+    setSelectedLanguage: handleSetSelectedLanguage,
     showConfidenceIndicator,
     toggleConfidenceIndicator,
     betaFeatures,
@@ -503,6 +503,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     transcriptModelConfig,
     selectedDevices,
     selectedLanguage,
+    handleSetSelectedLanguage,
     showConfidenceIndicator,
     toggleConfidenceIndicator,
     betaFeatures,
