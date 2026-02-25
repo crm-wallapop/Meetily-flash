@@ -57,8 +57,8 @@ impl Drop for ImportGuard {
 /// speech at every natural sentence/topic pause (500ms-2s)
 const VAD_REDEMPTION_TIME_MS: u32 = 2000;
 
-/// Maximum file size: 4GB (prevents OOM and excessive processing time)
-const MAX_FILE_SIZE_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4GB
+/// Maximum file size: 20GB (prevents OOM and excessive processing time)
+const MAX_FILE_SIZE_BYTES: u64 = 20 * 1024 * 1024 * 1024; // 20GB
 
 /// Information about a selected audio file
 #[derive(Debug, Clone, Serialize, Deserialize)]
