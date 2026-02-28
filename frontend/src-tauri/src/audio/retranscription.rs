@@ -386,7 +386,7 @@ async fn run_retranscription<R: Runtime>(
             debug!(
                 "Segment {}/{}: {:.1}s, conf={:.2}, text='{}'",
                 i + 1, processable_count, segment_duration_sec, conf,
-                if trimmed.len() > 80 { &trimmed[..80] } else { trimmed }
+                if trimmed.len() > 80 { &trimmed[..trimmed.floor_char_boundary(80)] } else { trimmed }
             );
             all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms));
             total_confidence += conf;

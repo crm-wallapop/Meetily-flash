@@ -147,8 +147,9 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
     // Check file size limit
     if size_bytes > MAX_FILE_SIZE_BYTES {
         return Err(anyhow!(
-            "File too large: {:.2}GB. Maximum supported size is 4GB",
-            size_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+            "File too large: {:.2}GB. Maximum supported size is {}GB",
+            size_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+            MAX_FILE_SIZE_BYTES / (1024 * 1024 * 1024)
         ));
     }
 
@@ -595,7 +596,7 @@ async fn run_import<R: Runtime>(
             debug!(
                 "Segment {}/{}: {:.1}s, conf={:.2}, text='{}'",
                 i + 1, processable_count, segment_duration_sec, conf,
-                if trimmed.len() > 80 { &trimmed[..80] } else { trimmed }
+                if trimmed.len() > 80 { &trimmed[..trimmed.floor_char_boundary(80)] } else { trimmed }
             );
             all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms));
             total_confidence += conf;
