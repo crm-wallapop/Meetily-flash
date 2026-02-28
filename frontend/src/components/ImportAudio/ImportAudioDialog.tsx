@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Upload,
   Globe,
@@ -32,11 +32,12 @@ import {
 } from '../ui/select';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
-import { useImportAudio, AudioFileInfo, ImportResult } from '@/hooks/useImportAudio';
+import { useImportAudio, ImportResult } from '@/hooks/useImportAudio';
 import { useRouter } from 'next/navigation';
 import { useSidebar } from '../Sidebar/SidebarProvider';
 import { LANGUAGES } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
+
 
 interface ImportAudioDialogProps {
   open: boolean;
@@ -71,12 +72,17 @@ export function ImportAudioDialog({
 }: ImportAudioDialogProps) {
   const router = useRouter();
   const { refetchMeetings } = useSidebar();
-  const { selectedLanguage, transcriptModelConfig, betaFeatures } = useConfig();
+  const { selectedLanguage, transcriptModelConfig } = useConfig();
 
   const [title, setTitle] = useState('');
   const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [titleModifiedByUser, setTitleModifiedByUser] = useState(false);
+
+  // Always start as false — represents "dialog has not yet been opened".
+  // Do NOT initialize from the `open` prop: if the component mounts with open=true
+  // (e.g. drag-drop path), we still need the initialization effect to run.
+  const prevOpenRef = useRef(false);
 
   // Use centralized model fetching hook
   const {
@@ -118,9 +124,14 @@ export function ImportAudioDialog({
     onError: handleImportError,
   });
 
-  // Reset state when dialog opens
+  // Reset state only when dialog transitions from closed to open
+  // This prevents re-initialization when config changes while dialog is already open (Bug #4 & #5)
   useEffect(() => {
-    if (open) {
+    const wasOpen = prevOpenRef.current;
+    prevOpenRef.current = open;
+
+    // Only initialize when transitioning from closed (false) to open (true)
+    if (open && !wasOpen) {
       reset();
       setTitle('');
       setTitleModifiedByUser(false);
@@ -139,7 +150,7 @@ export function ImportAudioDialog({
       // Fetch available models using centralized hook
       fetchModels();
     }
-  }, [open, preselectedFile, selectedLanguage, transcriptModelConfig, reset, validateFile]);
+  }, [open, preselectedFile, selectedLanguage, transcriptModelConfig, reset, validateFile, fetchModels]);
 
   // Update title when fileInfo changes
   useEffect(() => {
@@ -207,11 +218,6 @@ export function ImportAudioDialog({
       event.preventDefault();
     }
   };
-
-  // Gate: Don't render dialog if beta feature is disabled (defense in depth)
-  if (!betaFeatures.importAndRetranscribe) {
-    return null;
-  }
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>

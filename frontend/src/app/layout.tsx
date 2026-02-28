@@ -15,7 +15,7 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { RecordingStateProvider } from '@/contexts/RecordingStateContext'
 import { OllamaDownloadProvider } from '@/contexts/OllamaDownloadContext'
 import { TranscriptProvider } from '@/contexts/TranscriptContext'
-import { ConfigProvider } from '@/contexts/ConfigContext'
+import { ConfigProvider, useConfig } from '@/contexts/ConfigContext'
 import { OnboardingProvider } from '@/contexts/OnboardingContext'
 import { OnboardingFlow } from '@/components/onboarding'
 import { loadBetaFeatures } from '@/types/betaFeatures'
@@ -24,13 +24,42 @@ import { UpdateCheckProvider } from '@/components/UpdateCheckProvider'
 import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcessingProvider'
 import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
-import { AUDIO_EXTENSIONS, isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
+import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
+
 
 const sourceSans3 = Source_Sans_3({
   subsets: ['latin'],
   weight: ['400', '500', '600', '700'],
   variable: '--font-source-sans-3',
 })
+
+// Module-level component — stable reference across RootLayout re-renders.
+// Defined here (not inside RootLayout) so React never sees a new function type
+// on re-render, which would cause unmount/remount and break initialization logic.
+function ConditionalImportDialog({
+  showImportDialog,
+  handleImportDialogClose,
+  importFilePath,
+}: {
+  showImportDialog: boolean;
+  handleImportDialogClose: (open: boolean) => void;
+  importFilePath: string | null;
+}) {
+  const { betaFeatures } = useConfig();
+
+  // Only mount ImportAudioDialog (and its hooks/listeners) when feature is enabled
+  if (!betaFeatures.importAndRetranscribe) {
+    return null;
+  }
+
+  return (
+    <ImportAudioDialog
+      open={showImportDialog}
+      onOpenChange={handleImportDialogClose}
+      preselectedFile={importFilePath}
+    />
+  );
+}
 
 // export { metadata } from './metadata'
 
@@ -227,10 +256,10 @@ export default function RootLayout({
                               )}
                               {/* Import audio overlay and dialog */}
                               <ImportDropOverlay visible={showDropOverlay} />
-                              <ImportAudioDialog
-                                open={showImportDialog}
-                                onOpenChange={handleImportDialogClose}
-                                preselectedFile={importFilePath}
+                              <ConditionalImportDialog
+                                showImportDialog={showImportDialog}
+                                handleImportDialogClose={handleImportDialogClose}
+                                importFilePath={importFilePath}
                               />
                             </ImportDialogProvider>
                           </RecordingPostProcessingProvider>
