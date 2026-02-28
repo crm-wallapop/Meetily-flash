@@ -154,7 +154,7 @@ export default function RootLayout({
         description: `Supported formats: ${getAudioFormatsDisplayList()}`
       });
     }
-  }, [isAudioExtension]);
+  }, []);
 
   // Listen for drag-drop events
   useEffect(() => {

@@ -82,7 +82,9 @@ export function RetranscribeDialog({
   // Helper to get selected model details (memoized)
   const selectedModelDetails = useMemo((): ModelOption | undefined => {
     if (!selectedModelKey) return undefined;
-    const [provider, name] = selectedModelKey.split(':');
+    const colonIndex = selectedModelKey.indexOf(':');
+    const provider = selectedModelKey.slice(0, colonIndex);
+    const name = selectedModelKey.slice(colonIndex + 1);
     return availableModels.find(m => m.provider === provider && m.name === name);
   }, [selectedModelKey, availableModels]);
   const isParakeetModel = selectedModelDetails?.provider === 'parakeet';

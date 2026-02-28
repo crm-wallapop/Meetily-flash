@@ -70,7 +70,7 @@ impl ContinuousVadProcessor {
         Ok(Self {
             session,
             chunk_size: vad_chunk_size,
-            sample_rate: input_sample_rate, // Store original for timestamp calculations
+            sample_rate: input_sample_rate, // Store input rate for resampling ratio in resample_to_16k()
             buffer: Vec::with_capacity(vad_chunk_size * 2),
             speech_segments: VecDeque::new(),
             current_speech: Vec::new(),
@@ -182,8 +182,9 @@ impl ContinuousVadProcessor {
 
         // Force end any ongoing speech
         if self.in_speech && !self.current_speech.is_empty() {
-            let start_ms = (self.speech_start_sample as f64 / self.sample_rate as f64) * 1000.0;
-            let end_ms = (self.processed_samples as f64 / self.sample_rate as f64) * 1000.0;
+            // processed_samples and speech_start_sample always count 16kHz samples (post-resampling)
+            let start_ms = (self.speech_start_sample as f64 / 16000.0) * 1000.0;
+            let end_ms = (self.processed_samples as f64 / 16000.0) * 1000.0;
 
             debug!("VAD flush: Force-ending speech - start={}ms, end={}ms, duration={}ms, samples={}",
                   start_ms, end_ms, end_ms - start_ms, self.current_speech.len());
@@ -235,7 +236,8 @@ impl ContinuousVadProcessor {
                         self.last_logged_state = true;
                     }
                     self.in_speech = true;
-                    self.speech_start_sample = self.processed_samples + (timestamp_ms * self.sample_rate as usize / 1000);
+                    // Use 16000 (VAD processing rate) since processed_samples counts 16kHz samples
+                    self.speech_start_sample = self.processed_samples + (timestamp_ms * 16000 / 1000);
                     self.current_speech.clear();
                 }
                 VadTransition::SpeechEnd { start_timestamp_ms, end_timestamp_ms, samples } => {
