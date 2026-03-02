@@ -265,6 +265,7 @@ pub async fn start_import<R: Runtime>(
     // Reset cancellation flag
     IMPORT_CANCELLED.store(false, Ordering::SeqCst);
 
+    let use_parakeet = provider.as_deref() == Some("parakeet");
     let result = run_import(
         app.clone(),
         source_path,
@@ -274,6 +275,9 @@ pub async fn start_import<R: Runtime>(
         provider,
     )
     .await;
+
+    // Unload the engine after the batch job (success, failure, or cancellation)
+    super::common::unload_engine_after_batch(use_parakeet).await;
 
     // Guard will automatically clear flag on drop
     // No need for manual: IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
