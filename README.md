@@ -145,8 +145,10 @@ Transcribe meetings entirely on your device using **Whisper** or **Parakeet** mo
 
 Import existing audio files to generate transcripts, or enhance to re-transcribe any recorded meeting with a different model or language, all processed locally.
 
+> Contributed by [Jeremi Joslin](https://github.com/jeremi), improved by [Vishnu P S](https://github.com/p-s-vishnu) and [Mohammed Safvan](https://github.com/mohammedsafvan)
+
 <p align="center">
-    <img src="docs/import_enhance.png" width="650" style="border-radius: 10px;" alt="Import and Enhance" />
+    <img src="docs/meetily-export.gif" width="650" style="border-radius: 10px;" alt="Import and Enhance" />
 </p>
 
 ### 🤖 AI-Powered Summaries
