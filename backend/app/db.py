@@ -26,27 +26,26 @@ class DatabaseManager:
         self._init_db()
 
     def _init_db(self):
-        """Initialize the database with legacy approach"""
+        """Initialize the database schema, seed defaults, and validate integrity."""
         try:
-            # Run legacy initialization (handles all table creation)
             logger.info("Initializing database tables...")
-            self._legacy_init_db()
-            
-            # Validate schema integrity
+            self._create_schema()
+
+            logger.info("Seeding default settings...")
+            self._seed_defaults()
+
             logger.info("Validating schema integrity...")
             self.schema_validator.validate_schema()
-            
+
         except Exception as e:
             logger.error(f"Database initialization failed: {str(e)}")
             raise
 
-
-
-    def _legacy_init_db(self):
-        """Legacy database initialization (for backward compatibility)"""
+    def _create_schema(self):
+        """Create all tables and run column migrations."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            
+
             # Create meetings table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS meetings (
@@ -64,7 +63,7 @@ class DatabaseManager:
                 logger.info("Added folder_path column to meetings table")
             except sqlite3.OperationalError:
                 pass  # Column already exists
-            
+
             # Create transcripts table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS transcripts (
@@ -95,7 +94,7 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE transcripts ADD COLUMN duration REAL")
             except sqlite3.OperationalError:
                 pass  # Column already exists
-            
+
             # Create summary_processes table (keeping existing functionality)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS summary_processes (
@@ -141,11 +140,6 @@ class DatabaseManager:
                     ollamaApiKey TEXT
                 )
             """)
-            # Seed local-first defaults on first boot; IGNORE preserves existing user config
-            cursor.execute("""
-                INSERT OR IGNORE INTO settings (id, provider, model, whisperModel)
-                VALUES ('1', 'ollama', 'qwen3.5:4b', 'large-v3-turbo')
-            """)
 
             # Create transcript_settings table
             cursor.execute("""
@@ -162,6 +156,14 @@ class DatabaseManager:
             """)
 
             conn.commit()
+
+    def _seed_defaults(self):
+        """Seed factory defaults on first boot; IGNORE preserves existing user config."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT OR IGNORE INTO settings (id, provider, model, whisperModel)
+                VALUES ('1', 'ollama', 'qwen3.5:4b', 'large-v3-turbo')
+            """)
 
     @asynccontextmanager
     async def _get_connection(self):

@@ -29,7 +29,7 @@ class SchemaValidator:
 
     def _get_expected_schema(self):
         """Get the expected schema from the code"""
-        # This represents the schema defined in _legacy_init_db method
+        # This represents the schema defined in _create_schema method
         return {
             'meetings': [
                 ('id', 'TEXT', 'PRIMARY KEY'),
@@ -97,7 +97,7 @@ class SchemaValidator:
             # Check if table exists
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
             if not cursor.fetchone():
-                logger.warning(f"Table {table_name} does not exist - will be created by legacy init")
+                logger.warning(f"Table {table_name} does not exist - will be created by _create_schema()")
                 return
             
             # Get actual columns
