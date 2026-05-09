@@ -141,6 +141,11 @@ class DatabaseManager:
                     ollamaApiKey TEXT
                 )
             """)
+            # Seed local-first defaults on first boot; IGNORE preserves existing user config
+            cursor.execute("""
+                INSERT OR IGNORE INTO settings (id, provider, model, whisperModel)
+                VALUES ('1', 'ollama', 'qwen3.5:4b', 'large-v3-turbo')
+            """)
 
             # Create transcript_settings table
             cursor.execute("""
@@ -610,7 +615,7 @@ class DatabaseManager:
                         await conn.execute(f"""
                             INSERT INTO settings (id, provider, model, whisperModel, {api_key_name})
                             VALUES (?, ?, ?, ?, ?)
-                        """, ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', api_key))
+                        """, ('1', 'ollama', 'qwen3.5:4b', 'large-v3-turbo', api_key))
                         
                     await conn.commit()
                     logger.info(f"Successfully saved API key for provider: {provider}")
