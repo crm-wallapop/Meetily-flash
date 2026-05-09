@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-const REQUEST_TIMEOUT_DURATION: Duration = Duration::from_secs(300);
+const REQUEST_TIMEOUT_DURATION: Duration = Duration::from_secs(900);
 
 // Generic structure for OpenAI-compatible API chat messages
 #[derive(Debug, Serialize)]
@@ -269,7 +269,7 @@ pub async fn generate_summary(
             result = request_future => {
                 result.map_err(|e| {
                     if e.is_timeout() {
-                        format!("LLM request timed out after 60 seconds")
+                        format!("LLM request timed out after 15 minutes")
                     } else {
                         format!("Failed to send request to LLM: {}", e)
                     }
@@ -282,7 +282,7 @@ pub async fn generate_summary(
     } else {
         request_future.await.map_err(|e| {
             if e.is_timeout() {
-                format!("LLM request timed out after 60 seconds")
+                format!("LLM request timed out after 15 minutes")
             } else {
                 format!("Failed to send request to LLM: {}", e)
             }
