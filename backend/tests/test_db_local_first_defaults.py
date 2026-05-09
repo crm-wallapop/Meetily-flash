@@ -1,7 +1,7 @@
 """
 Tests for fix-local-first-defaults:
-- _legacy_init_db() seeds id='1' with Ollama defaults on fresh install
-- _legacy_init_db() never overwrites an existing id='1' row
+- _create_schema() + _seed_defaults() seeds id='1' with Ollama defaults on fresh install
+- _seed_defaults() never overwrites an existing id='1' row
 - save_api_key() fallback INSERT uses Ollama defaults
 """
 import asyncio
