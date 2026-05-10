@@ -283,10 +283,12 @@ impl WhisperEngine {
 
                 // Enable flash attention for high-end GPUs (Metal on Apple Silicon, CUDA on NVIDIA)
                 // Flash attention provides 20-40% speedup but requires stable GPU drivers
-                let flash_attn_enabled = match (&hardware_profile.gpu_type, &hardware_profile.performance_tier) {
-                    (crate::audio::GpuType::Metal, crate::audio::PerformanceTier::Ultra | crate::audio::PerformanceTier::High) => true,
-                    (crate::audio::GpuType::Cuda, crate::audio::PerformanceTier::Ultra | crate::audio::PerformanceTier::High) => true,
-                    _ => false, // Conservative: disable for other GPU types and lower tiers
+                let flash_attn_enabled = match &hardware_profile.gpu_type {
+                    crate::audio::GpuType::Metal => true,
+                    crate::audio::GpuType::Cuda => true,
+                    // Arc iGPU and other Vulkan devices support fp16 flash attention via ggml kernels
+                    crate::audio::GpuType::Vulkan => true,
+                    _ => false,
                 };
 
                 let context_param = WhisperContextParameters {
@@ -317,7 +319,7 @@ impl WhisperEngine {
                     (crate::audio::GpuType::Metal, false) => "Metal GPU acceleration",
                     (crate::audio::GpuType::Cuda, true) => "CUDA GPU with Flash Attention (Ultra-Fast)",
                     (crate::audio::GpuType::Cuda, false) => "CUDA GPU acceleration",
-                    (crate::audio::GpuType::Vulkan, _) => "Vulkan GPU acceleration",
+                    (crate::audio::GpuType::Vulkan, _) => "Vulkan GPU with Flash Attention",
                     (crate::audio::GpuType::OpenCL, _) => "OpenCL GPU acceleration",
                     (crate::audio::GpuType::None, _) => "CPU processing only",
                 };
@@ -567,11 +569,14 @@ impl WhisperEngine {
         params.set_max_len(200);
         params.set_single_segment(false);
 
-        // Set thread count based on hardware (if supported by whisper.cpp)
-        if let Some(_max_threads) = adaptive_config.max_threads {
-            // Note: whisper.cpp may or may not expose thread control through params
-            // Removed debug log to reduce I/O overhead in transcription hot path
+        if let Some(max_threads) = adaptive_config.max_threads {
+            params.set_n_threads(max_threads as i32);
         }
+        // Limit encoder context to actual audio length: each token spans 320 samples at 16kHz.
+        // Shorter segments use proportionally smaller contexts, cutting encoder work
+        // quadratically (attention is O(n²)). A 5s segment uses ~270 tokens instead of 1500.
+        let audio_ctx = ((audio_data.len() / 320) + 32).min(1500) as i32;
+        params.set_audio_ctx(audio_ctx);
 
         let duration_seconds = audio_data.len() as f64 / 16000.0;
         let is_partial = duration_seconds < 15.0; // Consider chunks under 15s as partial
@@ -690,7 +695,12 @@ impl WhisperEngine {
         // Note: compression_ratio_threshold would be ideal but not available in current whisper-rs
         // This would help detect repetitive outputs: params.set_compression_ratio_threshold(2.4);
 
-        // Duration-based optimization is handled by beam search parameters
+        if let Some(max_threads) = adaptive_config.max_threads {
+            params.set_n_threads(max_threads as i32);
+        }
+        let audio_ctx = ((audio_data.len() / 320) + 32).min(1500) as i32;
+        params.set_audio_ctx(audio_ctx);
+
         let duration_seconds = audio_data.len() as f64 / 16000.0; // Assuming 16kHz
         let is_short_audio = duration_seconds < 1.0;
 

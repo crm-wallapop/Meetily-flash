@@ -206,7 +206,7 @@ impl HardwareProfile {
                     beam_size: 2,  // Balanced
                     temperature: 0.3,
                     use_gpu: self.has_gpu_acceleration,
-                    max_threads: Some(self.cpu_cores.min(4) as usize),
+                    max_threads: Some(self.cpu_cores.min(8) as usize),
                     chunk_size_preference: ChunkSizePreference::Balanced,
                 },
                 PerformanceTier::Low => AdaptiveWhisperConfig {
