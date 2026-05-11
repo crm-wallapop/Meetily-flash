@@ -164,10 +164,34 @@ impl HardwareProfile {
     }
 
     fn has_vulkan_support() -> bool {
-        // Basic Vulkan detection - could be enhanced
-        std::env::var("VULKAN_SDK").is_ok() ||
-        std::path::Path::new("/usr/lib/x86_64-linux-gnu/libvulkan.so").exists() ||
-        std::path::Path::new("/usr/lib/libvulkan.so").exists()
+        // VULKAN_SDK env var is set by the Vulkan SDK installer on all platforms.
+        if std::env::var("VULKAN_SDK").is_ok() {
+            return true;
+        }
+
+        // Windows: vulkan-1.dll is placed in System32 by any GPU driver that supports Vulkan
+        // (AMD, NVIDIA, Intel Arc). Checking this DLL is more reliable than env vars because
+        // the Vulkan SDK is a developer tool and may not be installed on end-user machines.
+        #[cfg(target_os = "windows")]
+        {
+            if std::path::Path::new(r"C:\Windows\System32\vulkan-1.dll").exists() {
+                return true;
+            }
+        }
+
+        // Linux: check for the ICD loader shared library in common distro locations.
+        #[cfg(target_os = "linux")]
+        {
+            if std::path::Path::new("/usr/lib/x86_64-linux-gnu/libvulkan.so.1").exists()
+                || std::path::Path::new("/usr/lib/x86_64-linux-gnu/libvulkan.so").exists()
+                || std::path::Path::new("/usr/lib/libvulkan.so.1").exists()
+                || std::path::Path::new("/usr/lib/libvulkan.so").exists()
+            {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Generate adaptive Whisper configuration based on hardware

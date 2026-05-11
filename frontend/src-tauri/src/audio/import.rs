@@ -548,64 +548,112 @@ async fn run_import<R: Runtime>(
     let mut all_transcripts: Vec<(String, f64, f64)> = Vec::new();
     let mut total_confidence = 0.0f32;
 
-    for (i, segment) in processable_segments.iter().enumerate() {
-        if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-            let _ = std::fs::remove_dir_all(&meeting_folder);
-            return Err(anyhow!("Import cancelled"));
-        }
-
-        let progress = 30 + ((i as f32 / processable_count.max(1) as f32) * 50.0) as u32;
-        let segment_duration_sec = (segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0;
-        emit_progress(
-            &app,
-            "transcribing",
-            progress,
-            &format!(
-                "Transcribing segment {} of {} ({:.1}s)...",
-                i + 1,
-                processable_count,
-                segment_duration_sec
-            ),
-        );
-
-        // Skip very short segments
-        if segment.samples.len() < 1600 {
-            debug!(
-                "Skipping short segment {} with {} samples",
-                i,
-                segment.samples.len()
+    if use_parakeet {
+        // Parakeet is not designed for concurrent use; process sequentially.
+        let engine = parakeet_engine.as_ref().unwrap();
+        for (i, segment) in processable_segments.iter().enumerate() {
+            if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+                let _ = std::fs::remove_dir_all(&meeting_folder);
+                return Err(anyhow!("Import cancelled"));
+            }
+            let progress = 30 + ((i as f32 / processable_count.max(1) as f32) * 50.0) as u32;
+            let segment_duration_sec =
+                (segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0;
+            emit_progress(
+                &app,
+                "transcribing",
+                progress,
+                &format!(
+                    "Transcribing segment {} of {} ({:.1}s)...",
+                    i + 1,
+                    processable_count,
+                    segment_duration_sec
+                ),
             );
-            continue;
-        }
-
-        // Transcribe
-        let (text, conf) = if use_parakeet {
-            let engine = parakeet_engine.as_ref().unwrap();
+            if segment.samples.len() < 1600 {
+                debug!("Skipping short segment {} with {} samples", i, segment.samples.len());
+                continue;
+            }
             let text = engine
                 .transcribe_audio(segment.samples.clone())
                 .await
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32)
-        } else {
-            let engine = whisper_engine.as_ref().unwrap();
-            let (text, conf, _) = engine
-                .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
-                .await
-                .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-            (text, conf)
-        };
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms));
+                total_confidence += 0.9f32;
+            }
+        }
+    } else {
+        // Whisper: run 2 segments concurrently to overlap CPU mel computation for segment N+1
+        // with GPU attention inference for segment N (~20-30% speedup on GPU builds).
+        //
+        // Safety: WhisperContext::create_state() is &self — two tasks may share one
+        // Arc<WhisperContext>. ggml Vulkan serialises GPU queue submissions internally.
+        use futures::stream::{self, StreamExt};
 
-        let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            debug!(
-                "Segment {}/{}: {:.1}s, conf={:.2}, text='{}'",
-                i + 1, processable_count, segment_duration_sec, conf,
-                if trimmed.len() > 80 { let mut end = 80; while !trimmed.is_char_boundary(end) { end -= 1; } &trimmed[..end] } else { trimmed }
+        let engine = whisper_engine.as_ref().unwrap().clone();
+        // Allocate result slots indexed by segment position to preserve ordering.
+        let mut segment_results: Vec<Option<(String, f64, f64, f32)>> =
+            vec![None; processable_count];
+        let mut completed = 0usize;
+
+        // Pre-extract owned data from references so the async closure doesn't
+        // capture a reference with a specific lifetime (rustc "FnOnce not general enough").
+        let owned_segments: Vec<(usize, Vec<f32>, f64, f64)> = processable_segments
+            .iter()
+            .enumerate()
+            .map(|(i, seg)| (i, seg.samples.clone(), seg.start_timestamp_ms, seg.end_timestamp_ms))
+            .collect();
+
+        let mut stream = stream::iter(owned_segments)
+            .map(|(i, samples, start_ms, end_ms)| {
+                let engine = engine.clone();
+                let language = language.clone();
+                async move {
+                    if samples.len() < 1600 {
+                        return Ok::<(usize, Option<(String, f64, f64, f32)>), anyhow::Error>(
+                            (i, None),
+                        );
+                    }
+                    let (text, conf, _) = engine
+                        .transcribe_audio_with_confidence(samples, language)
+                        .await
+                        .map_err(|e| {
+                            anyhow!("Whisper transcription failed on segment {}: {}", i, e)
+                        })?;
+                    Ok((i, Some((text, start_ms, end_ms, conf))))
+                }
+            })
+            .buffer_unordered(2);
+
+        while let Some(result) = stream.next().await {
+            if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+                let _ = std::fs::remove_dir_all(&meeting_folder);
+                return Err(anyhow!("Import cancelled"));
+            }
+            let (idx, entry) = result?;
+            completed += 1;
+            let progress =
+                30 + ((completed as f32 / processable_count.max(1) as f32) * 50.0) as u32;
+            emit_progress(
+                &app,
+                "transcribing",
+                progress,
+                &format!("Transcribing segment {} of {}...", completed, processable_count),
             );
-            all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms));
-            total_confidence += conf;
-        } else {
-            debug!("Segment {}/{}: {:.1}s — empty transcription", i + 1, processable_count, segment_duration_sec);
+            segment_results[idx] = entry;
+        }
+
+        for entry in segment_results {
+            if let Some((text, start_ms, end_ms, conf)) = entry {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    debug!("Segment transcribed: {:.1}s, conf={:.2}", (end_ms - start_ms) / 1000.0, conf);
+                    all_transcripts.push((text, start_ms, end_ms));
+                    total_confidence += conf;
+                }
+            }
         }
     }
 
