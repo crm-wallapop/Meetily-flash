@@ -4,6 +4,18 @@ export interface Message {
   timestamp: string;
 }
 
+// Shape returned by the Tauri get_transcript_history command
+export interface TranscriptHistorySegment {
+  id: string;
+  text: string;
+  audio_start_time: number;
+  audio_end_time: number;
+  duration: number;
+  display_time: string;
+  confidence: number;
+  sequence_id: number;
+}
+
 export interface Transcript {
   id: string;
   text: string;

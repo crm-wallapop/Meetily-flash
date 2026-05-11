@@ -1,19 +1,7 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, ReactNode, MutableRefObject } from 'react';
-import { Transcript, TranscriptUpdate } from '@/types';
-
-// Shape returned by the Rust get_transcript_history command (recording_saver::TranscriptSegment)
-interface TranscriptHistorySegment {
-  id: string;
-  text: string;
-  audio_start_time: number;
-  audio_end_time: number;
-  duration: number;
-  display_time: string;
-  confidence: number;
-  sequence_id: number;
-}
+import { Transcript, TranscriptUpdate, TranscriptHistorySegment } from '@/types';
 import { toast } from 'sonner';
 import { useRecordingState } from './RecordingStateContext';
 import { transcriptService } from '@/services/transcriptService';
@@ -380,7 +368,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
           console.log('[Reload Sync] Recording active after reload, syncing transcript history...');
 
           // Fetch transcript history from backend
-          const history = await transcriptService.getTranscriptHistory() as unknown as TranscriptHistorySegment[];
+          const history = await transcriptService.getTranscriptHistory();
           console.log(`[Reload Sync] Retrieved ${history.length} transcript segments from backend`);
 
           // Convert backend format to frontend Transcript format

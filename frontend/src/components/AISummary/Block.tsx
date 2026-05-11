@@ -8,9 +8,9 @@ interface BlockProps {
   isSelected: boolean;
   onTypeChange: (type: Block['type']) => void;
   onChange: (content: string) => void;
-  onMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
+  onMouseDown: (e: React.MouseEvent<Element>) => void;
   onMouseEnter: () => void;
-  onMouseUp: (e: React.MouseEvent<HTMLDivElement>) => void;
+  onMouseUp: (e: React.MouseEvent<Element>) => void;
   onKeyDown: (e: React.KeyboardEvent) => void;
   onDelete?: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
@@ -238,9 +238,9 @@ export const BlockComponent: React.FC<BlockProps> = ({
           data-block-id={block.id}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          onMouseDown={(e) => onMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}
+          onMouseDown={onMouseDown}
           onMouseEnter={onMouseEnter}
-          onMouseUp={(e) => onMouseUp(e as unknown as React.MouseEvent<HTMLDivElement>)}
+          onMouseUp={onMouseUp}
           onContextMenu={onContextMenu}
           rows={1}
           className={`

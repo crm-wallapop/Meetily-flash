@@ -157,10 +157,31 @@ impl HardwareProfile {
     }
 
     fn has_cuda_support() -> bool {
-        // Check for CUDA environment or libraries
-        std::env::var("CUDA_PATH").is_ok() ||
-        std::env::var("CUDA_HOME").is_ok() ||
-        std::path::Path::new("/usr/local/cuda").exists()
+        // Developer SDK env vars — present when the CUDA toolkit is installed
+        if std::env::var("CUDA_PATH").is_ok() || std::env::var("CUDA_HOME").is_ok() {
+            return true;
+        }
+
+        // Windows: nvcuda.dll is placed in System32 by the NVIDIA display driver,
+        // not just the CUDA SDK, so this works on end-user machines without the SDK.
+        #[cfg(target_os = "windows")]
+        {
+            if std::path::Path::new(r"C:\Windows\System32\nvcuda.dll").exists() {
+                return true;
+            }
+        }
+
+        // Linux: libcuda.so.1 is installed by the NVIDIA driver package (e.g. nvidia-driver).
+        #[cfg(target_os = "linux")]
+        {
+            if std::path::Path::new("/usr/lib/x86_64-linux-gnu/libcuda.so.1").exists()
+                || std::path::Path::new("/usr/lib/libcuda.so.1").exists()
+            {
+                return true;
+            }
+        }
+
+        false
     }
 
     fn has_vulkan_support() -> bool {
