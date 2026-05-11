@@ -120,10 +120,18 @@ pub fn cancel_import() {
 /// making two concurrent WhisperState tasks safe. All other backends (Metal, CUDA,
 /// OpenCL, CPU-only) lack documented multi-state thread-safety guarantees in the
 /// current whisper.cpp version.
+///
+/// N is capped at 2 intentionally. Each concurrent future blocks a tokio worker thread
+/// for the duration of the synchronous `state.full()` C FFI call (5–30 s per segment).
+/// Raising N beyond 2 risks exhausting the async executor on low-core machines and
+/// requires wrapping `state.full()` in `tokio::task::spawn_blocking` first.
 fn whisper_concurrency(gpu_type: &crate::audio::GpuType) -> usize {
     match gpu_type {
         crate::audio::GpuType::Vulkan => 2,
-        _ => 1,
+        crate::audio::GpuType::Metal
+        | crate::audio::GpuType::Cuda
+        | crate::audio::GpuType::OpenCL
+        | crate::audio::GpuType::None => 1,
     }
 }
 
@@ -615,6 +623,9 @@ async fn run_import<R: Runtime>(
             vec![None; processable_count];
         let mut completed = 0usize;
 
+        // Detect hardware once before the stream; GPU type does not change per segment.
+        let concurrency = whisper_concurrency(&crate::audio::HardwareProfile::detect().gpu_type);
+
         // Pre-extract owned data from references so the async closure doesn't
         // capture a reference with a specific lifetime (rustc "FnOnce not general enough").
         let owned_segments: Vec<(usize, Vec<f32>, f64, f64)> = processable_segments
@@ -645,14 +656,17 @@ async fn run_import<R: Runtime>(
                     Ok((i, Some((text, start_ms, end_ms, conf))))
                 }
             })
-            .buffer_unordered(whisper_concurrency(&crate::audio::HardwareProfile::detect().gpu_type));
+            .buffer_unordered(concurrency);
 
         while let Some(result) = stream.next().await {
             if IMPORT_CANCELLED.load(Ordering::SeqCst) {
                 let _ = std::fs::remove_dir_all(&meeting_folder);
                 return Err(anyhow!("Import cancelled"));
             }
-            let (idx, entry) = result?;
+            let (idx, entry) = result.map_err(|e| {
+                let _ = std::fs::remove_dir_all(&meeting_folder);
+                e
+            })?;
             completed += 1;
             let progress =
                 30 + ((completed as f32 / processable_count.max(1) as f32) * 50.0) as u32;
