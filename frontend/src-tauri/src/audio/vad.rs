@@ -489,8 +489,11 @@ mod tests {
 
         println!("Found {} segments with {} progress updates", segments.len(), progress_updates.len());
 
-        // VAD may merge adjacent bursts into fewer segments depending on its
-        // internal silence-gap threshold; at minimum one segment should be detected.
+        // The chunked large-file path preserves VAD state across chunk boundaries,
+        // so the 2000ms redemption window fuses the 12 synthetic bursts into a single
+        // contiguous segment (empirically measured: always returns 1). The assertion
+        // verifies that the large-file path detects speech at all, not that it
+        // counts discrete bursts — that belongs in a dedicated segmentation test.
         assert!(segments.len() >= 1, "Expected at least one speech segment, found {}", segments.len());
 
         // Should have received progress updates

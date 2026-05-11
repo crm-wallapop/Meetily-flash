@@ -281,12 +281,16 @@ impl WhisperEngine {
                 let hardware_profile = crate::audio::HardwareProfile::detect();
                 let adaptive_config = hardware_profile.get_whisper_config();
 
-                // Enable flash attention for high-end GPUs (Metal on Apple Silicon, CUDA on NVIDIA)
-                // Flash attention provides 20-40% speedup but requires stable GPU drivers
+                // Enable flash attention for high-end GPUs (Metal on Apple Silicon, CUDA on NVIDIA).
+                // Flash attention provides 20-40% speedup but requires fp16 support.
+                //
+                // Vulkan: ggml's Vulkan backend checks VK_KHR_shader_float16_int8 at runtime and
+                // falls back to standard attention if fp16 is unavailable. Enabling flash_attn here
+                // is therefore safe for all Vulkan devices; on non-fp16 hardware the flag is
+                // silently ignored by the backend. Verified on Intel Arc iGPU (fp16=1).
                 let flash_attn_enabled = match &hardware_profile.gpu_type {
                     crate::audio::GpuType::Metal => true,
                     crate::audio::GpuType::Cuda => true,
-                    // Arc iGPU and other Vulkan devices support fp16 flash attention via ggml kernels
                     crate::audio::GpuType::Vulkan => true,
                     _ => false,
                 };
@@ -319,7 +323,7 @@ impl WhisperEngine {
                     (crate::audio::GpuType::Metal, false) => "Metal GPU acceleration",
                     (crate::audio::GpuType::Cuda, true) => "CUDA GPU with Flash Attention (Ultra-Fast)",
                     (crate::audio::GpuType::Cuda, false) => "CUDA GPU acceleration",
-                    (crate::audio::GpuType::Vulkan, _) => "Vulkan GPU with Flash Attention",
+                    (crate::audio::GpuType::Vulkan, _) => "Vulkan GPU (Flash Attention requested; backend falls back on non-fp16 devices)",
                     (crate::audio::GpuType::OpenCL, _) => "OpenCL GPU acceleration",
                     (crate::audio::GpuType::None, _) => "CPU processing only",
                 };
@@ -698,6 +702,9 @@ impl WhisperEngine {
         if let Some(max_threads) = adaptive_config.max_threads {
             params.set_n_threads(max_threads as i32);
         }
+        // Limit encoder context to actual audio length: each token spans 320 samples at 16 kHz.
+        // Shorter segments use proportionally smaller contexts, cutting encoder work
+        // quadratically (attention is O(n²)). A 5 s segment uses ~270 tokens instead of 1500.
         let audio_ctx = ((audio_data.len() / 320) + 32).min(1500) as i32;
         params.set_audio_ctx(audio_ctx);
 
