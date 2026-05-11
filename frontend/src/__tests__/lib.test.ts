@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { isOllamaNotInstalledError } from '../lib/utils';
 import {
   getModelIcon,
@@ -158,11 +158,32 @@ describe('getStatusLabel', () => {
 });
 
 // ---------------------------------------------------------------------------
-// loadBetaFeatures — tests server-side path (window === undefined)
+// loadBetaFeatures — localStorage branch (jsdom environment)
 // ---------------------------------------------------------------------------
-describe('loadBetaFeatures (SSR path)', () => {
-  it('returns defaults when window is undefined', () => {
-    // jsdom sets window; simulate Node/SSR by temporarily removing it
+describe('loadBetaFeatures (localStorage path)', () => {
+  beforeEach(() => localStorage.clear());
+
+  it('returns defaults when localStorage is empty', () => {
+    expect(loadBetaFeatures()).toEqual(DEFAULT_BETA_FEATURES);
+  });
+
+  it('returns stored values when present', () => {
+    localStorage.setItem('betaFeatures', JSON.stringify({ importAndRetranscribe: false }));
+    expect(loadBetaFeatures().importAndRetranscribe).toBe(false);
+  });
+
+  it('merges with defaults — missing keys get default values', () => {
+    // Simulate future feature keys missing from an old stored snapshot
+    localStorage.setItem('betaFeatures', JSON.stringify({}));
+    expect(loadBetaFeatures()).toEqual(DEFAULT_BETA_FEATURES);
+  });
+
+  it('falls back to defaults on corrupted JSON', () => {
+    localStorage.setItem('betaFeatures', 'NOT JSON {{}}');
+    expect(loadBetaFeatures()).toEqual(DEFAULT_BETA_FEATURES);
+  });
+
+  it('returns defaults when window is undefined (SSR)', () => {
     const original = globalThis.window;
     // @ts-expect-error intentional deletion for SSR test
     delete globalThis.window;
