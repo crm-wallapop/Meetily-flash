@@ -180,6 +180,7 @@ impl HardwareProfile {
         {
             if std::path::Path::new("/usr/lib/x86_64-linux-gnu/libcuda.so.1").exists()
                 || std::path::Path::new("/usr/lib/libcuda.so.1").exists()
+                || std::path::Path::new("/usr/lib64/libcuda.so.1").exists() // Fedora/RHEL
             {
                 return true;
             }

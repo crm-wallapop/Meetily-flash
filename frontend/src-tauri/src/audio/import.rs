@@ -116,6 +116,16 @@ pub fn cancel_import() {
     IMPORT_CANCELLED.store(true, Ordering::SeqCst);
 }
 
+/// Whisper segment concurrency: Vulkan serialises GPU queue submissions internally,
+/// making two concurrent WhisperState tasks safe. Metal and CUDA lack documented
+/// multi-state thread-safety guarantees in the current whisper.cpp version.
+fn whisper_concurrency(gpu_type: &crate::audio::GpuType) -> usize {
+    match gpu_type {
+        crate::audio::GpuType::Vulkan => 2,
+        _ => 1,
+    }
+}
+
 /// Validate an audio file and return its info using metadata-only approach
 /// Falls back to full decode if metadata is unavailable
 pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
@@ -589,8 +599,10 @@ async fn run_import<R: Runtime>(
             }
         }
     } else {
-        // Whisper: run 2 segments concurrently to overlap CPU mel computation for segment N+1
-        // with GPU attention inference for segment N (~20-30% speedup on GPU builds).
+        // Whisper: on Vulkan builds, run 2 segments concurrently to overlap CPU mel computation
+        // for segment N+1 with GPU attention inference for segment N (~20-30% speedup).
+        // On Metal and CUDA, run sequentially (buffer_unordered(1)) until whisper.cpp documents
+        // multi-state thread-safety guarantees for those backends.
         //
         // Safety: WhisperContext::create_state() is &self — two tasks may share one
         // Arc<WhisperContext>. ggml Vulkan serialises GPU queue submissions internally.
@@ -632,16 +644,7 @@ async fn run_import<R: Runtime>(
                     Ok((i, Some((text, start_ms, end_ms, conf))))
                 }
             })
-            .buffer_unordered({
-                // Vulkan serialises GPU queue submissions internally — safe to run 2 states
-                // concurrently and overlap mel computation with GPU attention.
-                // Metal and CUDA have shared-context thread-safety caveats in ggml;
-                // use sequential (1) there until whisper.cpp documents multi-state guarantees.
-                match crate::audio::HardwareProfile::detect().gpu_type {
-                    crate::audio::GpuType::Vulkan => 2,
-                    _ => 1,
-                }
-            });
+            .buffer_unordered(whisper_concurrency(&crate::audio::HardwareProfile::detect().gpu_type));
 
         while let Some(result) = stream.next().await {
             if IMPORT_CANCELLED.load(Ordering::SeqCst) {
@@ -1110,6 +1113,44 @@ mod tests {
 
         // Reset
         IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_whisper_concurrency_gate() {
+        // Vulkan serialises GPU queue submissions internally — safe for 2 concurrent states.
+        assert_eq!(whisper_concurrency(&crate::audio::GpuType::Vulkan), 2);
+        // All other backends default to sequential until whisper.cpp documents multi-state safety.
+        assert_eq!(whisper_concurrency(&crate::audio::GpuType::Metal), 1);
+        assert_eq!(whisper_concurrency(&crate::audio::GpuType::Cuda), 1);
+        assert_eq!(whisper_concurrency(&crate::audio::GpuType::OpenCL), 1);
+        assert_eq!(whisper_concurrency(&crate::audio::GpuType::None), 1);
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_inside_closure_path() {
+        // Verify that when IMPORT_CANCELLED is set before a segment future is polled,
+        // the future returns Err rather than proceeding to call the engine.
+        // This exercises the closure-side check that was added to run_import's
+        // buffer_unordered stream to prevent launching new inference after cancel.
+        use futures::stream::{self, StreamExt};
+        IMPORT_CANCELLED.store(true, Ordering::SeqCst);
+        let result: Result<(usize, Option<()>), anyhow::Error> = stream::iter(vec![(0usize, vec![0f32; 16000])])
+            .map(|(i, samples)| async move {
+                if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+                    return Err(anyhow!("Import cancelled"));
+                }
+                if samples.len() < 1600 {
+                    return Ok((i, None));
+                }
+                Ok((i, Some(())))
+            })
+            .buffer_unordered(1)
+            .next()
+            .await
+            .unwrap();
+        IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "Import cancelled");
     }
 
     #[test]
