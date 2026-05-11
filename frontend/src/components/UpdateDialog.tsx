@@ -66,8 +66,8 @@ export function UpdateDialog({ open, onOpenChange, updateInfo }: UpdateDialogPro
           setError('Update not available');
           return;
         }
-      } catch (err: any) {
-        setError('Failed to get update: ' + (err.message || 'Unknown error'));
+      } catch (err) {
+        setError('Failed to get update: ' + (err instanceof Error ? err.message : 'Unknown error'));
         return;
       }
     }
@@ -133,11 +133,12 @@ export function UpdateDialog({ open, onOpenChange, updateInfo }: UpdateDialogPro
 
       // Relaunch the app
       await relaunch();
-    } catch (err: any) {
+    } catch (err) {
       console.error('Update failed:', err);
-      setError(err.message || 'Failed to download or install update');
+      const errMsg = err instanceof Error ? err.message : 'Failed to download or install update';
+      setError(errMsg);
       setIsDownloading(false);
-      toast.error('Update failed: ' + (err.message || 'Unknown error'));
+      toast.error('Update failed: ' + errMsg);
     }
   };
 

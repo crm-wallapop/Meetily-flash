@@ -9,17 +9,30 @@ import { cn } from '@/lib/utils';
 import { Download, RefreshCw, BadgeAlert, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
+interface ModelStatus {
+  type: 'not_downloaded' | 'downloading' | 'available' | 'corrupted' | 'error';
+  progress?: number;
+  Error?: string;
+}
+
 interface ModelInfo {
   name: string;
   display_name: string;
-  status: {
-    type: 'not_downloaded' | 'downloading' | 'available' | 'corrupted' | 'error';
-    progress?: number;
-  };
+  status: ModelStatus;
   size_mb: number;
   context_size: number;
   description: string;
   gguf_file: string;
+}
+
+interface DownloadProgressPayload {
+  model: string;
+  progress: number;
+  downloaded_mb?: number;
+  total_mb?: number;
+  speed_mbps?: number;
+  status: 'downloading' | 'completed' | 'error' | 'cancelled';
+  error?: string;
 }
 
 interface DownloadProgressInfo {
@@ -72,7 +85,7 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
     let unlisten: (() => void) | undefined;
 
     const setupListener = async () => {
-      unlisten = await listen('builtin-ai-download-progress', (event: any) => {
+      unlisten = await listen<DownloadProgressPayload>('builtin-ai-download-progress', (event) => {
         const { model, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
 
         // Update percentage progress
@@ -171,7 +184,7 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
                     status: {
                       type: 'error',
                       progress: 0,
-                    } as any,
+                    } satisfies ModelStatus,
                   }
                 : m
             )
@@ -345,7 +358,7 @@ export function BuiltInModelManager({ selectedModel, onModelSelect }: BuiltInMod
                     {(isError || isCorrupted) && (
                       <p className="mb-1 text-xs text-red-600">
                         {isError && typeof model.status === 'object' && 'Error' in model.status
-                          ? (model.status as any).Error
+                          ? model.status.Error
                           : isCorrupted
                           ? 'File is corrupted. Retry download or delete.'
                           : 'An error occurred'}

@@ -192,7 +192,7 @@ export function SummaryGeneratorButtonGroup({
     setIsCheckingModels(true);
     try {
       const endpoint = modelConfig.ollamaEndpoint || null;
-      const models = await invoke('get_ollama_models', { endpoint }) as any[];
+      const models = await invoke<{ name: string }[]>('get_ollama_models', { endpoint });
 
       if (!models || models.length === 0) {
         // No models available, show message and open settings

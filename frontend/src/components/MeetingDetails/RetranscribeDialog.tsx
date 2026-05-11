@@ -221,9 +221,9 @@ export function RetranscribeDialog({
         model: selectedModelDetails?.name || null,
         provider: selectedModelDetails?.provider || null,
       });
-    } catch (err: any) {
+    } catch (err) {
       setIsProcessing(false);
-      const errorMsg = typeof err === 'string' ? err : (err?.message || String(err));
+      const errorMsg = typeof err === 'string' ? err : (err instanceof Error ? err.message : String(err));
       setError(errorMsg);
 
       await Analytics.trackError('enhance_transcript_failed', errorMsg);

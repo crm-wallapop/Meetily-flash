@@ -26,7 +26,7 @@ interface TranscriptRecoveryProps {
   isOpen: boolean;
   onClose: () => void;
   recoverableMeetings: MeetingMetadata[];
-  onRecover: (meetingId: string) => Promise<any>;
+  onRecover: (meetingId: string) => Promise<unknown>;
   onDelete: (meetingId: string) => Promise<void>;
   onLoadPreview: (meetingId: string) => Promise<StoredTranscript[]>;
 }

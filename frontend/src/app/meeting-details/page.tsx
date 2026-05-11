@@ -1,7 +1,7 @@
 "use client"
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { useState, useEffect, useCallback, Suspense } from "react";
-import { Transcript, Summary } from "@/types";
+import { Transcript, Summary, SummaryDataResponse } from "@/types";
 import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
 import Analytics from "@/lib/analytics";
@@ -17,6 +17,24 @@ interface MeetingDetailsResponse {
   updated_at: string;
   transcripts: Transcript[];
   folder_path?: string;
+}
+
+interface OllamaModelInfo {
+  name: string;
+}
+
+interface ModelConfigResponse {
+  provider: string;
+  model: string;
+  whisperModel: string;
+  apiKey?: string | null;
+  ollamaEndpoint?: string | null;
+}
+
+interface SummaryStatusResponse {
+  status: string;
+  data?: unknown;
+  error?: string;
 }
 
 function MeetingDetailsContent() {
@@ -51,8 +69,8 @@ function MeetingDetailsContent() {
   // Check if gemma3:1b model is available in Ollama
   const checkForGemmaModel = useCallback(async (): Promise<boolean> => {
     try {
-      const models = await invoke('get_ollama_models', { endpoint: null }) as any[];
-      const hasGemma = models.some((m: any) => m.name === 'gemma3:1b');
+      const models = await invoke<OllamaModelInfo[]>('get_ollama_models', { endpoint: null });
+      const hasGemma = models.some((m) => m.name === 'gemma3:1b');
       console.log('🔍 Checked for gemma3:1b:', hasGemma);
       return hasGemma;
     } catch (error) {
@@ -81,7 +99,7 @@ function MeetingDetailsContent() {
 
     try {
       // Check what's currently in database
-      const currentConfig = await invoke('api_get_model_config') as any;
+      const currentConfig = await invoke<ModelConfigResponse | null>('api_get_model_config');
 
       // If DB already has a model, use it (never override!)
       if (currentConfig && currentConfig.model) {
@@ -201,9 +219,9 @@ function MeetingDetailsContent() {
 
     const fetchMeetingSummary = async () => {
       try {
-        const summary = await invoke('api_get_summary', {
+        const summary = await invoke<SummaryStatusResponse>('api_get_summary', {
           meetingId: meetingId,
-        }) as any;
+        });
 
         console.log('FETCH SUMMARY: Raw response:', summary);
 
@@ -215,29 +233,31 @@ function MeetingDetailsContent() {
           return;
         }
 
-        const summaryData = summary.data || {};
+        const rawData = summary.data ?? {};
 
         // Parse if it's a JSON string (backend may return double-encoded JSON)
-        let parsedData = summaryData;
-        if (typeof summaryData === 'string') {
+        let parsedData: SummaryDataResponse;
+        if (typeof rawData === 'string') {
           try {
-            parsedData = JSON.parse(summaryData);
+            parsedData = JSON.parse(rawData) as SummaryDataResponse;
           } catch (e) {
             parsedData = {};
           }
+        } else {
+          parsedData = rawData as SummaryDataResponse;
         }
 
         console.log('🔍 FETCH SUMMARY: Parsed data:', parsedData);
 
         // Priority 1: BlockNote JSON format
         if (parsedData.summary_json) {
-          setMeetingSummary(parsedData as any);
+          setMeetingSummary(parsedData as Summary);
           return;
         }
 
         // Priority 2: Markdown format
         if (parsedData.markdown) {
-          setMeetingSummary(parsedData as any);
+          setMeetingSummary(parsedData as Summary);
           return;
         }
 
@@ -250,7 +270,7 @@ function MeetingDetailsContent() {
         const formattedSummary: Summary = {};
 
         // Use section order if available to maintain exact order and handle duplicates
-        const sectionKeys = _section_order || Object.keys(restSummaryData);
+        const sectionKeys = (_section_order as string[] | undefined) || Object.keys(restSummaryData);
 
         console.log('LEGACY FORMAT: Processing sections:', sectionKeys);
 
@@ -262,15 +282,15 @@ function MeetingDetailsContent() {
               typeof section === 'object' &&
               'title' in section &&
               'blocks' in section) {
-              const typedSection = section as { title?: string; blocks?: any[] };
+              const typedSection = section as { title?: string; blocks?: { id?: string; type?: string; content?: string; color?: string }[] };
 
               // Ensure blocks is an array before mapping
               if (Array.isArray(typedSection.blocks)) {
                 formattedSummary[key] = {
                   title: typedSection.title || key,
-                  blocks: typedSection.blocks.map((block: any) => ({
-                    ...block,
-                    // type: 'bullet',
+                  blocks: typedSection.blocks.map((block) => ({
+                    id: block?.id || `block-${Math.random()}`,
+                    type: block?.type || 'bullet',
                     color: 'default',
                     content: block?.content?.trim() || ''
                   }))

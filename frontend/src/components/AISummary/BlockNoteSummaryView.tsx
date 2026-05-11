@@ -34,7 +34,7 @@ export interface BlockNoteSummaryViewRef {
 }
 
 // Format detection helper
-function detectSummaryFormat(data: any): { format: SummaryFormat; data: any } {
+function detectSummaryFormat(data: SummaryDataResponse | Summary | null): { format: SummaryFormat; data: SummaryDataResponse | Summary | null } {
   if (!data) {
     return { format: 'legacy', data: null };
   }
@@ -52,9 +52,10 @@ function detectSummaryFormat(data: any): { format: SummaryFormat; data: any } {
   }
 
   // Priority 3: Legacy JSON
-  const hasLegacyStructure = data.MeetingName || Object.keys(data).some(key =>
-    typeof data[key] === 'object' && data[key]?.title && data[key]?.blocks
-  );
+  const hasLegacyStructure = data.MeetingName || Object.keys(data).some(key => {
+    const val = data[key];
+    return typeof val === 'object' && val !== null && 'title' in val && 'blocks' in val;
+  });
 
   if (hasLegacyStructure) {
     console.log('✅ FORMAT: LEGACY (custom JSON)');
@@ -91,7 +92,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       const loadMarkdown = async () => {
         try {
           console.log('📝 Parsing markdown to BlockNote blocks...');
-          const blocks = await editor.tryParseMarkdownToBlocks(data.markdown);
+          const blocks = await editor.tryParseMarkdownToBlocks((data as SummaryDataResponse).markdown as string);
           editor.replaceBlocks(editor.document, blocks);
           console.log('✅ Markdown parsed successfully');
 
@@ -183,9 +184,10 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
             return markdown;
           }
           // Fallback: if we have the original data with markdown
-          if (data?.markdown) {
+          const dataAsResponse = data as SummaryDataResponse | null;
+          if (dataAsResponse?.markdown) {
             console.log('📝 Using fallback markdown from data');
-            return data.markdown;
+            return dataAsResponse.markdown;
           }
         }
 
@@ -222,7 +224,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       <div className="flex flex-col w-full">
         <div className="w-full">
           <Editor
-            initialContent={data.summary_json}
+            initialContent={(data as SummaryDataResponse | null)?.summary_json as Block[] | undefined}
             onChange={(blocks) => {
               console.log('📝 Editor blocks changed:', blocks.length);
               handleEditorChange(blocks);

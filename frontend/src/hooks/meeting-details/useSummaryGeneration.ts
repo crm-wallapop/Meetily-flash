@@ -10,8 +10,27 @@ import { BuiltInModelInfo } from '@/lib/builtin-ai';
 
 type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
 
+interface MeetingRef {
+  id: string;
+  created_at: string;
+}
+
+interface ProcessTranscriptResponse {
+  process_id: string;
+}
+
+// Shape of data inside a completed/error poll result from api_get_summary
+interface SummaryPollData {
+  MeetingName?: string;
+  meetingName?: string;
+  markdown?: string;
+  summary_json?: unknown[];
+  _section_order?: string[];
+  [key: string]: unknown;
+}
+
 interface UseSummaryGenerationProps {
-  meeting: any;
+  meeting: MeetingRef;
   transcripts: Transcript[];
   modelConfig: ModelConfig;
   isModelConfigLoading: boolean;
@@ -104,7 +123,7 @@ export function useSummaryGeneration({
       });
 
       // Process transcript and get process_id
-      const result = await invokeTauri('api_process_transcript', {
+      const result = await invokeTauri<ProcessTranscriptResponse>('api_process_transcript', {
         text: transcriptText,
         model: modelConfig.provider,
         modelName: modelConfig.model,
@@ -113,7 +132,7 @@ export function useSummaryGeneration({
         overlap: 1000,
         customPrompt: customPrompt,
         templateId: selectedTemplate,
-      }) as any;
+      });
 
       const process_id = result.process_id;
       console.log('Process ID:', process_id);
@@ -128,13 +147,13 @@ export function useSummaryGeneration({
 
           // Reload summary from database (backend has already restored from backup)
           try {
-            const existingSummary = await invokeTauri('api_get_summary', {
+            const existingSummary = await invokeTauri<{ status: string; data?: unknown }>('api_get_summary', {
               meetingId: meeting.id
-            }) as any;
+            });
 
             if (existingSummary?.data) {
               console.log('Restored previous summary after cancellation');
-              setAiSummary(existingSummary.data);
+              setAiSummary(existingSummary.data as Summary);
               setSummaryStatus('completed');
             } else {
               setSummaryStatus('idle');
@@ -156,13 +175,13 @@ export function useSummaryGeneration({
           // If this was a regeneration, try to restore previous summary from database
           if (isRegeneration) {
             try {
-              const existingSummary = await invokeTauri('api_get_summary', {
+              const existingSummary = await invokeTauri<{ status: string; data?: unknown }>('api_get_summary', {
                 meetingId: meeting.id
-              }) as any;
+              });
 
               if (existingSummary?.data) {
                 console.log('Restored previous summary after regeneration failure');
-                setAiSummary(existingSummary.data);
+                setAiSummary(existingSummary.data as Summary);
                 setSummaryStatus('completed');
                 setSummaryError(null);
 
@@ -219,18 +238,19 @@ export function useSummaryGeneration({
 
         // Handle successful completion
         if (pollingResult.status === 'completed' && pollingResult.data) {
-          console.log('Summary generation completed:', pollingResult.data);
+          const completedData = pollingResult.data as SummaryPollData;
+          console.log('Summary generation completed:', completedData);
 
           // Update meeting title if available
-          const meetingName = pollingResult.data.MeetingName || pollingResult.meetingName;
+          const meetingName = completedData.MeetingName || completedData.meetingName;
           if (meetingName) {
-            updateMeetingTitle(meetingName);
+            updateMeetingTitle(meetingName as string);
           }
 
           // Check if backend returned markdown format (new flow)
-          if (pollingResult.data.markdown) {
+          if (completedData.markdown) {
             console.log('Received markdown format from backend');
-            setAiSummary({ markdown: pollingResult.data.markdown } as any);
+            setAiSummary({ markdown: completedData.markdown } as unknown as Summary);
             setSummaryStatus('completed');
 
             // Show success toast
@@ -252,8 +272,11 @@ export function useSummaryGeneration({
           }
 
           // Legacy format handling
-          const summarySections = Object.entries(pollingResult.data).filter(([key]) => key !== 'MeetingName');
-          const allEmpty = summarySections.every(([, section]) => !(section as any).blocks || (section as any).blocks.length === 0);
+          const summarySections = Object.entries(completedData).filter(([key]) => key !== 'MeetingName');
+          const allEmpty = summarySections.every(([, section]) => {
+            const s = section as { blocks?: unknown[] } | null;
+            return !s || !s.blocks || s.blocks.length === 0;
+          });
 
           if (allEmpty) {
             console.error('Summary completed but all sections empty');
@@ -271,24 +294,25 @@ export function useSummaryGeneration({
           }
 
           // Remove MeetingName from data before formatting
-          const { MeetingName, ...summaryData } = pollingResult.data;
+          const { MeetingName, ...summaryData } = completedData;
 
           // Format legacy summary data
           const formattedSummary: Summary = {};
-          const sectionKeys = pollingResult.data._section_order || Object.keys(summaryData);
+          const sectionKeys = (completedData._section_order as string[] | undefined) || Object.keys(summaryData);
 
           for (const key of sectionKeys) {
             try {
               const section = summaryData[key];
               if (section && typeof section === 'object' && 'title' in section && 'blocks' in section) {
-                const typedSection = section as { title?: string; blocks?: any[] };
+                const typedSection = section as { title?: string; blocks?: { id?: string; type?: string; content?: string; color?: string }[] };
 
                 if (Array.isArray(typedSection.blocks)) {
                   formattedSummary[key] = {
                     title: typedSection.title || key,
-                    blocks: typedSection.blocks.map((block: any) => ({
-                      ...block,
-                      color: 'default',
+                    blocks: typedSection.blocks.map((block) => ({
+                      id: block?.id || `block-${Math.random()}`,
+                      type: block?.type || 'paragraph',
+                      color: block?.color || 'default',
                       content: block?.content?.trim() || ''
                     }))
                   };
@@ -421,7 +445,7 @@ export function useSummaryGeneration({
     if (modelConfig.provider === 'ollama') {
       try {
         const endpoint = modelConfig.ollamaEndpoint || null;
-        const models = await invokeTauri('get_ollama_models', { endpoint }) as any[];
+        const models = await invokeTauri<{ name: string }[]>('get_ollama_models', { endpoint });
 
         if (!models || models.length === 0) {
           toast.error(

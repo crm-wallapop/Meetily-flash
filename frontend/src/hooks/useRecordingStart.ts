@@ -64,7 +64,7 @@ export function useRecordingStart(
   // Check if any model is currently downloading
   const checkIfModelDownloading = useCallback(async (): Promise<boolean> => {
     try {
-      const models = await invoke<any[]>('parakeet_get_available_models');
+      const models = await invoke<{ name: string; status: { Downloading?: unknown } | string }[]>('parakeet_get_available_models');
       const isDownloading = models.some(m =>
         m.status && (
           typeof m.status === 'object'

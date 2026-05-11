@@ -12,6 +12,15 @@ import { SummaryModelSettings } from '@/components/SummaryModelSettings';
 import { BetaSettings } from '@/components/BetaSettings';
 import { useConfig } from '@/contexts/ConfigContext';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { TranscriptModelProps } from '@/components/TranscriptSettings';
+
+type TranscriptProvider = TranscriptModelProps['provider'];
+
+interface TranscriptConfigResponse {
+  provider: string;
+  model: string;
+  apiKey?: string | null;
+}
 
 // Tabs configuration (constant)
 const TABS = [
@@ -35,11 +44,11 @@ export default function SettingsPage() {
   useEffect(() => {
     const loadTranscriptConfig = async () => {
       try {
-        const config = await invoke('api_get_transcript_config') as any;
+        const config = await invoke<TranscriptConfigResponse>('api_get_transcript_config');
         if (config) {
           console.log('Loaded saved transcript config:', config);
           setTranscriptModelConfig({
-            provider: config.provider || 'localWhisper',
+            provider: (config.provider || 'localWhisper') as TranscriptProvider,
             model: config.model || 'large-v3',
             apiKey: config.apiKey || null
           });

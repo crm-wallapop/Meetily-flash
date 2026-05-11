@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { Summary, SummaryResponse } from '@/types';
+import { Summary, SummaryResponse, Transcript, TranscriptSegmentData } from '@/types';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
@@ -18,6 +18,15 @@ import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
 import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperations';
 import { useConfig } from '@/contexts/ConfigContext';
 
+interface MeetingWithTranscripts {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  transcripts: Transcript[];
+  folder_path?: string;
+}
+
 export default function PageContent({
   meeting,
   summaryData,
@@ -33,14 +42,14 @@ export default function PageContent({
   loadedCount,
   onLoadMore,
 }: {
-  meeting: any;
+  meeting: MeetingWithTranscripts;
   summaryData: Summary | null;
   shouldAutoGenerate?: boolean;
   onAutoGenerateComplete?: () => void;
   onMeetingUpdated?: () => Promise<void>;
   onRefetchTranscripts?: () => Promise<void>;
   // Pagination props
-  segments?: any[];
+  segments?: TranscriptSegmentData[];
   hasMore?: boolean;
   isLoadingMore?: boolean;
   totalCount?: number;
