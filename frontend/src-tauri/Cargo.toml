@@ -100,6 +100,7 @@ nnnoiseless = "0.5"
 # NOTE: whisper-rs is declared in platform-specific sections below (macOS/Windows/Linux)
 # to ensure correct GPU features are enabled per platform
 futures-util = "0.3"
+futures = "0.3"
 silero_rs = { git = "https://github.com/emotechlab/silero-rs", rev = "26a6460", package = "silero" }
 
 # Parakeet (ONNX-based fast transcription) dependencies
@@ -201,7 +202,6 @@ infer = "0.15"
 criterion = { version = "0.5.1", features = ["async_tokio"] }
 memory-stats = "1.0"
 strsim = "0.10.0"
-futures = "0.3.31"
 tracing-subscriber = "0.3.16"
 
 [patch.crates-io]
