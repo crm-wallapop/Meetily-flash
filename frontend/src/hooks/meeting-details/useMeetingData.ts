@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Transcript, Summary, BlockNoteBlock } from '@/types';
+import { Transcript, Summary, SummaryDataResponse, BlockNoteBlock } from '@/types';
 import { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { CurrentMeeting, useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
@@ -24,7 +24,7 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
   const [meetingTitle, setMeetingTitle] = useState(meeting.title || '+ New Call');
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [isTitleDirty, setIsTitleDirty] = useState(false);
-  const [aiSummary, setAiSummary] = useState<Summary | null>(summaryData);
+  const [aiSummary, setAiSummary] = useState<Summary | SummaryDataResponse | null>(summaryData);
   const [isSaving, setIsSaving] = useState(false);
   const [, setIsSummaryDirty] = useState(false);
   const [, setError] = useState<string>('');

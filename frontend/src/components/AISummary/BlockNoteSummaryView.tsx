@@ -145,7 +145,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
 
       onSave({
         markdown: markdown,
-        summary_json: currentBlocks as unknown as BlockNoteBlock[]
+        summary_json: currentBlocks as BlockNoteBlock[]
       });
 
       setIsDirty(false);
