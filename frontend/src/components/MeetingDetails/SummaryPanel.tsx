@@ -1,6 +1,6 @@
 "use client";
 
-import { Summary, SummaryResponse, Transcript } from '@/types';
+import { Summary, SummaryResponse, Transcript, BlockNoteBlock } from '@/types';
 import { EditableTitle } from '@/components/EditableTitle';
 import { BlockNoteSummaryView, BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { EmptyStateSummary } from '@/components/EmptyStateSummary';
@@ -37,7 +37,7 @@ interface SummaryPanelProps {
   onStopGeneration: () => void;
   customPrompt: string;
   summaryResponse: SummaryResponse | null;
-  onSaveSummary: (summary: Summary | { markdown?: string; summary_json?: any[] }) => Promise<void>;
+  onSaveSummary: (summary: Summary | { markdown?: string; summary_json?: BlockNoteBlock[] }) => Promise<void>;
   onSummaryChange: (summary: Summary) => void;
   onDirtyChange: (isDirty: boolean) => void;
   summaryError: string | null;

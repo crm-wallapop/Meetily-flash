@@ -39,9 +39,9 @@ export function About() {
             } else {
                 toast.success('You are running the latest version');
             }
-        } catch (error: any) {
+        } catch (error) {
             console.error('Failed to check for updates:', error);
-            toast.error('Failed to check for updates: ' + (error.message || 'Unknown error'));
+            toast.error('Failed to check for updates: ' + (error instanceof Error ? error.message : 'Unknown error'));
         } finally {
             setIsChecking(false);
         }

@@ -1,12 +1,18 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Transcript, Summary } from '@/types';
+import { Transcript, Summary, BlockNoteBlock } from '@/types';
 import { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { CurrentMeeting, useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 
+interface MeetingRef {
+  id: string;
+  title: string;
+  transcripts: Transcript[];
+}
+
 interface UseMeetingDataProps {
-  meeting: any;
+  meeting: MeetingRef;
   summaryData: Summary | null;
   onMeetingUpdated?: () => Promise<void>;
 }
@@ -73,7 +79,7 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
     }
   }, [meeting.id, meetingTitle, sidebarMeetings, setMeetings, setCurrentMeeting]);
 
-  const handleSaveSummary = useCallback(async (summary: Summary | { markdown?: string; summary_json?: any[] }) => {
+  const handleSaveSummary = useCallback(async (summary: Summary | { markdown?: string; summary_json?: BlockNoteBlock[] }) => {
     console.log('📄 handleSaveSummary called with:', {
       hasMarkdown: 'markdown' in summary,
       hasSummaryJson: 'summary_json' in summary,
@@ -81,7 +87,7 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
     });
 
     try {
-      let formattedSummary: any;
+      let formattedSummary: Summary | { markdown?: string; summary_json?: BlockNoteBlock[] } | { MeetingName: string; MeetingNotes: { sections: { title: string; blocks: { id: string; type: string; content: string; color: string }[] }[] } };
 
       // Check if it's the new BlockNote format
       if ('markdown' in summary || 'summary_json' in summary) {

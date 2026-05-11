@@ -351,7 +351,7 @@ export class Analytics {
     try {
       const { Store } = await import('@tauri-apps/plugin-store');
       const store = await Store.load('analytics.json');
-      const features = await store.get<Record<string, any>>('features_used') || {};
+      const features = await store.get<Record<string, { first_used: string; use_count: number }>>('features_used') || {};
       return !!features[featureName];
     } catch (error) {
       console.error(`Failed to check feature usage for ${featureName}:`, error);
@@ -363,7 +363,7 @@ export class Analytics {
     try {
       const { Store } = await import('@tauri-apps/plugin-store');
       const store = await Store.load('analytics.json');
-      const features = await store.get<Record<string, any>>('features_used') || {};
+      const features = await store.get<Record<string, { first_used: string; use_count: number }>>('features_used') || {};
 
       if (!features[featureName]) {
         features[featureName] = {
@@ -461,7 +461,7 @@ export class Analytics {
   }
 
   // Feature usage tracking with platform info
-  static async trackFeatureUsedEnhanced(featureName: string, properties?: Record<string, any>): Promise<void> {
+  static async trackFeatureUsedEnhanced(featureName: string, properties?: Record<string, unknown>): Promise<void> {
     if (!this.initialized) return;
 
     try {
@@ -490,7 +490,7 @@ export class Analytics {
   }
 
   // Copy tracking with frequency
-  static async trackCopy(copyType: 'transcript' | 'summary', properties?: Record<string, any>): Promise<void> {
+  static async trackCopy(copyType: 'transcript' | 'summary', properties?: Record<string, unknown>): Promise<void> {
     if (!this.initialized) return;
 
     try {
@@ -500,7 +500,7 @@ export class Analytics {
 
       // Get today's date
       const today = new Date().toISOString().split('T')[0];
-      const copyCounts = await store.get<Record<string, any>>('copy_counts') || {};
+      const copyCounts = await store.get<Record<string, Record<string, number>>>('copy_counts') || {};
       const todayCounts = copyCounts[today] || {};
       const copyCount = todayCounts[copyType] || 0;
 

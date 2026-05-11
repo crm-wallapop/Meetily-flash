@@ -452,7 +452,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   // Check if any models are currently downloading (for re-entry)
   const checkActiveDownloads = async () => {
     try {
-      const models = await invoke<any[]>('parakeet_get_available_models');
+      const models = await invoke<{ name: string; status: { Downloading?: unknown } | string }[]>('parakeet_get_available_models');
       const isDownloading = models.some(m => m.status && (typeof m.status === 'object' ? 'Downloading' in m.status : m.status === 'Downloading'));
       
       if (isDownloading) {

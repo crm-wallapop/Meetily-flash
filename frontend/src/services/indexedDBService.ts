@@ -3,6 +3,7 @@
  * Provides browser-based persistence for meeting transcripts and metadata
  * to enable recovery after app crashes or unexpected closures.
  */
+import { TranscriptUpdate } from '@/types';
 
 // Database schema interfaces
 export interface MeetingMetadata {
@@ -26,7 +27,7 @@ export interface StoredTranscript {
   audio_start_time?: number;  // Recording-relative start time in seconds
   audio_end_time?: number;    // Recording-relative end time in seconds
   duration?: number;          // Duration in seconds
-  [key: string]: any;         // Allow additional fields from TranscriptUpdate
+  [key: string]: unknown;     // Allow additional fields from TranscriptUpdate
 }
 
 class IndexedDBService {
@@ -227,14 +228,15 @@ class IndexedDBService {
   /**
    * Save a transcript segment
    */
-  async saveTranscript(meetingId: string, transcript: any): Promise<void> {
+  async saveTranscript(meetingId: string, transcript: TranscriptUpdate): Promise<void> {
     try {
       if (!this.db) await this.init();
 
       const storedTranscript: StoredTranscript = {
         ...transcript,
         meetingId,
-        storedAt: Date.now()
+        storedAt: Date.now(),
+        sequenceId: transcript.sequence_id,
       };
 
       const transaction = this.db!.transaction(['transcripts', 'meetings'], 'readwrite');

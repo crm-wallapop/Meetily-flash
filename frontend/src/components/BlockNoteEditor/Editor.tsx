@@ -26,10 +26,11 @@ export default function Editor({ initialContent, onChange, editable = true }: Ed
 
   console.log('📝 EDITOR: BlockNote editor created successfully');
 
-  // Expose blocksToMarkdown method
-  (editor as any).blocksToMarkdownLossy = async (blocks: Block[]) => {
+  // Wrap blocksToMarkdownLossy to swallow conversion errors gracefully
+  const originalBlocksToMarkdown = editor.blocksToMarkdownLossy.bind(editor);
+  editor.blocksToMarkdownLossy = async (blocks: Block[]) => {
     try {
-      return await editor.blocksToMarkdownLossy(blocks);
+      return await originalBlocksToMarkdown(blocks);
     } catch (error) {
       console.error('❌ EDITOR: Failed to convert blocks to markdown:', error);
       return '';

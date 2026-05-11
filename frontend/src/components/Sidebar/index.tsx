@@ -115,20 +115,21 @@ const Sidebar: React.FC = () => {
       }
 
       try {
-        const data = await invoke('api_get_model_config') as any;
+        const data = await invoke<ModelConfig>('api_get_model_config');
         if (data && data.provider !== null) {
+          let merged: ModelConfig = { ...data };
           // Fetch API key if not included and provider requires it
           if (data.provider !== 'ollama' && !data.apiKey) {
             try {
-              const apiKeyData = await invoke('api_get_api_key', {
+              const apiKeyData = await invoke<string>('api_get_api_key', {
                 provider: data.provider
-              }) as string;
-              data.apiKey = apiKeyData;
+              });
+              merged = { ...merged, apiKey: apiKeyData };
             } catch (err) {
               console.error('Failed to fetch API key:', err);
             }
           }
-          setModelConfig(data);
+          setModelConfig(merged);
         }
       } catch (error) {
         console.error('Failed to fetch model config:', error);
@@ -149,7 +150,7 @@ const Sidebar: React.FC = () => {
       }
 
       try {
-        const data = await invoke('api_get_transcript_config') as any;
+        const data = await invoke<TranscriptModelProps>('api_get_transcript_config');
         if (data && data.provider !== null) {
           setTranscriptModelConfig(data);
         }
@@ -434,13 +435,13 @@ const Sidebar: React.FC = () => {
 
   // Expose setShowModelSettings to window for Rust tray to call
   useEffect(() => {
-    (window as any).openSettings = () => {
+    (window as Window & { openSettings?: () => void }).openSettings = () => {
       setShowModelSettings(true);
     };
 
     // Cleanup on unmount
     return () => {
-      delete (window as any).openSettings;
+      delete (window as Window & { openSettings?: () => void }).openSettings;
     };
   }, []);
 

@@ -14,11 +14,11 @@ import {
   SelectGroup,
   SelectLabel,
 } from '@/components/ui/select';
-import { Control } from 'react-hook-form'; // Import Control type
+import { Control, FieldValues } from 'react-hook-form'; // Import Control type
 type ISelectItemProps = {
   name: string;
   placeholder: string;
-  control: Control<any>;
+  control: Control<FieldValues>;
   label: string;
   formStyle: string;
   formLabelStyle: string;

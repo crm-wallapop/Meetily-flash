@@ -416,13 +416,13 @@ export function useRecordingStop(
   });
 
   useEffect(() => {
-    (window as any).handleRecordingStop = (callApi: boolean = true) => {
+    (window as Window & { handleRecordingStop?: (callApi?: boolean) => void }).handleRecordingStop = (callApi: boolean = true) => {
       handleRecordingStopRef.current(callApi);
     };
 
     // Cleanup on unmount
     return () => {
-      delete (window as any).handleRecordingStop;
+      delete (window as Window & { handleRecordingStop?: (callApi?: boolean) => void }).handleRecordingStop;
     };
   }, []);
 

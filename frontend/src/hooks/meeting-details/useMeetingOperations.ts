@@ -3,7 +3,7 @@ import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 
 interface UseMeetingOperationsProps {
-  meeting: any;
+  meeting: { id: string };
 }
 
 export function useMeetingOperations({

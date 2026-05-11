@@ -6,12 +6,12 @@ import {
   FormDescription,
 } from '@/components/ui/form';
 import { Switch } from '@/components/ui/switch';
-import { Control } from 'react-hook-form'; // Import Control type
+import { Control, FieldValues } from 'react-hook-form'; // Import Control type
 
 type IInpuItemProps = {
   name: string;
   placeholder?: string;
-  control: Control<any>; // Add control prop of type Control
+  control: Control<FieldValues>; // Add control prop of type Control
   label?: string;
   value?: string | number;
   formStyle?: string;

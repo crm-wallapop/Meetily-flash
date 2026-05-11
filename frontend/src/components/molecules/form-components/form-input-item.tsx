@@ -7,13 +7,13 @@ import {
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
 import { Eye, EyeOff } from 'lucide-react';
-import { Control } from 'react-hook-form'; // Import Control type
+import { Control, FieldValues } from 'react-hook-form'; // Import Control type
 import { Textarea } from '@/components/ui/textarea';
 
 type IInpuItemProps = {
   name: string;
   placeholder?: string;
-  control: Control<any>; // Add control prop of type Control
+  control: Control<FieldValues>; // Add control prop of type Control
   type:
     | 'button'
     | 'checkbox'
