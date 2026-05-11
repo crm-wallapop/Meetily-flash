@@ -615,6 +615,9 @@ async fn run_import<R: Runtime>(
                 let engine = engine.clone();
                 let language = language.clone();
                 async move {
+                    if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+                        return Err(anyhow!("Import cancelled"));
+                    }
                     if samples.len() < 1600 {
                         return Ok::<(usize, Option<(String, f64, f64, f32)>), anyhow::Error>(
                             (i, None),
@@ -629,7 +632,16 @@ async fn run_import<R: Runtime>(
                     Ok((i, Some((text, start_ms, end_ms, conf))))
                 }
             })
-            .buffer_unordered(2);
+            .buffer_unordered({
+                // Vulkan serialises GPU queue submissions internally — safe to run 2 states
+                // concurrently and overlap mel computation with GPU attention.
+                // Metal and CUDA have shared-context thread-safety caveats in ggml;
+                // use sequential (1) there until whisper.cpp documents multi-state guarantees.
+                match crate::audio::HardwareProfile::detect().gpu_type {
+                    crate::audio::GpuType::Vulkan => 2,
+                    _ => 1,
+                }
+            });
 
         while let Some(result) = stream.next().await {
             if IMPORT_CANCELLED.load(Ordering::SeqCst) {
