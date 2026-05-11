@@ -1076,8 +1076,8 @@ pub async fn is_import_in_progress_command() -> bool {
 mod tests {
     use super::*;
 
-    // Serialises tests that mutate the process-global IMPORT_CANCELLED flag so they
-    // do not race when the harness runs tests in parallel threads.
+    /// Serialises tests that mutate `IMPORT_CANCELLED`. Acquire this lock before
+    /// reading or writing that flag; reset the flag to `false` at entry under the lock.
     static CANCEL_FLAG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -1141,6 +1141,7 @@ mod tests {
         // integration test would require mocking WhisperEngine).
         use futures::stream::{self, StreamExt};
         let _lock = CANCEL_FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        IMPORT_CANCELLED.store(false, Ordering::SeqCst); // defensive reset in case a prior test panicked under the lock
         IMPORT_CANCELLED.store(true, Ordering::SeqCst);
         let result: Result<(usize, Option<()>), anyhow::Error> = stream::iter(vec![(0usize, vec![0f32; 16000])])
             .map(|(i, samples)| async move {
