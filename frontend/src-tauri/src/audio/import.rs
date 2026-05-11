@@ -117,8 +117,9 @@ pub fn cancel_import() {
 }
 
 /// Whisper segment concurrency: Vulkan serialises GPU queue submissions internally,
-/// making two concurrent WhisperState tasks safe. Metal and CUDA lack documented
-/// multi-state thread-safety guarantees in the current whisper.cpp version.
+/// making two concurrent WhisperState tasks safe. All other backends (Metal, CUDA,
+/// OpenCL, CPU-only) lack documented multi-state thread-safety guarantees in the
+/// current whisper.cpp version.
 fn whisper_concurrency(gpu_type: &crate::audio::GpuType) -> usize {
     match gpu_type {
         crate::audio::GpuType::Vulkan => 2,
@@ -601,8 +602,8 @@ async fn run_import<R: Runtime>(
     } else {
         // Whisper: on Vulkan builds, run 2 segments concurrently to overlap CPU mel computation
         // for segment N+1 with GPU attention inference for segment N (~20-30% speedup).
-        // On Metal and CUDA, run sequentially (buffer_unordered(1)) until whisper.cpp documents
-        // multi-state thread-safety guarantees for those backends.
+        // All other backends (Metal, CUDA, OpenCL, CPU-only) run sequentially
+        // (buffer_unordered(1)) until whisper.cpp documents multi-state thread-safety guarantees.
         //
         // Safety: WhisperContext::create_state() is &self — two tasks may share one
         // Arc<WhisperContext>. ggml Vulkan serialises GPU queue submissions internally.
@@ -1075,6 +1076,10 @@ pub async fn is_import_in_progress_command() -> bool {
 mod tests {
     use super::*;
 
+    // Serialises tests that mutate the process-global IMPORT_CANCELLED flag so they
+    // do not race when the harness runs tests in parallel threads.
+    static CANCEL_FLAG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_audio_extensions() {
         assert!(AUDIO_EXTENSIONS.contains(&"mp4"));
@@ -1103,6 +1108,7 @@ mod tests {
 
     #[test]
     fn test_cancellation_flag() {
+        let _lock = CANCEL_FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         IMPORT_CANCELLED.store(false, Ordering::SeqCst);
         IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
 
@@ -1130,9 +1136,11 @@ mod tests {
     async fn test_cancellation_inside_closure_path() {
         // Verify that when IMPORT_CANCELLED is set before a segment future is polled,
         // the future returns Err rather than proceeding to call the engine.
-        // This exercises the closure-side check that was added to run_import's
-        // buffer_unordered stream to prevent launching new inference after cancel.
+        // This exercises the closure-side check pattern from run_import's buffer_unordered
+        // stream. It tests the pattern directly rather than the production closure (a full
+        // integration test would require mocking WhisperEngine).
         use futures::stream::{self, StreamExt};
+        let _lock = CANCEL_FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         IMPORT_CANCELLED.store(true, Ordering::SeqCst);
         let result: Result<(usize, Option<()>), anyhow::Error> = stream::iter(vec![(0usize, vec![0f32; 16000])])
             .map(|(i, samples)| async move {
