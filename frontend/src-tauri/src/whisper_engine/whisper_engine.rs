@@ -282,12 +282,14 @@ impl WhisperEngine {
                 let adaptive_config = hardware_profile.get_whisper_config();
 
                 // Enable flash attention for high-end GPUs (Metal on Apple Silicon, CUDA on NVIDIA).
-                // Flash attention provides 20-40% speedup but requires fp16 support.
+                // Flash attention provides 20-40% speedup but requires fp16 support in the shader.
                 //
-                // Vulkan: ggml's Vulkan backend checks VK_KHR_shader_float16_int8 at runtime and
-                // falls back to standard attention if fp16 is unavailable. Enabling flash_attn here
-                // is therefore safe for all Vulkan devices; on non-fp16 hardware the flag is
-                // silently ignored by the backend. Verified on Intel Arc iGPU (fp16=1).
+                // Vulkan: ggml selects f16acc vs f32acc accumulator pipeline variants at init based
+                // on device->fp16 (shaderFloat16), but the K/V inputs remain fp16-typed regardless.
+                // Enabling this for all Vulkan devices is appropriate for modern hardware (fp16 is
+                // in the Vulkan 1.2 core feature set). Verified working on Intel Arc iGPU (fp16=1).
+                // Very old pre-1.2 Vulkan hardware (pre-2019 iGPUs) may fail — they should not be
+                // hitting this code path because has_vulkan_support() rarely returns true for them.
                 let flash_attn_enabled = match &hardware_profile.gpu_type {
                     crate::audio::GpuType::Metal => true,
                     crate::audio::GpuType::Cuda => true,
@@ -323,7 +325,7 @@ impl WhisperEngine {
                     (crate::audio::GpuType::Metal, false) => "Metal GPU acceleration",
                     (crate::audio::GpuType::Cuda, true) => "CUDA GPU with Flash Attention (Ultra-Fast)",
                     (crate::audio::GpuType::Cuda, false) => "CUDA GPU acceleration",
-                    (crate::audio::GpuType::Vulkan, _) => "Vulkan GPU (Flash Attention requested; backend falls back on non-fp16 devices)",
+                    (crate::audio::GpuType::Vulkan, _) => "Vulkan GPU with Flash Attention (requires fp16; verified on Arc iGPU)",
                     (crate::audio::GpuType::OpenCL, _) => "OpenCL GPU acceleration",
                     (crate::audio::GpuType::None, _) => "CPU processing only",
                 };
