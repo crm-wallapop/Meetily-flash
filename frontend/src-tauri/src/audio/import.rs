@@ -548,9 +548,13 @@ async fn run_import<R: Runtime>(
     let mut all_transcripts: Vec<(String, f64, f64)> = Vec::new();
     let mut total_confidence = 0.0f32;
 
-    if use_parakeet {
+    // Engines are None when total_segments == 0; skip transcription entirely
+    // so we fall through to saving an empty-transcript meeting as intended.
+    if processable_count == 0 {
+        // nothing to transcribe
+    } else if use_parakeet {
         // Parakeet is not designed for concurrent use; process sequentially.
-        let engine = parakeet_engine.as_ref().unwrap();
+        let engine = parakeet_engine.as_ref().ok_or_else(|| anyhow!("Parakeet engine not initialised"))?;
         for (i, segment) in processable_segments.iter().enumerate() {
             if IMPORT_CANCELLED.load(Ordering::SeqCst) {
                 let _ = std::fs::remove_dir_all(&meeting_folder);
@@ -592,7 +596,7 @@ async fn run_import<R: Runtime>(
         // Arc<WhisperContext>. ggml Vulkan serialises GPU queue submissions internally.
         use futures::stream::{self, StreamExt};
 
-        let engine = whisper_engine.as_ref().unwrap().clone();
+        let engine = whisper_engine.as_ref().ok_or_else(|| anyhow!("Whisper engine not initialised"))?.clone();
         // Allocate result slots indexed by segment position to preserve ordering.
         let mut segment_results: Vec<Option<(String, f64, f64, f32)>> =
             vec![None; processable_count];
