@@ -157,7 +157,11 @@ impl HardwareProfile {
     }
 
     fn has_cuda_support() -> bool {
-        // Developer SDK env vars — present when the CUDA toolkit is installed
+        // SDK env vars indicate the CUDA toolkit is installed.
+        // Skipped on Windows: the SDK installer sets CUDA_PATH even on machines
+        // without an NVIDIA GPU; nvcuda.dll (placed by the display driver) is
+        // the authoritative runtime indicator on Windows.
+        #[cfg(not(target_os = "windows"))]
         if std::env::var("CUDA_PATH").is_ok() || std::env::var("CUDA_HOME").is_ok() {
             return true;
         }
