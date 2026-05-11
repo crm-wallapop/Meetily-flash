@@ -476,14 +476,17 @@ mod tests {
     #[test]
     fn test_calculate_buffer_timeout_bluetooth() {
         // AirPods: 3840 frames at 48kHz = 80ms base
-        // With 2x headroom = 160ms
+        // With 2x headroom ≈ 160ms (fp arithmetic may produce 159.9…ms)
         // Should clamp to 80-200ms range
         let timeout = calculate_buffer_timeout(
             InputDeviceKind::Bluetooth,
             3840,
             48000,
         );
-        assert_eq!(timeout, Duration::from_millis(160));
+        assert!(
+            timeout >= Duration::from_millis(159) && timeout <= Duration::from_millis(161),
+            "Expected ~160ms, got {:?}", timeout
+        );
     }
 
     #[test]
