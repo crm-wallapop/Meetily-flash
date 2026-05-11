@@ -174,10 +174,12 @@ whisper-rs = { version = "0.16.0", features = ["raw-api", "metal", "coreml"] }
 
 # Windows-specific dependencies
 # Default: CPU-only build (AVX2 auto-detected at build time)
-# Vulkan GPU acceleration is deferred — whisper-rs-sys 0.15.0 nested CMake build
-# for vulkan-shaders-gen does not inherit the VS environment on Windows MSVC.
-# Users can enable CUDA manually:
+# GPU acceleration options:
 #   --features cuda     (NVIDIA GPUs)
+#   --features vulkan   (AMD/Intel GPUs — use run_vulkan_windows.bat, which sets
+#                        CMAKE_GENERATOR=Ninja, CL=/FS, and CARGO_TARGET_DIR=C:\mf
+#                        to work around MSVC mspdbsrv.exe failures on paths with
+#                        non-ASCII characters)
 [target.'cfg(target_os = "windows")'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["raw-api"] }
 futures-channel = "0.3.31"
