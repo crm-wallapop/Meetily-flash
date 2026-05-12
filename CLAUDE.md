@@ -610,8 +610,8 @@ $env:RUST_LOG="debug"; ./clean_run_windows.bat
 - **Audio Capture**: Uses WASAPI (Windows Audio Session API)
 - **GPU**: CUDA (NVIDIA) or Vulkan (AMD/Intel) via Cargo features
 - **Build Tools**: Requires Visual Studio Build Tools with C++ workload
-- **System Audio**: Uses WASAPI loopback for system capture
-- **Onboarding**: BuiltIn AI download step is skipped — `llama-helper.exe` is unreliable on files >2 GB
+- **System Audio**: Uses WASAPI loopback via `stream.rs::AudioStream::create()` — `build_input_stream()` on the default output device triggers loopback automatically. `capture/system.rs` is dead code in the recording path (only used by standalone monitoring commands)
+- **Onboarding**: BuiltIn AI download works on Windows — `llama-cpp-sys-2` uses Win32 `SetFilePointerEx` (64-bit) for file I/O, not `ftell()`, so >2 GB GGUF files load correctly
 
 ### Linux
 - **Audio Capture**: ALSA/PulseAudio
@@ -661,7 +661,7 @@ $env:RUST_LOG="debug"; ./clean_run_windows.bat
 
 7. **Audio Permissions**: Request permissions early. macOS requires both microphone AND screen recording for system audio.
 
-8. **LLM Timeouts**: The Rust LLM client (`summary/llm_client.rs`) has a per-request timeout. The Python Ollama client has no timeout by default — both must be considered when debugging slow summarisation.
+8. **LLM Timeouts**: The Rust LLM client (`summary/llm_client.rs`) has a per-request timeout (900s). The Python `chat_ollama_model()` in `transcript_processor.py` has no timeout, but it is only reachable via direct HTTP to `localhost:5167/docs` (Swagger UI) — never called by normal app flow. The Rust path is the only one that matters for the UI.
 
 ---
 
