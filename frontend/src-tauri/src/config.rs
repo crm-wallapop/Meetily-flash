@@ -27,7 +27,7 @@ pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
     // Q5_1 quantized models (balanced speed/accuracy, slightly better quality than Q5_0)
     ("tiny-q5_1", "ggml-tiny-q5_1.bin", 31, "Decent", "Very Fast", "Quantized tiny model, ~50% faster processing"),
     ("base-q5_1", "ggml-base-q5_1.bin", 57, "Good", "Fast", "Quantized base model, good speed/accuracy balance"),
-    ("small-q5_1", "ggml-small-q5_1.bin", 181, "Good", "Fast", "Quantized small model, faster than f16 version"),
+    ("small-q5_1", "ggml-small-q5_1.bin", 181, "Good", "Fast", "Fast mode: 3.5x faster than default, ~4% accuracy trade-off"),
 
     // Q5_0 quantized models (balanced speed/accuracy)
     ("medium-q5_0", "ggml-medium-q5_0.bin", 514, "High", "Medium", "Quantized medium model, professional quality"),
