@@ -1,5 +1,5 @@
 [package]
-name = "meetily"
+name = "meetily-flash"
 version = "0.3.0"
 description = "A Tauri App for meeting minutes"
 authors = ["Sujith S"]
