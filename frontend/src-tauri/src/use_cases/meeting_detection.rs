@@ -36,9 +36,6 @@ pub enum DetectorState {
     InCall {
         /// When the connection was first observed as absent (for 10s debounce).
         connection_lost_at: Option<Instant>,
-        /// Set when the user cancels the auto-start banner; prevents re-detection
-        /// for the same call. Resets on transition back to Idle.
-        cancel_suppressed: bool,
     },
 }
 
@@ -89,7 +86,6 @@ pub fn step_detector(
                 };
                 let new_state = DetectorState::InCall {
                     connection_lost_at: None,
-                    cancel_suppressed: false,
                 };
                 (new_state, vec![event])
             } else {
@@ -99,22 +95,14 @@ pub fn step_detector(
 
         DetectorState::InCall {
             mut connection_lost_at,
-            mut cancel_suppressed,
         } => {
-            if suppress_signal
-                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                cancel_suppressed = true;
-            }
+            // consume the cancel signal so the spawner knows the frontend acknowledged it
+            suppress_signal.compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire).ok();
 
             if observation.has_meet_connection {
                 connection_lost_at = None;
                 (
-                    DetectorState::InCall {
-                        connection_lost_at,
-                        cancel_suppressed,
-                    },
+                    DetectorState::InCall { connection_lost_at },
                     vec![],
                 )
             } else {
@@ -131,7 +119,6 @@ pub fn step_detector(
                     (
                         DetectorState::InCall {
                             connection_lost_at: Some(lost_at),
-                            cancel_suppressed,
                         },
                         vec![],
                     )
@@ -401,7 +388,6 @@ pub mod tests {
 
         let state = DetectorState::InCall {
             connection_lost_at: Some(lost_5s_ago),
-            cancel_suppressed: false,
         };
 
         let (new_state, events) = step_detector(
@@ -434,7 +420,6 @@ pub mod tests {
 
         let state = DetectorState::InCall {
             connection_lost_at: Some(lost_11s_ago),
-            cancel_suppressed: false,
         };
 
         let (new_state, events) = step_detector(
@@ -451,8 +436,11 @@ pub mod tests {
     }
 
     // ── 2.5 ───────────────────────────────────────────────────────────────
-    // Cancel-suppression (D16): signal set → suppress flag stored, transient drop
-    // + return does not re-emit meeting-detected; flag resets on Idle transition.
+    // Cancel-suppression (D16): within the same InCall session, a transient drop
+    // and return does NOT re-emit meeting-detected. InCall never emits meeting-detected,
+    // so this holds structurally. The suppress signal is consumed (edge-detect) to
+    // prevent it from accumulating. After the debounce expires → Idle, detection
+    // fires normally for a new call.
     #[test]
     fn test_2_5_cancel_suppression_prevents_re_detection_within_call() {
         let start = Instant::now();
@@ -468,11 +456,12 @@ pub mod tests {
         // Step 1: cancel signal consumed, connection just lost.
         let state = DetectorState::InCall {
             connection_lost_at: None,
-            cancel_suppressed: false,
         };
         let (state, events) = step_detector(state, &obs_lost, start, Instant::now(), &suppress, &default_settings());
         assert!(events.is_empty(), "no event on first loss");
-        assert!(matches!(state, DetectorState::InCall { cancel_suppressed: true, .. }));
+        assert!(matches!(state, DetectorState::InCall { .. }));
+        // signal was consumed
+        assert!(!suppress.load(Ordering::Acquire), "suppress signal must be cleared after consumption");
 
         // Step 2: connection returns (< 10s) → still InCall, no re-emit.
         let obs_back = DetectorObservation {
@@ -485,12 +474,11 @@ pub mod tests {
         assert!(events.is_empty(), "no re-emit after transient drop+return");
         assert!(matches!(state, DetectorState::InCall { .. }));
 
-        // Step 3: connection drops for > 10s → transition to Idle (flag reset here).
+        // Step 3: connection drops for > 10s → transition to Idle.
         let now = Instant::now();
         let lost_11s_ago = now - Duration::from_secs(11);
         let state = DetectorState::InCall {
             connection_lost_at: Some(lost_11s_ago),
-            cancel_suppressed: true,
         };
         let obs_gone = DetectorObservation {
             meet_windows: vec![],
@@ -502,7 +490,7 @@ pub mod tests {
         assert!(matches!(state, DetectorState::Idle));
         assert_eq!(events, vec![DetectorEvent::MeetingEnded]);
 
-        // Step 4: new connection → must re-emit (cancel flag was reset on Idle transition).
+        // Step 4: new connection → must re-emit.
         let conn_seen = now + Duration::from_millis(500);
         let obs_new = DetectorObservation {
             meet_windows: vec![meet_window("New call - Google Meet")],
@@ -525,7 +513,6 @@ pub mod tests {
         // Start in InCall
         let state = DetectorState::InCall {
             connection_lost_at: None,
-            cancel_suppressed: false,
         };
 
         let obs_false = DetectorObservation {
@@ -814,8 +801,8 @@ pub mod tests {
         // The signal is consumed on this step (compare_exchange true→false)
         let (state, events) = step_detector(state, &obs_dropped, start, now_8s, &suppress, &default_settings());
         assert!(events.is_empty(), "step 2: 8s < debounce → no ended event");
-        assert!(matches!(state, DetectorState::InCall { cancel_suppressed: true, .. }),
-            "step 2: cancel flag must be set");
+        assert!(matches!(state, DetectorState::InCall { .. }));
+        assert!(!suppress.load(Ordering::Acquire), "step 2: suppress signal consumed");
 
         // ── Step 3: Connection returns → stays InCall, no re-detect ────────
         let now_9s = now_8s + Duration::from_secs(1);
@@ -826,7 +813,7 @@ pub mod tests {
             default_title: String::new(),
         };
         let (state, events) = step_detector(state, &obs_returned, start, now_9s, &AtomicBool::new(false), &default_settings());
-        assert!(events.is_empty(), "step 3: cancel-suppressed → no re-detect after return");
+        assert!(events.is_empty(), "step 3: InCall with connection → no re-emit");
 
         // ── Step 3.5: Connection drops again (0s elapsed < debounce) ──────────
         // This step sets connection_lost_at organically so step 4 can advance time.
@@ -840,7 +827,6 @@ pub mod tests {
             &default_settings(),
         );
         assert!(events.is_empty(), "step 3.5: 0s elapsed < debounce → no ended event yet");
-        // state is now InCall { connection_lost_at: Some(now_10s), cancel_suppressed: true }
 
         // ── Step 4: Still dropped 12s later → meeting-ended, Idle ─────────────
         let now_22s = now_10s + Duration::from_secs(12);
