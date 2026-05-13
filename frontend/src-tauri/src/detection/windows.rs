@@ -49,8 +49,8 @@ pub fn resolve_default_title(
     }
 
     {
-        let history = focus_history.lock().unwrap();
-        let cutoff = Instant::now() - FOCUS_HISTORY_TTL;
+        let history = focus_history.lock().unwrap_or_else(|e| e.into_inner());
+        let cutoff = Instant::now().checked_sub(FOCUS_HISTORY_TTL).unwrap_or_else(Instant::now);
         if let Some((title, _)) = history.iter().rev().find(|(_, t)| *t >= cutoff) {
             return strip_google_meet_suffix(title);
         }
@@ -89,7 +89,7 @@ fn meet_title_regex() -> &'static Regex {
     // Matches title formats observed in the wild:
     //   Chrome/Edge tab: "Meet - <name>"
     //   PWA:             "Google Meet - Meet — <name>"
-    RE.get_or_init(|| Regex::new(r"^Meet - .+|^Meet \u{2013} .+|^Google Meet - Meet \u{2014}|.+ - Google Meet$").expect("meet title regex is valid"))
+    RE.get_or_init(|| Regex::new(r"^Meet - .+|^Meet \u{2013} .+|^Google Meet - Meet \u{2014} .+|.+ - Google Meet$").expect("meet title regex is valid"))
 }
 
 // ── Win32 helpers ─────────────────────────────────────────────────────────
@@ -184,6 +184,7 @@ unsafe extern "system" fn enum_windows_callback(
     if let Some(name) = process_name_for_pid(pid) {
         if BROWSER_PROCESSES.contains(&name.as_str()) {
             ENUM_RESULTS.with(|r| {
+                // thread_local — no cross-thread poisoning possible; unwrap is safe
                 r.lock().unwrap().push(MeetWindow {
                     hwnd_id: hwnd.0 as *const () as usize,
                     pid,
@@ -201,13 +202,13 @@ pub fn enumerate_meet_windows() -> Vec<MeetWindow> {
     use windows::Win32::Foundation::LPARAM;
     use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
 
-    ENUM_RESULTS.with(|r| r.lock().unwrap().clear());
+    ENUM_RESULTS.with(|r| r.lock().unwrap().clear()); // thread_local — unwrap safe
 
     unsafe {
         let _ = EnumWindows(Some(enum_windows_callback), LPARAM(0));
     }
 
-    ENUM_RESULTS.with(|r| r.lock().unwrap().clone())
+    ENUM_RESULTS.with(|r| r.lock().unwrap().clone()) // thread_local — unwrap safe
 }
 
 // ── Network socket scanning ────────────────────────────────────────────────
@@ -522,7 +523,7 @@ pub fn spawn_focus_tracker(history: FocusHistory) -> tokio::task::JoinHandle<()>
                         .checked_sub(FOCUS_HISTORY_TTL)
                         .unwrap_or_else(Instant::now);
 
-                    let mut h = history.lock().unwrap();
+                    let mut h = history.lock().unwrap_or_else(|e| e.into_inner());
                     h.push_back((title, now));
                     while h.front().map_or(false, |(_, t)| *t < cutoff) {
                         h.pop_front();

@@ -37,6 +37,10 @@ pub async fn run_startup_gc(db: &DatabaseManager, recordings_dir: &Path) -> GcRe
     };
 
     // Collect valid folder paths for the orphan-file check below.
+    // Path strings must be stored and compared via PathBuf::to_string_lossy() consistently —
+    // both DB writes (recording_saver.rs) and disk reads below use native separators, so
+    // the HashSet comparison is safe. If any code path stores paths with forward slashes,
+    // valid folders could be mistakenly treated as orphans.
     let mut known_folders: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for meeting in &meetings {
@@ -204,25 +208,72 @@ mod tests {
         assert!(valid_folder.exists(), "valid folder must remain");
     }
 
-    // Task 6.5: partial failure (locked folder) → error recorded, GC continues.
+    // Task 6.5 (renamed): GC deletes all orphan folders when both succeed.
     #[tokio::test]
-    async fn gc_records_error_and_continues_on_partial_failure() {
+    async fn gc_deletes_multiple_orphan_folders() {
         let (db, _dir) = test_db().await;
 
         let temp_recordings = TempDir::new().unwrap();
-        // Orphan folder 1: will succeed
         let orphan1 = temp_recordings.path().join("orphan1");
         std::fs::create_dir_all(&orphan1).unwrap();
-        // Orphan folder 2: also succeeds (we simulate partial failure differently —
-        // use a missing but deeply nested path via a synthetic error scenario)
         let orphan2 = temp_recordings.path().join("orphan2");
         std::fs::create_dir_all(&orphan2).unwrap();
 
         let report = run_startup_gc(&db, temp_recordings.path()).await;
 
-        // Both orphan folders should be cleaned up.
         assert_eq!(report.orphan_files_deleted, 2);
-        // On Windows, locking a file open prevents deletion — we can't easily simulate
-        // that in a cross-platform unit test. The GC continues regardless.
+        assert!(report.errors.is_empty());
+    }
+
+    // Task 6.5: partial failure — one folder locked, GC records error and continues
+    // to clean the other. File locking on Windows is enforced via open file handle;
+    // on non-Windows the folder permissions are made read-only to prevent removal.
+    #[tokio::test]
+    async fn gc_records_error_and_continues_on_partial_failure() {
+        let (db, _dir) = test_db().await;
+
+        let temp_recordings = TempDir::new().unwrap();
+
+        // orphan1: will be locked so GC cannot delete it
+        let orphan1 = temp_recordings.path().join("orphan1");
+        std::fs::create_dir_all(&orphan1).unwrap();
+        let locked_file_path = orphan1.join("audio.wav");
+        std::fs::write(&locked_file_path, b"RIFF").unwrap();
+
+        // orphan2: clean deletion expected
+        let orphan2 = temp_recordings.path().join("orphan2");
+        std::fs::create_dir_all(&orphan2).unwrap();
+
+        // Hold an exclusive write handle on Windows, or make the folder read-only elsewhere.
+        #[cfg(target_os = "windows")]
+        let _lock = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .share_mode(0) // no sharing — prevents deletion
+                .open(&locked_file_path)
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut perms = std::fs::metadata(&orphan1).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            { perms.set_readonly(true); }
+            std::fs::set_permissions(&orphan1, perms).unwrap();
+        }
+
+        let report = run_startup_gc(&db, temp_recordings.path()).await;
+
+        // orphan2 deleted; orphan1 failed with an error recorded
+        assert_eq!(report.orphan_files_deleted, 1, "one folder deleted successfully");
+        assert!(!report.errors.is_empty(), "error recorded for locked folder");
+
+        // cleanup: restore permissions so TempDir drop succeeds
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut perms = std::fs::metadata(&orphan1).unwrap().permissions();
+            perms.set_readonly(false);
+            std::fs::set_permissions(&orphan1, perms).unwrap();
+        }
     }
 }

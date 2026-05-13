@@ -216,27 +216,6 @@ async fn is_recording() -> bool {
     audio::recording_commands::is_recording().await
 }
 
-#[tauri::command]
-async fn update_meeting_title(
-    app: AppHandle,
-    meeting_id: String,
-    new_title: String,
-) -> Result<(), String> {
-    use database::manager::DatabaseManager;
-    let db = DatabaseManager::new_from_app_handle(&app)
-        .await
-        .map_err(|e| format!("db error: {e}"))?;
-    let pool = db.pool().clone();
-    sqlx::query("UPDATE meetings SET title = ?, updated_at = ? WHERE id = ?")
-        .bind(&new_title)
-        .bind(chrono::Utc::now())
-        .bind(&meeting_id)
-        .execute(&pool)
-        .await
-        .map_err(|e| format!("update_meeting_title failed: {e}"))?;
-    Ok(())
-}
-
 /// Name propagates through `recording-stopped` so the frontend saves the user-edited title.
 #[tauri::command]
 async fn set_active_meeting_name(name: String) -> Result<(), String> {
@@ -656,7 +635,6 @@ pub fn run() {
             start_recording,
             stop_recording,
             cancel_recording,
-            update_meeting_title,
             set_active_meeting_name,
             signal_cancel_detection,
             is_recording,

@@ -292,7 +292,7 @@ impl WhisperEngine {
                 // flash_attn re-enabled for Vulkan. See test_flash_attn_noise_inputs for evidence.
                 let flash_attn_enabled = !matches!(
                     &hardware_profile.gpu_type,
-                    crate::audio::GpuType::Cpu | crate::audio::GpuType::OpenCl
+                    crate::audio::GpuType::None | crate::audio::GpuType::OpenCL
                 );
 
                 let context_param = WhisperContextParameters {
@@ -323,7 +323,8 @@ impl WhisperEngine {
                     (crate::audio::GpuType::Metal, false) => "Metal GPU acceleration",
                     (crate::audio::GpuType::Cuda, true) => "CUDA GPU with Flash Attention (Ultra-Fast)",
                     (crate::audio::GpuType::Cuda, false) => "CUDA GPU acceleration",
-                    (crate::audio::GpuType::Vulkan, _) => "Vulkan GPU acceleration",
+                    (crate::audio::GpuType::Vulkan, true) => "Vulkan GPU with Flash Attention (Ultra-Fast)",
+                    (crate::audio::GpuType::Vulkan, false) => "Vulkan GPU acceleration",
                     (crate::audio::GpuType::OpenCL, _) => "OpenCL GPU acceleration",
                     (crate::audio::GpuType::None, _) => "CPU processing only",
                 };
