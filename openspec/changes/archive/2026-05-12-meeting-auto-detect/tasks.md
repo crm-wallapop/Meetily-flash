@@ -36,7 +36,7 @@
 - [x] 3.7 Implement `MeetingDetectorPort for WindowsMeetingDetector`: track previous-poll `has_meet_connection` to compute `connection_first_seen_at` on the rising edge. The detector remembers its startup `Instant` to enforce app-start-state semantics (D15).
 - [x] 3.8 Implement the foreground tracker for D10 title resolution: a separate 1Hz Tokio task maintaining `Arc<Mutex<VecDeque<(String, Instant)>>>` capped at 10 entries. On each tick: `GetForegroundWindow() → GetWindowTextW()`; if title matches Meet regex, push (title, now). Prune entries older than 10 minutes on each push.
 - [x] 3.9 Expose `resolve_default_title(observation: &DetectorObservation, focus_tracker: &FocusTracker) -> String` implementing D10's priority order. Unit-test each level (foreground snapshot match, recent-focus match, first-enumerated, generic timestamp).
-- [ ] 3.10 Write a manual smoke test under `#[ignore]`: runs the real detector for 60 seconds and prints state transitions. Documented run procedure in the test's doc-comment. The smoke test MUST explicitly verify Meet PWA detection: open the PWA, confirm window enumeration sees it, connection signal fires, title resolves.
+- [x] 3.10 Write a manual smoke test under `#[ignore]`: runs the real detector for 60 seconds and prints state transitions. Documented run procedure in the test's doc-comment. The smoke test MUST explicitly verify Meet PWA detection: open the PWA, confirm window enumeration sees it, connection signal fires, title resolves.
 
 ## 4. Adversarial tests (CLAUDE.md §4)
 
