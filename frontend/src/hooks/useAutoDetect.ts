@@ -52,16 +52,21 @@ export function useAutoDetect({
   const isUserManagedRef = useRef(false);     // true = user chose "Keep Recording", skip auto-stop
   const bannerRef = useRef(banner);
 
-  useEffect(() => { isRecordingRef.current = isRecording; }, [isRecording]);
+  // Sync refs at render time, not in an effect. Effects run after the DOM commit;
+  // a Tauri event (meeting-ended) can arrive between setState(false) and the effect
+  // flush, reading stale truthy refs and wrongly showing the stop-prompt.
+  isRecordingRef.current = isRecording;
+  if (!isRecording) {
+    isDetectorStartedRef.current = false;
+    isUserManagedRef.current = false;
+  }
+
   useEffect(() => { bannerRef.current = banner; }, [banner]);
 
-  // Reset per-session flags when recording ends externally (manual stop, etc.)
+  // Dismiss the banner when recording ends externally. The ref resets above are
+  // synchronous; only the visual side-effect (banner dismiss) belongs in an effect.
   useEffect(() => {
     if (!isRecording) {
-      isDetectorStartedRef.current = false;
-      isUserManagedRef.current = false;
-      // If the recording ended externally (error, manual stop) while the banner was
-      // still visible, dismiss it so it doesn't linger over a stopped session.
       setBanner(prev => prev.visible ? { ...prev, visible: false } : prev);
     }
   }, [isRecording]);
