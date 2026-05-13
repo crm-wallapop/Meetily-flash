@@ -70,6 +70,16 @@ fn empty_focus_history() -> FocusHistory {
     Arc::new(Mutex::new(VecDeque::new()))
 }
 
+/// Initialises env_logger so internal `log::debug!` calls in the adapter and
+/// state machine are visible when `RUST_LOG` is set.  Safe to call from multiple
+/// tests — only the first call takes effect.
+///
+/// Usage: set `RUST_LOG=app_lib::detection=debug,app_lib::use_cases=debug`
+/// (or just `RUST_LOG=debug` for everything) before running the test.
+fn init_logger() {
+    let _ = env_logger::builder().is_test(true).try_init();
+}
+
 fn state_label(s: &DetectorState) -> &'static str {
     match s {
         DetectorState::Idle => "Idle    ",
@@ -92,6 +102,7 @@ fn state_label(s: &DetectorState) -> &'static str {
 #[test]
 #[ignore]
 fn enumerate_meet_windows_smoke() {
+    init_logger();
     let windows = enumerate_meet_windows();
     println!("\n── enumerate_meet_windows_smoke ───────────────────────────────────");
     println!("  Windows found: {}", windows.len());
@@ -132,6 +143,7 @@ fn enumerate_meet_windows_smoke() {
 #[test]
 #[ignore]
 fn detector_60s_smoke() {
+    init_logger();
     const TOTAL_POLLS: u32 = 30;
     const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
