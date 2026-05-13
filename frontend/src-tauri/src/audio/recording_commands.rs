@@ -70,6 +70,40 @@ pub async fn start_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), String
     start_recording_with_meeting_name(app, None).await
 }
 
+/// Registers the transcript-update listener and stores its ID for cleanup in stop_recording.
+/// Late transcripts that arrive after stop_recording would be processed against a closed
+/// session, so the listener must be unregistered before the mic is released.
+fn register_transcript_listener<R: Runtime>(app: &AppHandle<R>) {
+    use tauri::Listener;
+    let listener_id = app.listen("transcript-update", |event: tauri::Event| {
+        if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
+            let segment = crate::audio::recording_saver::TranscriptSegment {
+                id: format!("seg_{}", update.sequence_id),
+                text: update.text.clone(),
+                audio_start_time: update.audio_start_time,
+                audio_end_time: update.audio_end_time,
+                duration: update.duration,
+                display_time: update.timestamp.clone(),
+                confidence: update.confidence,
+                sequence_id: update.sequence_id,
+            };
+
+            if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
+                if let Some(manager) = manager_guard.as_ref() {
+                    manager.add_transcript_segment(segment);
+                }
+            }
+        }
+    });
+    match TRANSCRIPT_LISTENER_ID.lock() {
+        Ok(mut g) => {
+            *g = Some(listener_id);
+            info!("✅ Transcript-update event listener registered for history persistence");
+        }
+        Err(e) => error!("TRANSCRIPT_LISTENER_ID lock poisoned, listener not stored: {}", e),
+    }
+}
+
 /// Start recording with default devices and optional meeting name
 pub async fn start_recording_with_meeting_name<R: Runtime>(
     app: AppHandle<R>,
@@ -254,38 +288,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         *global_task = Some(task_handle);
     }
 
-    // CRITICAL: Listen for transcript-update events and save to recording manager
-    // This enables transcript history persistence for page reload sync
-    // Store listener ID for cleanup during stop_recording to ensure microphone is released
-    {
-        use tauri::Listener;
-        let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
-            // Parse the transcript update from the event payload
-            if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
-                // Create structured transcript segment
-                let segment = crate::audio::recording_saver::TranscriptSegment {
-                    id: format!("seg_{}", update.sequence_id),
-                    text: update.text.clone(),
-                    audio_start_time: update.audio_start_time,
-                    audio_end_time: update.audio_end_time,
-                    duration: update.duration,
-                    display_time: update.timestamp.clone(), // Use wall-clock timestamp for display
-                    confidence: update.confidence,
-                    sequence_id: update.sequence_id,
-                };
-
-                // Save to recording manager
-                if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
-                    if let Some(manager) = manager_guard.as_ref() {
-                        manager.add_transcript_segment(segment);
-                    }
-                }
-            }
-        });
-        let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
-        *global_listener = Some(listener_id);
-        info!("✅ Transcript-update event listener registered for history persistence");
-    }
+    register_transcript_listener(&app);
 
     // Emit success event
     app.emit("recording-started", serde_json::json!({
@@ -422,38 +425,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         *global_task = Some(task_handle);
     }
 
-    // CRITICAL: Listen for transcript-update events and save to recording manager
-    // This enables transcript history persistence for page reload sync
-    // Store listener ID for cleanup during stop_recording to ensure microphone is released
-    {
-        use tauri::Listener;
-        let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
-            // Parse the transcript update from the event payload
-            if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
-                // Create structured transcript segment
-                let segment = crate::audio::recording_saver::TranscriptSegment {
-                    id: format!("seg_{}", update.sequence_id),
-                    text: update.text.clone(),
-                    audio_start_time: update.audio_start_time,
-                    audio_end_time: update.audio_end_time,
-                    duration: update.duration,
-                    display_time: update.timestamp.clone(), // Use wall-clock timestamp for display
-                    confidence: update.confidence,
-                    sequence_id: update.sequence_id,
-                };
-
-                // Save to recording manager
-                if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
-                    if let Some(manager) = manager_guard.as_ref() {
-                        manager.add_transcript_segment(segment);
-                    }
-                }
-            }
-        });
-        let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
-        *global_listener = Some(listener_id);
-        info!("✅ Transcript-update event listener registered for history persistence");
-    }
+    register_transcript_listener(&app);
 
     // Emit success event
     app.emit("recording-started", serde_json::json!({
@@ -1051,6 +1023,151 @@ pub async fn get_recording_meeting_name() -> Result<Option<String>, String> {
 }
 
 // ============================================================================
+// CANCEL RECORDING — atomic cleanup for auto-detect cancellation
+// ============================================================================
+
+fn delete_recording_folder_inner(folder: Option<&std::path::Path>) -> Result<(), String> {
+    let Some(path) = folder else { return Ok(()) };
+    if path.exists() {
+        std::fs::remove_dir_all(path).map_err(|e| {
+            format!(
+                "cancel_recording: file deletion failed at {}: {}",
+                path.display(),
+                e
+            )
+        })?;
+        info!("cancel_recording: deleted audio folder {}", path.display());
+    }
+    Ok(())
+}
+
+/// Error text includes both meeting_id and folder_path so the startup GC pass can reconcile
+/// if the process crashes before the row is cleaned up.
+async fn delete_meeting_row_inner(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    folder_path: &str,
+) -> Result<(), String> {
+    if meeting_id.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("DELETE FROM meetings WHERE id = ?")
+        .bind(meeting_id)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            format!(
+                "cancel_recording: DB deletion failed for meeting {} at {}: {}",
+                meeting_id, folder_path, e
+            )
+        })?;
+    info!("cancel_recording: DB row deleted for meeting {}", meeting_id);
+    Ok(())
+}
+
+/// Extracted so tests can assert IS_RECORDING state without a real AppHandle.
+pub(crate) fn cancel_audio_capture_inner() -> Option<std::path::PathBuf> {
+    IS_RECORDING.store(false, Ordering::SeqCst);
+
+    let folder = match RECORDING_MANAGER.lock() {
+        Ok(mut global) => {
+            if let Some(manager) = global.take() {
+                let folder = manager.get_meeting_folder();
+                drop(manager);
+                folder
+            } else {
+                None
+            }
+        }
+        Err(e) => {
+            error!("RECORDING_MANAGER lock poisoned during cancel: {}", e);
+            None
+        }
+    };
+
+    match TRANSCRIPTION_TASK.lock() {
+        Ok(mut task) => {
+            if let Some(handle) = task.take() {
+                handle.abort();
+            }
+        }
+        Err(e) => error!("TRANSCRIPTION_TASK lock poisoned during cancel: {}", e),
+    }
+
+    folder
+}
+
+pub async fn cancel_recording_impl(
+    app: &AppHandle,
+    meeting_id: String,
+) -> Result<String, String> {
+    use crate::database::manager::DatabaseManager;
+
+    info!("🚫 cancel_recording called for meeting_id={}", meeting_id);
+
+    let folder = cancel_audio_capture_inner();
+
+    // cancel_recording bypasses stop_recording, so the transcript listener must be
+    // cleaned up here — stop_recording will not run for this session.
+    {
+        use tauri::Listener;
+        match TRANSCRIPT_LISTENER_ID.lock() {
+            Ok(mut g) => {
+                if let Some(listener_id) = g.take() {
+                    app.unlisten(listener_id);
+                }
+            }
+            Err(e) => error!("TRANSCRIPT_LISTENER_ID lock poisoned during cancel: {}", e),
+        }
+    }
+
+    crate::tray::update_tray_menu(app);
+
+    let folder_path = folder
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    delete_recording_folder_inner(folder.as_deref()).map_err(|e| {
+        error!("{}", e);
+        e
+    })?;
+
+    // DB row may not exist if the frontend never saved; error propagates with meeting_id + path
+    // so the startup GC pass can reconcile on next launch.
+    if let Ok(db) = DatabaseManager::new_from_app_handle(app).await {
+        let pool = db.pool().clone();
+        if let Err(e) = delete_meeting_row_inner(&pool, &meeting_id, &folder_path).await {
+            error!("{}", e);
+            return Err(e);
+        }
+    }
+
+    Ok(meeting_id)
+}
+
+pub async fn cancel_recording(
+    app: AppHandle,
+    meeting_id: String,
+) -> Result<String, String> {
+    cancel_recording_impl(&app, meeting_id).await
+}
+
+/// Name propagates through the `recording-stopped` event so the frontend saves the edited title.
+pub async fn set_active_meeting_name_impl(name: String) -> Result<(), String> {
+    let mut guard = RECORDING_MANAGER
+        .lock()
+        .map_err(|_| "recording manager lock poisoned".to_string())?;
+    match guard.as_mut() {
+        Some(manager) => {
+            manager.set_meeting_name(Some(name));
+            Ok(())
+        }
+        None => Ok(()), // no-op: recording already gone or not yet started
+    }
+}
+
+// ============================================================================
 // DEVICE MONITORING COMMANDS (AirPods/Bluetooth disconnect/reconnect support)
 // ============================================================================
 
@@ -1208,5 +1325,89 @@ pub async fn attempt_device_reconnect(
             error!("Manual reconnection error: {}", e);
             Err(e.to_string())
         }
+    }
+}
+
+// ============================================================================
+// Tests for cancel_recording helper functions (tasks 5.1 and 5.2)
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // Helper: in-memory SQLite database for isolation.
+    async fn test_db() -> (crate::database::manager::DatabaseManager, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.sqlite").to_string_lossy().to_string();
+        let db = crate::database::manager::DatabaseManager::new(&db_path, &db_path)
+            .await
+            .unwrap();
+        (db, dir)
+    }
+
+    // Task 5.1: cancel_recording clears IS_RECORDING (stops audio capture).
+    // Uses cancel_audio_capture_inner() — the extracted audio-stop step — so the
+    // assertion does not require a real AppHandle or RecordingManager.
+    // Note: IS_RECORDING is a global static; this test must not run concurrently
+    // with other tests that write it. In practice the other tests here don't touch it.
+    #[test]
+    fn test_5_1_cancel_clears_recording_flag() {
+        IS_RECORDING.store(true, Ordering::SeqCst);
+        cancel_audio_capture_inner();
+        assert!(
+            !IS_RECORDING.load(Ordering::SeqCst),
+            "cancel must clear IS_RECORDING so audio chunks stop being processed"
+        );
+    }
+
+    // Task 5.1: cancel_recording_folder helper deletes the folder and returns Ok.
+    #[test]
+    fn test_5_1_cancel_deletes_recording_folder() {
+        let dir = TempDir::new().unwrap();
+        let folder = dir.path().to_path_buf();
+        std::fs::write(folder.join("audio.wav"), b"RIFF").unwrap();
+        assert!(folder.exists(), "pre-condition: folder exists before cancel");
+
+        let result = delete_recording_folder_inner(Some(&folder));
+        assert!(result.is_ok(), "cancel must succeed: {:?}", result);
+        assert!(!folder.exists(), "folder must be deleted after cancel");
+    }
+
+    // Task 5.1 (extension): returns Ok(meeting_id) on success via the row helper.
+    #[tokio::test]
+    async fn test_5_1_delete_row_returns_ok_when_db_is_open() {
+        let (db, _dir) = test_db().await;
+        let pool = db.pool().clone();
+
+        let result = delete_meeting_row_inner(&pool, "meeting-001", "/tmp/meeting-001").await;
+        assert!(result.is_ok(), "deletion of non-existent row must succeed (no-op)");
+    }
+
+    // Task 5.2: when the DB pool is closed (simulating a failure) after file deletion
+    // succeeds, the function returns an error that includes both the meeting_id and
+    // the folder path so log readers and the GC pass can act.
+    #[tokio::test]
+    async fn test_5_2_db_failure_returns_error_with_meeting_id_and_path() {
+        let (db, _dir) = test_db().await;
+        let pool = db.pool().clone();
+
+        // Close the pool before the DELETE so the operation fails.
+        pool.close().await;
+
+        let result =
+            delete_meeting_row_inner(&pool, "meeting-abc", "/recordings/meeting-abc").await;
+
+        assert!(result.is_err(), "closed pool must cause an error");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("meeting-abc"),
+            "error must include meeting_id for GC reconciliation; got: {err}"
+        );
+        assert!(
+            err.contains("/recordings/meeting-abc"),
+            "error must include folder path for GC reconciliation; got: {err}"
+        );
     }
 }

@@ -11,6 +11,8 @@ import "sonner/dist/styles.css"
 import { useState, useEffect, useCallback } from 'react'
 import { listen, UnlistenFn } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { onAction } from '@tauri-apps/plugin-notification'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { RecordingStateProvider } from '@/contexts/RecordingStateContext'
 import { OllamaDownloadProvider } from '@/contexts/OllamaDownloadContext'
@@ -106,6 +108,19 @@ export default function RootLayout({
       return () => document.removeEventListener('contextmenu', handleContextMenu);
     }
   }, []);
+  // Clicking any system notification brings the app window to the foreground so the
+  // user can review or cancel an auto-started recording.
+  useEffect(() => {
+    let listener: { unregister: () => Promise<void> } | undefined;
+    onAction(async () => {
+      const win = getCurrentWindow();
+      await win.show();
+      await win.unminimize();
+      await win.setFocus();
+    }).then(l => { listener = l; }).catch(console.error);
+    return () => { listener?.unregister().catch(console.error); };
+  }, []);
+
   useEffect(() => {
     // Listen for tray recording toggle request
     const unlisten = listen('request-recording-toggle', () => {

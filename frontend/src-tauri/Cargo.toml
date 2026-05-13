@@ -131,6 +131,7 @@ sysinfo = "0.32"
 lazy_static = { version = "1.4.0" }
 realfft = "3.4.0"
 regex = "1.11.0"
+ipnet = "2.9"
 ndarray = "0.16"
 bytes = { version = "1.9.0", features = ["serde"] }
 
@@ -184,6 +185,15 @@ whisper-rs = { version = "0.16.0", features = ["raw-api", "metal", "coreml"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["raw-api"] }
 futures-channel = "0.3.31"
+# Win32 APIs for meeting detection: window enumeration, process info, network socket tables
+windows = { version = "0.58", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_System_Com",
+] }
+ipnet = "2.9"
 
 # Linux-specific dependencies
 # Default: CPU-only build (no BLAS)

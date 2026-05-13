@@ -10,7 +10,7 @@ import { showRecordingNotification } from '@/lib/recordingNotification';
 import { toast } from 'sonner';
 
 interface UseRecordingStartReturn {
-  handleRecordingStart: () => Promise<void>;
+  handleRecordingStart: (overrideTitle?: string) => Promise<void>;
   isAutoStarting: boolean;
 }
 
@@ -79,8 +79,8 @@ export function useRecordingStart(
     }
   }, []);
 
-  // Handle manual recording start (from button click)
-  const handleRecordingStart = useCallback(async () => {
+  // Handle manual recording start (from button click) or auto-detect start (with overrideTitle)
+  const handleRecordingStart = useCallback(async (overrideTitle?: string) => {
     try {
       console.log('handleRecordingStart called - checking Parakeet model status');
 
@@ -108,7 +108,7 @@ export function useRecordingStart(
 
       console.log('Parakeet ready - setting up meeting title and state');
 
-      const randomTitle = generateMeetingTitle();
+      const randomTitle = overrideTitle || generateMeetingTitle();
       setMeetingTitle(randomTitle);
 
       // Set STARTING status before initiating backend recording

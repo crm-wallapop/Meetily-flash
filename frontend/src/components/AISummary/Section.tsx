@@ -12,9 +12,9 @@ interface SectionProps {
   selectedBlocks: string[];
   onBlockTypeChange: (blockId: string, type: Block['type']) => void;
   onBlockChange: (blockId: string, content: string) => void;
-  onBlockMouseDown: (blockId: string, e: React.MouseEvent<HTMLDivElement>) => void;
+  onBlockMouseDown: (blockId: string, e: React.MouseEvent<Element>) => void;
   onBlockMouseEnter: (blockId: string) => void;
-  onBlockMouseUp: (blockId: string, e: React.MouseEvent<HTMLDivElement>) => void;
+  onBlockMouseUp: (blockId: string, e: React.MouseEvent<Element>) => void;
   onKeyDown: (e: React.KeyboardEvent, blockId: string, newBlockContent?: string) => void;
   onTitleChange?: (sectionKey: string, title: string) => void;
   onSectionDelete?: (sectionKey: string) => void;

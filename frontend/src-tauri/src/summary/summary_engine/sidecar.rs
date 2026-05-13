@@ -13,6 +13,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, RwLock};
 
 #[cfg(target_os = "windows")]
+#[allow(unused_imports)] // trait must be in scope for creation_flags() to resolve
 use std::os::windows::process::CommandExt;
 
 use super::models;

@@ -76,6 +76,10 @@ interface ConfigContextType {
   isAutoSummary: boolean;
   toggleIsAutoSummary: (checked: boolean) => void;
 
+  // Auto-detect meetings
+  autoDetectMeetings: boolean;
+  toggleAutoDetectMeetings: (checked: boolean) => Promise<void>;
+
   // Provider-specific API keys
   providerApiKeys: {
     claude: string | null;
@@ -161,6 +165,15 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       return saved !== null ? saved === 'true' : false
     }
     return false;
+  });
+
+  // Auto-detect meetings (also persisted to the Tauri store so Rust reads it at startup)
+  const [autoDetectMeetings, setAutoDetectMeetings] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('autoDetectMeetings');
+      return saved !== null ? saved === 'true' : true; // default on
+    }
+    return true;
   });
 
   // Beta features state (localStorage)
@@ -389,6 +402,22 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  // Persist to localStorage AND the Tauri store so Rust reads the correct value on next startup
+  const toggleAutoDetectMeetings = useCallback(async (checked: boolean) => {
+    setAutoDetectMeetings(checked);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('autoDetectMeetings', checked.toString());
+    }
+    try {
+      const { Store } = await import('@tauri-apps/plugin-store');
+      const store = await Store.load('settings.json');
+      await store.set('autoDetectMeetings', checked);
+      await store.save();
+    } catch (err) {
+      console.error('[ConfigContext] Failed to persist autoDetectMeetings to Tauri store:', err);
+    }
+  }, [])
+
   // Toggle beta feature with localStorage persistence and analytics
   const toggleBetaFeature = useCallback((featureKey: BetaFeatureKey, enabled: boolean) => {
     setBetaFeatures(prev => {
@@ -487,6 +516,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     setModelConfig,
     isAutoSummary,
     toggleIsAutoSummary,
+    autoDetectMeetings,
+    toggleAutoDetectMeetings,
     providerApiKeys,
     updateProviderApiKey,
     transcriptModelConfig,
@@ -511,6 +542,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     modelConfig,
     isAutoSummary,
     toggleIsAutoSummary,
+    autoDetectMeetings,
+    toggleAutoDetectMeetings,
     providerApiKeys,
     updateProviderApiKey,
     transcriptModelConfig,
