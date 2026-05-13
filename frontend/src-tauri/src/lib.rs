@@ -28,9 +28,7 @@ macro_rules! perf_trace {
     ($($arg:tt)*) => {};
 }
 
-// Make these macros available to other modules
-pub(crate) use perf_debug;
-pub(crate) use perf_trace;
+// perf_debug! and perf_trace! are macro_rules! at crate root — accessible everywhere directly.
 
 // Re-export async logging macros for external use (removed due to macro conflicts)
 
@@ -41,6 +39,7 @@ pub mod audio;
 pub mod config;
 pub mod console_utils;
 pub mod database;
+pub mod detection;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
@@ -49,9 +48,11 @@ pub mod anthropic;
 pub mod groq;
 pub mod openrouter;
 pub mod parakeet_engine;
+pub mod ports;
 pub mod state;
 pub mod summary;
 pub mod tray;
+pub mod use_cases;
 pub mod utils;
 pub mod whisper_engine;
 
@@ -206,9 +207,60 @@ async fn stop_recording<R: Runtime>(app: AppHandle<R>, args: RecordingArgs) -> R
 }
 
 #[tauri::command]
+async fn cancel_recording(app: AppHandle, meeting_id: String) -> Result<String, String> {
+    audio::recording_commands::cancel_recording(app, meeting_id).await
+}
+
+#[tauri::command]
 async fn is_recording() -> bool {
     audio::recording_commands::is_recording().await
 }
+
+#[tauri::command]
+async fn update_meeting_title(
+    app: AppHandle,
+    meeting_id: String,
+    new_title: String,
+) -> Result<(), String> {
+    use database::manager::DatabaseManager;
+    let db = DatabaseManager::new_from_app_handle(&app)
+        .await
+        .map_err(|e| format!("db error: {e}"))?;
+    let pool = db.pool().clone();
+    sqlx::query("UPDATE meetings SET title = ?, updated_at = ? WHERE id = ?")
+        .bind(&new_title)
+        .bind(chrono::Utc::now())
+        .bind(&meeting_id)
+        .execute(&pool)
+        .await
+        .map_err(|e| format!("update_meeting_title failed: {e}"))?;
+    Ok(())
+}
+
+/// Name propagates through `recording-stopped` so the frontend saves the user-edited title.
+#[tauri::command]
+async fn set_active_meeting_name(name: String) -> Result<(), String> {
+    audio::recording_commands::set_active_meeting_name_impl(name).await
+}
+
+/// Newtype wrapper so Tauri's TypeId-keyed state map doesn't collide with any
+/// other `Arc<AtomicBool>` registered by future code or plugins.
+#[cfg(target_os = "windows")]
+struct SuppressDetectionSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+/// Prevents re-detection after the user dismisses the auto-start banner (D16).
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn signal_cancel_detection(
+    suppress: tauri::State<'_, SuppressDetectionSignal>,
+) {
+    suppress.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    log::info!("cancel-suppression signal set by frontend");
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn signal_cancel_detection() {}
 
 #[tauri::command]
 fn get_transcription_status() -> TranscriptionStatus {
@@ -388,7 +440,7 @@ pub fn get_language_preference_internal() -> Option<String> {
 }
 
 pub fn run() {
-    log::set_max_level(log::LevelFilter::Info);
+    // Max level is set by env_logger (via RUST_LOG) in main.rs — don't override it here.
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -468,6 +520,110 @@ pub fn run() {
                 }
             });
 
+            let app_for_gc_and_detector = _app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                // ── GC pass ────────────────────────────────────────────────
+                match database::manager::DatabaseManager::new_from_app_handle(&app_for_gc_and_detector).await {
+                    Ok(db) => {
+                        if let Ok(data_dir) = app_for_gc_and_detector.path().app_data_dir() {
+                            let recordings_dir = data_dir.join("recordings");
+                            let report = use_cases::recording_gc::run_startup_gc(&db, &recordings_dir).await;
+                            log::info!(
+                                "startup gc: orphan_rows={} orphan_files={} errors={}",
+                                report.orphan_rows_deleted,
+                                report.orphan_files_deleted,
+                                report.errors.len()
+                            );
+                            for err in &report.errors {
+                                log::warn!("startup gc error: {}", err);
+                            }
+                        }
+                    }
+                    Err(e) => log::warn!("startup gc: failed to open db: {}", e),
+                }
+
+                // ── Meeting detector ───────────────────────────────────────
+                #[cfg(target_os = "windows")]
+                {
+                    use std::sync::atomic::AtomicBool;
+                    use std::sync::Arc;
+                    use std::time::Duration;
+                    use detection::windows::{FocusHistory, WindowsMeetingDetector, spawn_focus_tracker};
+                    use use_cases::meeting_detection::{DetectorSettings, spawn_detector, DetectorEventEmitter};
+                    use tauri::Emitter;
+
+                    let auto_detect = {
+                        use tauri_plugin_store::StoreExt;
+                        app_for_gc_and_detector
+                            .store("settings.json")
+                            .ok()
+                            .and_then(|s| s.get("autoDetectMeetings").and_then(|v| v.as_bool()))
+                            .unwrap_or(true)
+                    };
+
+                    // Always register the suppress signal so signal_cancel_detection command
+                    // can find it in app state regardless of whether auto-detect is enabled.
+                    let suppress_signal = Arc::new(AtomicBool::new(false));
+                    app_for_gc_and_detector.manage(SuppressDetectionSignal(suppress_signal.clone()));
+
+                    if auto_detect {
+                        let focus_history: FocusHistory = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+                        let _focus_task = spawn_focus_tracker(focus_history.clone());
+
+                        let detector = WindowsMeetingDetector::new(focus_history.clone());
+
+                        struct AppEmitter<R: tauri::Runtime>(tauri::AppHandle<R>);
+                        impl<R: tauri::Runtime> DetectorEventEmitter for AppEmitter<R> {
+                            fn emit_detected(&self, default_title: String, candidate_titles: Vec<String>) {
+                                let handler = crate::notifications::system::SystemNotificationHandler::new(self.0.clone());
+                                let notif = crate::notifications::types::Notification::recording_started(Some(default_title.clone()));
+                                tauri::async_runtime::spawn(async move {
+                                    if let Err(e) = handler.show_notification(notif).await {
+                                        log::warn!("recording-started notification failed: {}", e);
+                                    }
+                                });
+
+                                let stripped: Vec<String> = candidate_titles
+                                    .into_iter()
+                                    .map(|t| crate::detection::windows::strip_google_meet_suffix(&t))
+                                    .collect();
+                                let _ = self.0.emit("meeting-detected", serde_json::json!({
+                                    "default_title": default_title,
+                                    "candidate_titles": stripped,
+                                }));
+                            }
+                            fn emit_ended(&self) {
+                                let handler = crate::notifications::system::SystemNotificationHandler::new(self.0.clone());
+                                let notif = crate::notifications::types::Notification::new(
+                                    "Meetily — Meeting ended",
+                                    "Recording will stop in 10 seconds. Switch to Meetily to keep it running.",
+                                    crate::notifications::types::NotificationType::RecordingStopped,
+                                );
+                                tauri::async_runtime::spawn(async move {
+                                    if let Err(e) = handler.show_notification(notif).await {
+                                        log::warn!("recording-ended notification failed: {}", e);
+                                    }
+                                });
+                                let _ = self.0.emit("meeting-ended", ());
+                            }
+                        }
+
+                        let emitter = AppEmitter(app_for_gc_and_detector.clone());
+                        let _detector_handle = spawn_detector(
+                            detector,
+                            emitter,
+                            Duration::from_secs(2),
+                            DetectorSettings::default(),
+                            suppress_signal,
+                        );
+
+                        log::info!("meeting detector started");
+                    } else {
+                        log::info!("auto-detect disabled by settings");
+                    }
+                }
+            });
+
             // Trigger system audio permission request on startup (similar to microphone permission)
             // #[cfg(target_os = "macos")]
             // {
@@ -499,6 +655,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_recording,
             stop_recording,
+            cancel_recording,
+            update_meeting_title,
+            set_active_meeting_name,
+            signal_cancel_detection,
             is_recording,
             get_transcription_status,
             read_audio_file,

@@ -14,7 +14,9 @@ export function PreferenceSettings() {
     storageLocations,
     isLoadingPreferences,
     loadPreferences,
-    updateNotificationSettings
+    updateNotificationSettings,
+    autoDetectMeetings,
+    toggleAutoDetectMeetings,
   } = useConfig();
 
   const [notificationsEnabled, setNotificationsEnabled] = useState<boolean | null>(null);
@@ -83,9 +85,13 @@ export function PreferenceSettings() {
       console.log("Updating notification settings to:", notificationsEnabled);
 
       try {
-        // Update the notification preferences
+        // Update the notification preferences.
+        // consent_given and system_permission_granted gate all notifications in the Rust
+        // manager — they must be true when the user opts in, false when opting out.
         const updatedSettings: NotificationSettings = {
           ...notificationSettings,
+          consent_given: notificationsEnabled,
+          system_permission_granted: notificationsEnabled,
           notification_preferences: {
             ...notificationSettings.notification_preferences,
             show_recording_started: notificationsEnabled,
@@ -148,6 +154,23 @@ export function PreferenceSettings() {
 
   return (
     <div className="space-y-6">
+      {/* Auto-detect Meetings Section */}
+      <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">Auto-detect Google Meet calls</h3>
+            <p className="text-sm text-gray-600">
+              Automatically start recording when you join a Google Meet call
+            </p>
+            <p className="text-xs text-gray-400 mt-1">Changes take effect after restart.</p>
+          </div>
+          <Switch
+            checked={autoDetectMeetings}
+            onCheckedChange={toggleAutoDetectMeetings}
+          />
+        </div>
+      </div>
+
       {/* Notifications Section */}
       <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
         <div className="flex items-center justify-between">

@@ -155,7 +155,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
     return allBlocks.slice(start, end + 1).map(b => b.id);
   };
 
-  const handleBlockMouseDown = (blockId: string, sectionKey: keyof Summary, e: React.MouseEvent<HTMLDivElement>) => {
+  const handleBlockMouseDown = (blockId: string, sectionKey: keyof Summary, e: React.MouseEvent<Element>) => {
     if (!e.shiftKey) {
       setDragStartBlock(blockId);
       setLastSelectedBlock(blockId);
@@ -171,7 +171,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
     }
   };
 
-  const handleBlockMouseUp = (blockId: string, sectionKey: keyof Summary, e: React.MouseEvent<HTMLDivElement>) => {
+  const handleBlockMouseUp = (blockId: string, sectionKey: keyof Summary, e: React.MouseEvent<Element>) => {
     if (e.shiftKey && lastSelectedBlock) {
       const range = getBlockRange(lastSelectedBlock, blockId);
       setSelectedBlocks(range);

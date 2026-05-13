@@ -1,6 +1,6 @@
 "use client";
 
-import { Summary, SummaryResponse, Transcript, BlockNoteBlock } from '@/types';
+import { Summary, SummaryDataResponse, SummaryResponse, Transcript, BlockNoteBlock } from '@/types';
 import { EditableTitle } from '@/components/EditableTitle';
 import { BlockNoteSummaryView, BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { EmptyStateSummary } from '@/components/EmptyStateSummary';
@@ -27,7 +27,7 @@ interface SummaryPanelProps {
   onSaveAll: () => Promise<void>;
   onCopySummary: () => Promise<void>;
   onOpenFolder: () => Promise<void>;
-  aiSummary: Summary | null;
+  aiSummary: Summary | SummaryDataResponse | null;
   summaryStatus: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
   transcripts: Transcript[];
   modelConfig: ModelConfig;

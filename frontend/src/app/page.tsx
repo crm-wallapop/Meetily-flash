@@ -18,6 +18,8 @@ import { useRecordingStart } from '@/hooks/useRecordingStart';
 import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
+import { AutoDetectBanner } from '@/components/AutoDetectBanner';
+import { useAutoDetect } from '@/hooks/useAutoDetect';
 import { indexedDBService } from '@/services/indexedDBService';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
@@ -48,6 +50,20 @@ export default function Home() {
     setIsRecordingState,
     setIsRecordingDisabled
   );
+
+  // Auto-detect banner (Tasks 7.1–7.5)
+  const {
+    banner: autoDetectBanner,
+    detectTimeoutSeconds,
+    stopTimeoutSeconds,
+    handleBannerConfirm,
+    handleBannerCancel,
+  } = useAutoDetect({
+    isRecording: recordingState.isRecording,
+    handleRecordingStart,
+    handleRecordingStop,
+    setIsRecording: setIsRecordingState,
+  });
 
   // Recovery hook
   const {
@@ -212,6 +228,22 @@ export default function Home() {
         onDelete={deleteRecoverableMeeting}
         onLoadPreview={loadMeetingTranscripts}
       />
+
+      {/* Auto-detect banner (Tasks 7.1–7.5) */}
+      {autoDetectBanner.visible && (
+        <AutoDetectBanner
+          mode={autoDetectBanner.mode}
+          initialTitle={autoDetectBanner.initialTitle}
+          candidateTitles={autoDetectBanner.candidateTitles}
+          onConfirm={handleBannerConfirm}
+          onCancel={handleBannerCancel}
+          timeoutSeconds={
+            autoDetectBanner.mode === 'detect-prompt'
+              ? detectTimeoutSeconds
+              : stopTimeoutSeconds
+          }
+        />
+      )}
       <div className="flex flex-1 overflow-hidden">
         <TranscriptPanel
           isProcessingStop={isProcessingStop}

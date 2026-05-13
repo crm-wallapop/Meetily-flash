@@ -15,7 +15,7 @@ interface UseCopyOperationsProps {
   meeting: MeetingRef;
   transcripts: Transcript[];
   meetingTitle: string;
-  aiSummary: Summary | null;
+  aiSummary: Summary | SummaryDataResponse | null;
   blockNoteSummaryRef: RefObject<BlockNoteSummaryViewRef>;
 }
 
@@ -141,9 +141,10 @@ export function useCopyOperations({
           })
           .map(([, section]) => {
             if (section && typeof section === 'object' && 'title' in section && 'blocks' in section) {
-              const sectionTitle = `## ${section.title}\n\n`;
-              const sectionContent = section.blocks
-                .map((block) => `- ${(block as { content?: string }).content ?? ''}`)
+              const typedSection = section as { title: string; blocks: Array<{ content?: string }> };
+              const sectionTitle = `## ${typedSection.title}\n\n`;
+              const sectionContent = typedSection.blocks
+                .map((block) => `- ${block.content ?? ''}`)
                 .join('\n');
               return sectionTitle + sectionContent;
             }
