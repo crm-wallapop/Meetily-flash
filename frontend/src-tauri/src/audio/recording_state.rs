@@ -106,6 +106,8 @@ pub struct RecordingState {
 
     // Audio pipeline
     audio_sender: Mutex<Option<mpsc::UnboundedSender<AudioChunk>>>,
+    // Gain event channel: send current normalizer gain_db to the command layer for Tauri emission
+    gain_sender: Mutex<Option<mpsc::UnboundedSender<f32>>>,
 
     // Memory optimization
     buffer_pool: AudioBufferPool,
@@ -136,6 +138,7 @@ impl RecordingState {
             system_device: Mutex::new(None),
             disconnected_device: Mutex::new(None),
             audio_sender: Mutex::new(None),
+            gain_sender: Mutex::new(None),
             buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
             error_count: AtomicU32::new(0),
             recoverable_error_count: AtomicU32::new(0),
@@ -166,12 +169,22 @@ impl RecordingState {
         // CRITICAL: Clear audio sender to close the pipeline channel
         // This ensures the pipeline loop exits properly after processing all chunks
         *self.audio_sender.lock().unwrap() = None;
+        // Drop gain sender so the relay task exits cleanly
+        *self.gain_sender.lock().unwrap() = None;
         // CRITICAL: Clear device references to release microphone/speaker
         // Without this, Arc<AudioDevice> references persist and keep the mic active
         *self.microphone_device.lock().unwrap() = None;
         *self.system_device.lock().unwrap() = None;
         *self.disconnected_device.lock().unwrap() = None;
         log::info!("Recording stopped, device references cleared");
+    }
+
+    pub fn set_gain_sender(&self, sender: mpsc::UnboundedSender<f32>) {
+        *self.gain_sender.lock().unwrap() = Some(sender);
+    }
+
+    pub fn clone_gain_sender(&self) -> Option<mpsc::UnboundedSender<f32>> {
+        self.gain_sender.lock().unwrap().clone()
     }
 
     pub fn pause_recording(&self) -> Result<()> {
@@ -424,6 +437,7 @@ impl Default for RecordingState {
             system_device: Mutex::new(None),
             disconnected_device: Mutex::new(None),
             audio_sender: Mutex::new(None),
+            gain_sender: Mutex::new(None),
             buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
             error_count: AtomicU32::new(0),
             recoverable_error_count: AtomicU32::new(0),

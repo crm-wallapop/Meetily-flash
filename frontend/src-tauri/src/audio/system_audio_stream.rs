@@ -21,6 +21,7 @@ impl SystemAudioStreamManager {
         device: Arc<AudioDevice>,
         state: Arc<RecordingState>,
         recording_sender: Option<mpsc::UnboundedSender<super::recording_state::AudioChunk>>,
+        gate_floor_dbfs: i32,
     ) -> Result<Self> {
         info!("Creating system audio stream for device: {}", device.name);
 
@@ -36,6 +37,7 @@ impl SystemAudioStreamManager {
             2, // Assume stereo for system audio
             DeviceType::Output,
             recording_sender,
+            gate_floor_dbfs,
         );
 
         // Spawn task to process system audio stream
@@ -118,6 +120,7 @@ impl EnhancedAudioStreamManager {
         microphone_device: Option<Arc<AudioDevice>>,
         system_device: Option<Arc<AudioDevice>>,
         recording_sender: Option<mpsc::UnboundedSender<super::recording_state::AudioChunk>>,
+        gate_floor_dbfs: i32,
     ) -> Result<()> {
         info!("Starting enhanced audio streams");
 
@@ -129,6 +132,7 @@ impl EnhancedAudioStreamManager {
                 self.state.clone(),
                 DeviceType::Input,
                 recording_sender.clone(),
+                gate_floor_dbfs,
             ).await?;
             self.microphone_stream = Some(mic_stream);
         }
@@ -144,6 +148,7 @@ impl EnhancedAudioStreamManager {
                     sys_device,
                     self.state.clone(),
                     recording_sender,
+                    gate_floor_dbfs,
                 ).await?;
                 self.system_stream = Some(sys_stream);
             } else {
@@ -154,6 +159,7 @@ impl EnhancedAudioStreamManager {
                     self.state.clone(),
                     DeviceType::Output,
                     recording_sender,
+                    gate_floor_dbfs,
                 ).await?;
                 // Note: We'd need to store this differently or modify the structure
                 warn!("Fallback ScreenCaptureKit stream created but not stored in enhanced manager");

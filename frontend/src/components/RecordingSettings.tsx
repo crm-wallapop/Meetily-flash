@@ -1,10 +1,13 @@
+'use client';
+
 import React, { useState, useEffect } from 'react';
 import { Switch } from '@/components/ui/switch';
 import { FolderOpen } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
-import { DeviceSelection, SelectedDevices } from '@/components/DeviceSelection';
+import { DeviceSelection, SelectedDevices, AudioDevice } from '@/components/DeviceSelection';
 import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
+import { useRecordingState } from '@/contexts/RecordingStateContext';
 
 export interface RecordingPreferences {
   save_folder: string;
@@ -12,6 +15,7 @@ export interface RecordingPreferences {
   file_format: string;
   preferred_mic_device: string | null;
   preferred_system_device: string | null;
+  noise_gate_floor_dbfs: number;
 }
 
 interface RecordingSettingsProps {
@@ -19,16 +23,21 @@ interface RecordingSettingsProps {
 }
 
 export function RecordingSettings({ onSave }: RecordingSettingsProps) {
+  const { isRecording } = useRecordingState();
   const [preferences, setPreferences] = useState<RecordingPreferences>({
     save_folder: '',
     auto_save: true,
     file_format: 'mp4',
     preferred_mic_device: null,
-    preferred_system_device: null
+    preferred_system_device: null,
+    noise_gate_floor_dbfs: -30,
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showRecordingNotification, setShowRecordingNotification] = useState(true);
+  // Tracks the text input field for noise gate so user can type freely before committing
+  const [gateInputStr, setGateInputStr] = useState<string>('-30');
+  const [micSampleRate, setMicSampleRate] = useState<number | null>(null);
 
   // Load recording preferences on component mount
   useEffect(() => {
@@ -36,9 +45,9 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       try {
         const prefs = await invoke<RecordingPreferences>('get_recording_preferences');
         setPreferences(prefs);
+        setGateInputStr(String(prefs.noise_gate_floor_dbfs ?? -30));
       } catch (error) {
         console.error('Failed to load recording preferences:', error);
-        // If loading fails, get default folder path
         try {
           const defaultPath = await invoke<string>('get_default_recordings_folder_path');
           setPreferences(prev => ({ ...prev, save_folder: defaultPath }));
@@ -49,7 +58,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         setLoading(false);
       }
     };
-
     loadPreferences();
   }, []);
 
@@ -68,32 +76,74 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     loadNotificationPref();
   }, []);
 
+  // Fetch mic sample rate whenever the preferred mic changes
+  useEffect(() => {
+    const fetchSampleRate = async () => {
+      try {
+        const devices = await invoke<AudioDevice[]>('get_audio_devices');
+        const mic = preferences.preferred_mic_device
+          ? devices.find(d => d.device_type === 'Input' && d.name === preferences.preferred_mic_device)
+          : devices.find(d => d.device_type === 'Input');
+        setMicSampleRate(mic?.sample_rate ?? null);
+      } catch {
+        setMicSampleRate(null);
+      }
+    };
+    if (!loading) fetchSampleRate();
+  }, [preferences.preferred_mic_device, loading]);
+
   const handleAutoSaveToggle = async (enabled: boolean) => {
     const newPreferences = { ...preferences, auto_save: enabled };
     setPreferences(newPreferences);
     await savePreferences(newPreferences);
-
-    // Track auto-save setting change
-    await Analytics.track('auto_save_recording_toggled', {
-      enabled: enabled.toString()
-    });
+    await Analytics.track('auto_save_recording_toggled', { enabled: enabled.toString() });
   };
 
   const handleDeviceChange = async (devices: SelectedDevices) => {
     const newPreferences = {
       ...preferences,
       preferred_mic_device: devices.micDevice,
-      preferred_system_device: devices.systemDevice
+      preferred_system_device: devices.systemDevice,
     };
     setPreferences(newPreferences);
-    await savePreferences(newPreferences);
-
-    // Track default device preference changes
-    // Note: Individual device selection analytics are tracked in DeviceSelection component
+    const mic = devices.micDevice || 'Default';
+    const sys = devices.systemDevice || 'Default';
+    await savePreferences(newPreferences, `Mic: ${mic} · System: ${sys}`);
     await Analytics.track('default_devices_changed', {
       has_preferred_microphone: (!!devices.micDevice).toString(),
-      has_preferred_system_audio: (!!devices.systemDevice).toString()
+      has_preferred_system_audio: (!!devices.systemDevice).toString(),
     });
+  };
+
+  // Update display while dragging; save only on pointer release to avoid IPC storms
+  const handleGateSliderChange = (value: number) => {
+    setPreferences(prev => ({ ...prev, noise_gate_floor_dbfs: value }));
+    setGateInputStr(String(value));
+  };
+
+  const handleGateSliderPointerUp = async (value: number) => {
+    const newPreferences = { ...preferences, noise_gate_floor_dbfs: value };
+    setPreferences(newPreferences);
+    await savePreferences(newPreferences, 'Noise gate floor saved');
+  };
+
+  const handleGateInputChange = (raw: string) => {
+    setGateInputStr(raw);
+    const parsed = parseInt(raw, 10);
+    if (!isNaN(parsed) && parsed >= -60 && parsed <= -20) {
+      setPreferences(prev => ({ ...prev, noise_gate_floor_dbfs: parsed }));
+    }
+  };
+
+  const handleGateInputBlur = async () => {
+    const parsed = parseInt(gateInputStr, 10);
+    if (isNaN(parsed) || parsed < -60 || parsed > -20) {
+      setGateInputStr(String(preferences.noise_gate_floor_dbfs));
+    } else {
+      const newPreferences = { ...preferences, noise_gate_floor_dbfs: parsed };
+      setPreferences(newPreferences);
+      await savePreferences(newPreferences, 'Noise gate floor saved');
+    }
   };
 
   const handleOpenFolder = async () => {
@@ -112,31 +162,23 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       await store.set('show_recording_notification', enabled);
       await store.save();
       toast.success('Preference saved');
-      await Analytics.track('recording_notification_preference_changed', {
-        enabled: enabled.toString()
-      });
+      await Analytics.track('recording_notification_preference_changed', { enabled: enabled.toString() });
     } catch (error) {
       console.error('Failed to save notification preference:', error);
       toast.error('Failed to save preference');
     }
   };
 
-  const savePreferences = async (prefs: RecordingPreferences) => {
+  const savePreferences = async (prefs: RecordingPreferences, toastMessage = 'Preferences saved') => {
     setSaving(true);
     try {
       await invoke('set_recording_preferences', { preferences: prefs });
       onSave?.(prefs);
-
-      // Show success toast with device details
-      const micDevice = prefs.preferred_mic_device || 'Default';
-      const systemDevice = prefs.preferred_system_device || 'Default';
-      toast.success("Device preferences saved", {
-        description: `Microphone: ${micDevice}, System Audio: ${systemDevice}`
-      });
+      toast.success(toastMessage);
     } catch (error) {
       console.error('Failed to save recording preferences:', error);
-      toast.error("Failed to save device preferences", {
-        description: error instanceof Error ? error.message : String(error)
+      toast.error('Failed to save preferences', {
+        description: error instanceof Error ? error.message : String(error),
       });
     } finally {
       setSaving(false);
@@ -208,7 +250,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       {!preferences.auto_save && (
         <div className="p-4 border rounded-lg bg-yellow-50">
           <div className="text-sm text-yellow-800">
-            Audio recording is disabled. Enable "Save Audio Recordings" to automatically save your meeting audio.
+            Audio recording is disabled. Enable &quot;Save Audio Recordings&quot; to automatically save your meeting audio.
           </div>
         </div>
       )}
@@ -227,6 +269,43 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         />
       </div>
 
+      {/* Noise Gate */}
+      <div className="p-4 border rounded-lg space-y-3">
+        <div className="font-medium">Noise Gate Floor</div>
+        <div className="text-sm text-gray-600">
+          Audio below this level is excluded from loudness measurement (range −60 to −20 dBFS).
+        </div>
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            min={-60}
+            max={-20}
+            step={1}
+            value={preferences.noise_gate_floor_dbfs}
+            onChange={e => handleGateSliderChange(parseInt(e.target.value, 10))}
+            onPointerUp={e => handleGateSliderPointerUp(parseInt((e.target as HTMLInputElement).value, 10))}
+            disabled={saving}
+            className="flex-1 accent-gray-700"
+          />
+          <input
+            type="number"
+            min={-60}
+            max={-20}
+            step={1}
+            value={gateInputStr}
+            onChange={e => handleGateInputChange(e.target.value)}
+            onBlur={handleGateInputBlur}
+            onKeyDown={e => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+            disabled={saving}
+            className="w-20 px-2 py-1 border border-gray-300 rounded-md text-sm text-center"
+          />
+          <span className="text-sm text-gray-500 whitespace-nowrap">dBFS</span>
+        </div>
+        {isRecording && (
+          <p className="text-xs text-gray-400">Applies to next recording.</p>
+        )}
+      </div>
+
       {/* Device Preferences */}
       <div className="space-y-4">
         <div className="border-t pt-6">
@@ -239,11 +318,16 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             <DeviceSelection
               selectedDevices={{
                 micDevice: preferences.preferred_mic_device,
-                systemDevice: preferences.preferred_system_device
+                systemDevice: preferences.preferred_system_device,
               }}
               onDeviceChange={handleDeviceChange}
               disabled={saving}
             />
+            {micSampleRate !== null && (
+              <p className="mt-2 text-xs text-gray-500">
+                Sample rate: {micSampleRate.toLocaleString()} Hz
+              </p>
+            )}
           </div>
         </div>
       </div>

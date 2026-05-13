@@ -11,6 +11,10 @@ use log::error;
 #[cfg(target_os = "macos")]
 use crate::audio::capture::AudioCaptureBackend;
 
+fn default_noise_gate_floor() -> i32 {
+    -30
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RecordingPreferences {
     pub save_folder: PathBuf,
@@ -20,6 +24,10 @@ pub struct RecordingPreferences {
     pub preferred_mic_device: Option<String>,
     #[serde(default)]
     pub preferred_system_device: Option<String>,
+    /// Noise gate floor in dBFS (range −60 to −20). Read once at recording start; mid-recording
+    /// changes do NOT take effect until the next recording.
+    #[serde(default = "default_noise_gate_floor")]
+    pub noise_gate_floor_dbfs: i32,
     #[cfg(target_os = "macos")]
     #[serde(default)]
     pub system_audio_backend: Option<String>,
@@ -33,6 +41,7 @@ impl Default for RecordingPreferences {
             file_format: "mp4".to_string(),
             preferred_mic_device: None,
             preferred_system_device: None,
+            noise_gate_floor_dbfs: default_noise_gate_floor(),
             #[cfg(target_os = "macos")]
             system_audio_backend: Some("coreaudio".to_string()),
         }
