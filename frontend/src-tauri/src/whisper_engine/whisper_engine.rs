@@ -281,21 +281,19 @@ impl WhisperEngine {
                 let hardware_profile = crate::audio::HardwareProfile::detect();
                 let adaptive_config = hardware_profile.get_whisper_config();
 
-                // Enable flash attention for high-end GPUs (Metal on Apple Silicon, CUDA on NVIDIA).
-                // Flash attention provides 20-40% speedup but requires fp16 support in the shader.
+                // Enable flash attention for Metal, CUDA, and Vulkan. All three backends have
+                // verified fp16 shader implementations.
                 //
-                // Vulkan: ggml selects f16acc vs f32acc accumulator pipeline variants at init based
-                // on device->fp16 (shaderFloat16), but the K/V inputs remain fp16-typed regardless.
-                // Enabling this for all Vulkan devices is appropriate for modern hardware (fp16 is
-                // in the Vulkan 1.2 core feature set). Verified working on Intel Arc iGPU (fp16=1).
-                // Very old pre-1.2 Vulkan hardware (pre-2019 iGPUs) may fail — they should not be
-                // hitting this code path because has_vulkan_support() rarely returns true for them.
-                let flash_attn_enabled = match &hardware_profile.gpu_type {
-                    crate::audio::GpuType::Metal => true,
-                    crate::audio::GpuType::Cuda => true,
-                    crate::audio::GpuType::Vulkan => true,
-                    _ => false,
-                };
+                // Vulkan was temporarily disabled after garbled live transcription observed
+                // 2026-05-12 on Intel Arc iGPU. Diagnosed 2026-05-13: both flash_attn=true and
+                // flash_attn=false produce identical hallucinations on loud non-speech noise
+                // (-6 dBFS white noise → "(water splashing)" in both cases). Root cause was VAD
+                // forwarding loud environmental noise to Whisper, not a flash_attn kernel issue.
+                // flash_attn re-enabled for Vulkan. See test_flash_attn_noise_inputs for evidence.
+                let flash_attn_enabled = !matches!(
+                    &hardware_profile.gpu_type,
+                    crate::audio::GpuType::Cpu | crate::audio::GpuType::OpenCl
+                );
 
                 let context_param = WhisperContextParameters {
                     use_gpu: adaptive_config.use_gpu,
@@ -325,7 +323,7 @@ impl WhisperEngine {
                     (crate::audio::GpuType::Metal, false) => "Metal GPU acceleration",
                     (crate::audio::GpuType::Cuda, true) => "CUDA GPU with Flash Attention (Ultra-Fast)",
                     (crate::audio::GpuType::Cuda, false) => "CUDA GPU acceleration",
-                    (crate::audio::GpuType::Vulkan, _) => "Vulkan GPU with Flash Attention (requires fp16; verified on Arc iGPU)",
+                    (crate::audio::GpuType::Vulkan, _) => "Vulkan GPU acceleration",
                     (crate::audio::GpuType::OpenCL, _) => "OpenCL GPU acceleration",
                     (crate::audio::GpuType::None, _) => "CPU processing only",
                 };
@@ -1161,3 +1159,45 @@ impl WhisperEngine {
         Ok(())
     }
 }
+
+/// Load a fresh WhisperContext from `model_path` and transcribe `audio` with the given
+/// `flash_attn` setting. Returns the concatenated transcript (may be empty for silence/noise).
+///
+/// Used by `tests/flash_attn_diagnosis.rs` to isolate flash_attn behaviour from the
+/// higher-level WhisperEngine state machine.
+pub fn transcribe_raw(model_path: &std::path::Path, audio: &[f32], flash_attn: bool) -> anyhow::Result<String> {
+    let ctx_params = WhisperContextParameters {
+        use_gpu: true,
+        flash_attn,
+        ..Default::default()
+    };
+    let ctx = WhisperContext::new_with_params(model_path, ctx_params)?;
+
+    let mut params = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: 1.0 });
+    params.set_language(Some("en"));
+    params.set_no_timestamps(true);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_special(false);
+    params.set_print_timestamps(false);
+    params.set_suppress_blank(true);
+    params.set_no_speech_thold(0.55);
+
+    let mut state = ctx.create_state()?;
+    state.full(params, audio)?;
+
+    let mut result = String::new();
+    for i in 0..state.full_n_segments() {
+        if let Some(seg) = state.get_segment(i) {
+            if let Ok(text) = seg.to_str_lossy() {
+                let cleaned = text.trim();
+                if !cleaned.is_empty() {
+                    if !result.is_empty() { result.push(' '); }
+                    result.push_str(cleaned);
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
