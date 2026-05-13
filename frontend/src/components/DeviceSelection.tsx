@@ -11,6 +11,7 @@ import Analytics from '@/lib/analytics';
 export interface AudioDevice {
   name: string;
   device_type: 'Input' | 'Output';
+  sample_rate?: number;
 }
 
 export interface SelectedDevices {

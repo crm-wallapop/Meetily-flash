@@ -144,17 +144,18 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Create new recording manager
     let mut manager = RecordingManager::new();
 
-    // Load recording preferences to get auto_save AND device preferences
-    let (auto_save, preferred_mic_name, preferred_system_name) =
+    // Load recording preferences to get auto_save AND device preferences.
+    // noise_gate_floor_dbfs is read once here; mid-recording changes do NOT take effect.
+    let (auto_save, preferred_mic_name, preferred_system_name, gate_floor_dbfs) =
         match super::recording_preferences::load_recording_preferences(&app).await {
             Ok(prefs) => {
-                info!("📋 Loaded recording preferences: auto_save={}, preferred_mic={:?}, preferred_system={:?}",
-                      prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device);
-                (prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device)
+                info!("📋 Loaded recording preferences: auto_save={}, preferred_mic={:?}, preferred_system={:?}, gate_floor={}dBFS",
+                      prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device, prefs.noise_gate_floor_dbfs);
+                (prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device, prefs.noise_gate_floor_dbfs)
             }
             Err(e) => {
                 warn!("Failed to load recording preferences, using defaults: {}", e);
-                (true, None, None)
+                (true, None, None, -30)
             }
         };
 
@@ -264,9 +265,21 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         let _ = app_for_error.emit("recording-error", error.user_message());
     });
 
+    // Set up gain event relay: normalizer → channel → Tauri event
+    {
+        let (gain_tx, mut gain_rx) = tokio::sync::mpsc::unbounded_channel::<f32>();
+        manager.set_gain_sender(gain_tx);
+        let app_for_gain = app.clone();
+        tokio::spawn(async move {
+            while let Some(gain_db) = gain_rx.recv().await {
+                let _ = app_for_gain.emit("audio-normalizer-gain", serde_json::json!({ "gain_db": gain_db }));
+            }
+        });
+    }
+
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
     let transcription_receiver = manager
-        .start_recording(microphone_device, system_device, auto_save)
+        .start_recording(microphone_device, system_device, auto_save, gate_floor_dbfs)
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
 
@@ -373,15 +386,16 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Create new recording manager
     let mut manager = RecordingManager::new();
 
-    // Load recording preferences to check auto_save setting
-    let auto_save = match super::recording_preferences::load_recording_preferences(&app).await {
+    // Load recording preferences to check auto_save and gate floor settings.
+    // noise_gate_floor_dbfs is read once here; mid-recording changes do NOT take effect.
+    let (auto_save, gate_floor_dbfs) = match super::recording_preferences::load_recording_preferences(&app).await {
         Ok(prefs) => {
-            info!("📋 Loaded recording preferences: auto_save={}", prefs.auto_save);
-            prefs.auto_save
+            info!("📋 Loaded recording preferences: auto_save={}, gate_floor={}dBFS", prefs.auto_save, prefs.noise_gate_floor_dbfs);
+            (prefs.auto_save, prefs.noise_gate_floor_dbfs)
         }
         Err(e) => {
             warn!("Failed to load recording preferences, defaulting to auto_save=true: {}", e);
-            true // Default to saving if preferences can't be loaded
+            (true, -30)
         }
     };
 
@@ -401,9 +415,21 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         let _ = app_for_error.emit("recording-error", error.user_message());
     });
 
+    // Set up gain event relay: normalizer → channel → Tauri event
+    {
+        let (gain_tx, mut gain_rx) = tokio::sync::mpsc::unbounded_channel::<f32>();
+        manager.set_gain_sender(gain_tx);
+        let app_for_gain = app.clone();
+        tokio::spawn(async move {
+            while let Some(gain_db) = gain_rx.recv().await {
+                let _ = app_for_gain.emit("audio-normalizer-gain", serde_json::json!({ "gain_db": gain_db }));
+            }
+        });
+    }
+
     // Start recording with specified devices and auto_save setting
     let transcription_receiver = manager
-        .start_recording(mic_device, system_device, auto_save)
+        .start_recording(mic_device, system_device, auto_save, gate_floor_dbfs)
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
 

@@ -5,6 +5,25 @@ use log::error;
 use super::configuration::{AudioDevice, DeviceType};
 use super::platform;
 
+fn enrich_sample_rates(devices: &mut Vec<AudioDevice>, host: &cpal::Host) {
+    let input_devs: Vec<_> = host.input_devices().map(|d| d.collect()).unwrap_or_default();
+    let output_devs: Vec<_> = host.output_devices().map(|d| d.collect()).unwrap_or_default();
+    for device in devices.iter_mut() {
+        let rate = if matches!(device.device_type, DeviceType::Input) {
+            input_devs.iter()
+                .find(|d| d.name().ok().as_deref() == Some(&device.name))
+                .and_then(|d| d.default_input_config().ok())
+                .map(|c| c.sample_rate().0)
+        } else {
+            output_devs.iter()
+                .find(|d| d.name().ok().as_deref() == Some(&device.name))
+                .and_then(|d| d.default_output_config().ok())
+                .map(|c| c.sample_rate().0)
+        };
+        device.sample_rate = rate;
+    }
+}
+
 /// List all available audio devices on the system
 pub async fn list_audio_devices() -> Result<Vec<AudioDevice>> {
     let host = cpal::default_host();
@@ -37,6 +56,9 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>> {
             }
         }
     }
+
+    // Enrich each device with its default sample rate (best-effort; None on failure)
+    enrich_sample_rates(&mut devices, &host);
 
     Ok(devices)
 }

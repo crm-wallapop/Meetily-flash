@@ -29,6 +29,8 @@ pub struct RecordingManager {
     recording_saver: RecordingSaver,
     device_monitor: Option<AudioDeviceMonitor>,
     device_event_receiver: Option<mpsc::UnboundedReceiver<DeviceEvent>>,
+    /// Noise gate floor in dBFS stored at recording start; used on stream reconnect.
+    gate_floor_dbfs: i32,
 }
 
 // SAFETY: RecordingManager contains types that we've marked as Send
@@ -48,11 +50,14 @@ impl RecordingManager {
             pipeline_manager,
             recording_saver: RecordingSaver::new(),
             device_monitor: Some(device_monitor),
+            gate_floor_dbfs: -30,
             device_event_receiver: Some(device_event_receiver),
         }
     }
 
-    // Remove app handle storage for now - will be passed directly when saving
+    pub fn set_gain_sender(&self, sender: tokio::sync::mpsc::UnboundedSender<f32>) {
+        self.state.set_gain_sender(sender);
+    }
 
     /// Start recording with specified devices
     ///
@@ -60,13 +65,16 @@ impl RecordingManager {
     /// * `microphone_device` - Optional microphone device to use
     /// * `system_device` - Optional system audio device to use
     /// * `auto_save` - Whether to save audio checkpoints (true) or just transcripts/metadata (false)
+    /// * `gate_floor_dbfs` - Noise gate floor in dBFS; read once at start, mid-recording changes take no effect
     pub async fn start_recording(
         &mut self,
         microphone_device: Option<Arc<AudioDevice>>,
         system_device: Option<Arc<AudioDevice>>,
         auto_save: bool,
+        gate_floor_dbfs: i32,
     ) -> Result<mpsc::UnboundedReceiver<AudioChunk>> {
-        info!("Starting recording manager (auto_save: {})", auto_save);
+        info!("Starting recording manager (auto_save: {}, gate_floor: {}dBFS)", auto_save, gate_floor_dbfs);
+        self.gate_floor_dbfs = gate_floor_dbfs;
 
         // Set up transcription channel
         let (transcription_sender, transcription_receiver) = mpsc::unbounded_channel::<AudioChunk>();
@@ -123,7 +131,7 @@ impl RecordingManager {
 
         // Start audio streams - they send RAW unmixed chunks to pipeline for mixing
         // Pipeline handles mixing and distribution to both recording and transcription
-        self.stream_manager.start_streams(microphone_device.clone(), system_device.clone(), None).await?;
+        self.stream_manager.start_streams(microphone_device.clone(), system_device.clone(), None, gate_floor_dbfs).await?;
 
         // Start device monitoring to detect disconnects
         if let Some(ref mut monitor) = self.device_monitor {
@@ -167,7 +175,7 @@ impl RecordingManager {
     ///
     /// User still hears audio via Bluetooth (playback), but recording captures
     /// via stable wired path for best quality.
-    pub async fn start_recording_with_defaults_and_auto_save(&mut self, auto_save: bool) -> Result<mpsc::UnboundedReceiver<AudioChunk>> {
+    pub async fn start_recording_with_defaults_and_auto_save(&mut self, auto_save: bool, gate_floor_dbfs: i32) -> Result<mpsc::UnboundedReceiver<AudioChunk>> {
         #[cfg(target_os = "macos")]
         {
             info!("🎙️ [macOS] Starting recording with smart device selection (Bluetooth override enabled)");
@@ -186,7 +194,7 @@ impl RecordingManager {
             }
 
             // Start recording with selected devices and auto_save setting
-            self.start_recording(microphone_device, system_device, auto_save).await
+            self.start_recording(microphone_device, system_device, auto_save, gate_floor_dbfs).await
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -221,7 +229,7 @@ impl RecordingManager {
                 return Err(anyhow::anyhow!("No microphone device available"));
             }
 
-            self.start_recording(microphone_device, system_device, auto_save).await
+            self.start_recording(microphone_device, system_device, auto_save, gate_floor_dbfs).await
         }
     }
 
@@ -521,7 +529,7 @@ impl RecordingManager {
                     self.stream_manager.stop_streams()?;
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-                    self.stream_manager.start_streams(Some(device_arc.clone()), system_device, None).await?;
+                    self.stream_manager.start_streams(Some(device_arc.clone()), system_device, None, self.gate_floor_dbfs).await?;
                     self.state.set_microphone_device(device_arc);
 
                     info!("✅ Microphone reconnected successfully");
@@ -535,7 +543,7 @@ impl RecordingManager {
                     self.stream_manager.stop_streams()?;
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-                    self.stream_manager.start_streams(microphone_device, Some(device_arc.clone()), None).await?;
+                    self.stream_manager.start_streams(microphone_device, Some(device_arc.clone()), None, self.gate_floor_dbfs).await?;
                     self.state.set_system_device(device_arc);
 
                     info!("✅ System audio reconnected successfully");

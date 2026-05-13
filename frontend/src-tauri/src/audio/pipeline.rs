@@ -221,6 +221,8 @@ impl AudioCapture {
         channels: u16,
         device_type: DeviceType,
         recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
+        // Read once at recording start; mid-recording changes do NOT take effect until the next recording.
+        gate_floor_dbfs: i32,
     ) -> Self {
         // CRITICAL FIX: Detect if resampling is needed
         // Pipeline expects 48kHz, but Bluetooth devices often report 8kHz, 16kHz, or 44.1kHz
@@ -294,9 +296,12 @@ impl AudioCapture {
             };
 
             // Initialize EBU R128 normalizer (professional loudness standard)
-            let norm = match LoudnessNormalizer::new(1, TARGET_SAMPLE_RATE) {
-                Ok(normalizer) => {
+            let norm = match LoudnessNormalizer::new(1, TARGET_SAMPLE_RATE, gate_floor_dbfs) {
+                Ok(mut normalizer) => {
                     info!("✅ EBU R128 normalizer initialized for microphone '{}' (target: -23 LUFS)", device.name);
+                    if let Some(tx) = state.clone_gain_sender() {
+                        normalizer.set_gain_sender(tx);
+                    }
                     Some(normalizer)
                 }
                 Err(e) => {

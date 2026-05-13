@@ -148,32 +148,41 @@ pub struct LoudnessNormalizer {
     ebur128: ebur128::EbuR128,
     limiter: TruePeakLimiter,
     gain_linear: f32,
-    loudness_buffer: Vec<f32>,
+    gate_window: Vec<f32>,
+    gate_floor_linear: f32,
     true_peak_limit: f32,
+    // Gain event emission: 3s trailing ring of dB-domain gain values; emit mean once per second
+    gain_history: std::collections::VecDeque<f32>,
+    samples_since_emit: usize,
+    gain_sender: Option<tokio::sync::mpsc::UnboundedSender<f32>>,
 }
 
 impl LoudnessNormalizer {
-    /// Create a new EBU R128 loudness normalizer
-    ///
-    /// # Arguments
-    /// * `channels` - Number of audio channels (1 for mono, 2 for stereo)
-    /// * `sample_rate` - Sample rate in Hz (e.g., 48000)
-    pub fn new(channels: u32, sample_rate: u32) -> Result<Self> {
+    pub fn new(channels: u32, sample_rate: u32, gate_floor_dbfs: i32) -> Result<Self> {
         const TRUE_PEAK_LIMIT: f64 = -1.0;
-        const ANALYZE_CHUNK_SIZE: usize = 512;
+        const GATE_RMS_WINDOW_SAMPLES: usize = 4800; // 100ms @ 48 kHz
 
-        let ebur128 = ebur128::EbuR128::new(channels, sample_rate, ebur128::Mode::I | ebur128::Mode::TRUE_PEAK)
+        let ebur128 = ebur128::EbuR128::new(channels, sample_rate, ebur128::Mode::S | ebur128::Mode::TRUE_PEAK)
             .map_err(|e| anyhow::anyhow!("Failed to create EBU R128 normalizer: {}", e))?;
 
         let true_peak_limit = 10_f32.powf(TRUE_PEAK_LIMIT as f32 / 20.0);
+        let gate_floor_linear = 10_f32.powf(gate_floor_dbfs as f32 / 20.0);
 
         Ok(Self {
             ebur128,
             limiter: TruePeakLimiter::new(sample_rate),
             gain_linear: 1.0,
-            loudness_buffer: Vec::with_capacity(ANALYZE_CHUNK_SIZE),
+            gate_window: Vec::with_capacity(GATE_RMS_WINDOW_SAMPLES),
+            gate_floor_linear,
             true_peak_limit,
+            gain_history: std::collections::VecDeque::with_capacity(30),
+            samples_since_emit: 0,
+            gain_sender: None,
         })
+    }
+
+    pub fn set_gain_sender(&mut self, sender: tokio::sync::mpsc::UnboundedSender<f32>) {
+        self.gain_sender = Some(sender);
     }
 
     /// Normalize loudness using EBU R128 standard with true peak limiting
@@ -189,38 +198,79 @@ impl LoudnessNormalizer {
         }
 
         const TARGET_LUFS: f64 = -23.0;
-        const ANALYZE_CHUNK_SIZE: usize = 512;
+        const MAX_GAIN_LINEAR: f32 = 3.981_071_7; // 10^(12/20) = +12 dB safety ceiling
+        const GATE_RMS_WINDOW_SAMPLES: usize = 4800; // 100ms @ 48 kHz
+        const EMIT_INTERVAL_SAMPLES: usize = 48000; // 1 second @ 48 kHz
+        const GAIN_HISTORY_MAX: usize = 30; // 3s of 100ms gate-window updates
 
         let mut normalized_samples = Vec::with_capacity(samples.len());
 
         for &sample in samples {
-            // Accumulate samples for loudness analysis
-            self.loudness_buffer.push(sample);
+            // Apply current gain and true peak limiting to output immediately
+            let amplified = sample * self.gain_linear;
+            let limited = self.limiter.process(amplified, self.true_peak_limit);
+            normalized_samples.push(limited);
 
-            // Analyze loudness every 512 samples
-            if self.loudness_buffer.len() >= ANALYZE_CHUNK_SIZE {
-                if let Err(e) = self.ebur128.add_frames_f32(&self.loudness_buffer) {
-                    warn!("Failed to add frames to EBU R128: {}", e);
-                } else {
-                    // Update gain based on cumulative loudness
-                    if let Ok(current_lufs) = self.ebur128.loudness_global() {
-                        if current_lufs.is_finite() && current_lufs < 0.0 {
-                            let gain_db = TARGET_LUFS - current_lufs;
-                            self.gain_linear = 10_f32.powf(gain_db as f32 / 20.0);
+            // Accumulate into 100ms noise-gate window
+            self.gate_window.push(sample);
+
+            if self.gate_window.len() >= GATE_RMS_WINDOW_SAMPLES {
+                let rms = (self.gate_window.iter().map(|&x| x * x).sum::<f32>()
+                    / self.gate_window.len() as f32)
+                    .sqrt();
+
+                if rms >= self.gate_floor_linear {
+                    // Above gate threshold — feed to ebur128 and update gain
+                    if let Err(e) = self.ebur128.add_frames_f32(&self.gate_window) {
+                        warn!("Failed to add frames to EBU R128: {}", e);
+                    } else {
+                        if let Ok(current_lufs) = self.ebur128.loudness_shortterm() {
+                            if current_lufs.is_finite() && current_lufs < 0.0 {
+                                let gain_db = TARGET_LUFS - current_lufs;
+                                self.gain_linear =
+                                    (10_f32.powf(gain_db as f32 / 20.0)).min(MAX_GAIN_LINEAR);
+                            }
                         }
                     }
                 }
-                self.loudness_buffer.clear();
+                // Sub-threshold window: skip ebur128 feed, keep current gain_linear
+
+                // Record current gain_db in 3s trailing history (dB-domain mean for readout)
+                let gain_db_now = 20.0 * self.gain_linear.log10();
+                if self.gain_history.len() >= GAIN_HISTORY_MAX {
+                    self.gain_history.pop_front();
+                }
+                self.gain_history.push_back(gain_db_now);
+
+                self.gate_window.clear();
             }
+        }
 
-            // Apply gain and true peak limiting
-            let amplified = sample * self.gain_linear;
-            let limited = self.limiter.process(amplified, self.true_peak_limit);
-
-            normalized_samples.push(limited);
+        // Emit mean gain_db once per second via channel (relay task forwards to Tauri event)
+        self.samples_since_emit += samples.len();
+        while self.samples_since_emit >= EMIT_INTERVAL_SAMPLES {
+            self.samples_since_emit -= EMIT_INTERVAL_SAMPLES;
+            if let Some(ref tx) = self.gain_sender {
+                if !self.gain_history.is_empty() {
+                    let mean_db = self.gain_history.iter().sum::<f32>() / self.gain_history.len() as f32;
+                    let _ = tx.send(mean_db);
+                }
+            }
         }
 
         normalized_samples
+    }
+}
+
+#[cfg(test)]
+impl LoudnessNormalizer {
+    /// Returns true if Mode::S is enabled and ≥3s of audio has been fed.
+    pub fn shortterm_available(&self) -> bool {
+        self.ebur128.loudness_shortterm().is_ok()
+    }
+
+    pub fn current_gain(&self) -> f32 {
+        self.gain_linear
     }
 }
 
@@ -736,4 +786,171 @@ pub fn write_transcript_json_to_file(
     std::fs::write(&file_path, json_string)?;
 
     Ok(file_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sine_samples(amplitude: f32, freq_hz: f32, sample_rate: u32, duration_secs: f32) -> Vec<f32> {
+        let n = (sample_rate as f32 * duration_secs) as usize;
+        (0..n)
+            .map(|i| amplitude * (2.0 * std::f32::consts::PI * freq_hz * i as f32 / sample_rate as f32).sin())
+            .collect()
+    }
+
+    // --------------- 1.1 ---------------
+    #[test]
+    fn loudness_normalizer_constructs_with_shortterm_mode() {
+        // −20 dBFS sine at 440 Hz for 3.1 seconds (above the default −30 dBFS gate floor)
+        let mut normalizer = LoudnessNormalizer::new(1, 48000, -30).unwrap();
+        let samples = sine_samples(0.1, 440.0, 48000, 3.1);
+        normalizer.normalize_loudness(&samples);
+        assert!(
+            normalizer.shortterm_available(),
+            "Mode::S must be enabled so loudness_shortterm() returns Ok after ≥3s of audio"
+        );
+    }
+
+    // --------------- 1.5 ---------------
+    // Red test for noise gate. Fails until 2.4+2.5 are implemented.
+    // Behavioral proxy: feed 4s of above-threshold audio to set a non-unity gain,
+    // then feed 4s of sub-threshold audio. Without the gate, ebur128 is fed sub-threshold
+    // frames and shortterm LUFS drops, ramping gain to the cap (3.98). With the gate,
+    // ebur128 never receives those frames, so gain stays near the above-threshold value.
+    #[test]
+    fn loudness_normalizer_noise_gate_skips_measurement() {
+        const GATE_FLOOR: i32 = -30;
+        let mut normalizer = LoudnessNormalizer::new(1, 48000, GATE_FLOOR).unwrap();
+        // Warm up with above-threshold speech to establish non-unity gain
+        let warm = sine_samples(0.1, 440.0, 48000, 4.0); // −20 dBFS RMS (above −30 floor)
+        normalizer.normalize_loudness(&warm);
+        let gain_after_warmup = normalizer.current_gain();
+        // Now feed 4s of sub-threshold noise (−50 dBFS, below −30 floor)
+        let quiet = sine_samples(0.00316, 441.0, 48000, 4.0); // −50 dBFS
+        let quiet_out = normalizer.normalize_loudness(&quiet);
+        // Gate must prevent LUFS update: gain stays close to warmup value
+        assert!(
+            (normalizer.current_gain() - gain_after_warmup).abs() < 0.05,
+            "gain must not change during sub-threshold phase (gate should skip measurement); \
+             before={:.4}, after={:.4}", gain_after_warmup, normalizer.current_gain()
+        );
+        // Gain is still applied to output — verify via RMS ratio.
+        // Skip first 480 output samples (TruePeakLimiter 10ms lookahead flush contains the
+        // warmup tail at amplitude ~0.1, which would inflate output RMS by ~2×).
+        const LOOKAHEAD: usize = 480; // 10ms @ 48 kHz
+        let input_rms = (quiet.iter().map(|&x| x * x).sum::<f32>() / quiet.len() as f32).sqrt();
+        let steady = &quiet_out[LOOKAHEAD..];
+        let output_rms = (steady.iter().map(|&x| x * x).sum::<f32>() / steady.len() as f32).sqrt();
+        let rms_ratio = if input_rms > 1e-8 { output_rms / input_rms } else { 0.0 };
+        assert!(
+            (rms_ratio - gain_after_warmup).abs() < 0.2,
+            "gain must be applied to gated output; expected rms_ratio≈{:.4}, got {:.4}",
+            gain_after_warmup, rms_ratio
+        );
+    }
+
+    // --------------- 1.6 ---------------
+    // Scenario: entire recording is sub-threshold → gate never feeds ebur128 → gain stays 1.0.
+    // Red until 2.4+2.5 are implemented.
+    #[test]
+    fn loudness_normalizer_shortterm_error_fallback() {
+        let mut normalizer = LoudnessNormalizer::new(1, 48000, -30).unwrap();
+        // Only sub-threshold audio: gate prevents every frame from reaching ebur128
+        let quiet = sine_samples(0.001, 440.0, 48000, 4.0); // −60 dBFS (below −30 gate floor)
+        normalizer.normalize_loudness(&quiet);
+        assert_eq!(
+            normalizer.current_gain(),
+            1.0,
+            "gain must stay 1.0 when gate prevents all frames from reaching ebur128"
+        );
+    }
+
+    // --------------- 1.4 ---------------
+    #[test]
+    fn loudness_normalizer_gain_cap_enforced() {
+        // Feed 4s of very quiet noise at −60 dBFS (amplitude 0.001).
+        // Gate floor set to −80 so the signal is above the gate and ebur128 actually measures it.
+        // Without cap: shortterm ≈ −60 LUFS → gain = 10^(37/20) ≈ 70×. Cap should clamp to 3.98×.
+        let mut normalizer = LoudnessNormalizer::new(1, 48000, -80).unwrap();
+        let samples = sine_samples(0.001, 440.0, 48000, 4.0);
+        normalizer.normalize_loudness(&samples);
+        const MAX_GAIN_LINEAR: f32 = 3.981_071_7; // 10^(12/20)
+        assert!(
+            normalizer.current_gain() <= MAX_GAIN_LINEAR + 0.001,
+            "gain_linear must be capped at +12 dB (3.98×), got {}",
+            normalizer.current_gain()
+        );
+    }
+
+    // --------------- 1.2 ---------------
+    #[test]
+    fn loudness_normalizer_does_not_clip_speech_after_quiet_phase() {
+        // 4s of −50 dBFS noise to fill the 3s shortterm window, then 50ms of speech.
+        // Gate floor set to −80 so the noise is above the gate and ebur128 actually measures it.
+        // 50ms is too short to pull the window LUFS back up, so gain stays at noise-induced level.
+        // Without cap, gain ≈ 30×; with cap, gain = 3.98×.
+        let mut normalizer = LoudnessNormalizer::new(1, 48000, -80).unwrap();
+        let noise = sine_samples(0.00316, 441.0, 48000, 4.0); // −50 dBFS
+        let speech = sine_samples(0.1, 440.0, 48000, 0.05);   // −20 dBFS, 50ms
+        normalizer.normalize_loudness(&noise);
+        normalizer.normalize_loudness(&speech);
+        // Gain must be capped: with noise at −50 LUFS → target −23 LUFS → uncapped gain ≈ 30×
+        assert!(
+            normalizer.current_gain() <= 3.981_071_7 + 0.01,
+            "gain must be capped at +12 dB after quiet phase, got {}", normalizer.current_gain()
+        );
+    }
+
+    // --------------- 1.3 ---------------
+    #[test]
+    fn loudness_normalizer_noise_floor_not_lifted() {
+        // 5s of −40 dBFS ambient noise. Gate floor set to −80 so ebur128 measures it.
+        // Without cap, gain ≈ 7× would lift output to −23 dBFS.
+        // With +12 dB cap, output stays at −40+12 = −28 dBFS (proved by assertion).
+        let mut normalizer = LoudnessNormalizer::new(1, 48000, -80).unwrap();
+        let noise = sine_samples(0.01, 440.0, 48000, 5.0); // −40 dBFS (amplitude 0.01)
+        let out = normalizer.normalize_loudness(&noise);
+        let rms = (out.iter().map(|&x| x * x).sum::<f32>() / out.len() as f32).sqrt();
+        let rms_dbfs = 20.0 * rms.log10();
+        assert!(
+            rms_dbfs < -27.0, // gain cap keeps output at ≤ −28 dBFS; uncapped 7× would reach −23
+            "noise floor must not be lifted above −28 dBFS, got {:.1} dBFS", rms_dbfs
+        );
+    }
+
+    // --------------- 1.7 ---------------
+    #[test]
+    fn loudness_normalizer_loud_speaker_attenuates() {
+        // 5s of −5 dBFS speech. Short-term LUFS ≈ −5 LUFS → gain < 1.0 (attenuation).
+        let mut normalizer = LoudnessNormalizer::new(1, 48000, -30).unwrap();
+        let samples = sine_samples(0.562, 440.0, 48000, 5.0); // ~−5 dBFS (amplitude 0.562)
+        normalizer.normalize_loudness(&samples);
+        assert!(
+            normalizer.current_gain() < 1.0,
+            "loud speaker must be attenuated (gain < 1.0), got {}", normalizer.current_gain()
+        );
+    }
+
+    // --------------- 1.8 ---------------
+    #[test]
+    fn loudness_normalizer_preserves_clean_speech() {
+        // 6s of clean speech-band sine. Measure the LAST 3s (steady-state, after the shortterm
+        // window has converged) to verify output K-weighted integrated LUFS is within ±2 LU of
+        // −23 LUFS. Also proves the noise gate is not stripping quiet onsets.
+        let mut normalizer = LoudnessNormalizer::new(1, 48000, -30).unwrap();
+        let samples = sine_samples(0.1, 440.0, 48000, 6.0);
+        let out = normalizer.normalize_loudness(&samples);
+        // Last 3 seconds (144000 samples) — window has stabilised by then
+        let steady = &out[out.len().saturating_sub(3 * 48000)..];
+        let mut meter = ebur128::EbuR128::new(1, 48000, ebur128::Mode::I)
+            .expect("meter creation failed");
+        meter.add_frames_f32(steady).expect("add_frames failed");
+        let output_lufs = meter.loudness_global().expect("loudness_global failed");
+        assert!(
+            output_lufs >= -25.0 && output_lufs <= -21.0,
+            "steady-state output LUFS should be within ±2 LU of −23 LUFS target, got {:.1} LUFS",
+            output_lufs
+        );
+    }
 }

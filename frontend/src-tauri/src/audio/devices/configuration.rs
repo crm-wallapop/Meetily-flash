@@ -56,11 +56,13 @@ pub enum DeviceType {
 pub struct AudioDevice {
     pub name: String,
     pub device_type: DeviceType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
 }
 
 impl AudioDevice {
     pub fn new(name: String, device_type: DeviceType) -> Self {
-        AudioDevice { name, device_type }
+        AudioDevice { name, device_type, sample_rate: None }
     }
 
     pub fn from_name(name: &str) -> Result<Self> {
