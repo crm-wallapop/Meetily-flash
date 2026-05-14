@@ -59,3 +59,40 @@ Also remove the `/usr/local/cuda` path check (SDK directory, not driver).
 Note: the CUDA Cargo feature (`--features cuda`) must still be enabled at
 compile time for GPU inference to work. The detector only affects configuration
 decisions (beam size, threads, chunk size).
+
+---
+
+## tune(audio): raise loudness target from −23 LUFS to −18 or −14 LUFS
+
+The `LoudnessNormalizer` targets −23 LUFS (EBU R128 broadcast standard).
+Broadcast loudness is intentionally quiet compared to personal/podcast listening
+levels. Smoke test 2026-05-13 confirmed background noise is suppressed correctly
+but voice is perceived as soft.
+
+Candidate targets:
+- **−18 LUFS** — podcast/YouTube standard; noticeable improvement without
+  sounding "hot"
+- **−14 LUFS** — streaming services (Spotify/Apple Music) default; loudest
+  commonly-accepted ceiling
+
+Change site: `audio_processing.rs` — the constant passed as the target LUFS to
+`LoudnessNormalizer::new()`. Update the spec scenario in
+`openspec/specs/audio-recording-quality/spec.md` when changing.
+
+---
+
+## ux(auto-detect): prompt for manually-started recordings when Meet call ends
+
+Currently `meeting-ended` only triggers the stop-prompt banner for
+detector-started recordings (`isDetectorStartedRef.current` guard in
+`useAutoDetect.ts`). A user who starts recording manually before joining Meet
+gets no prompt when they leave the call.
+
+**Deferred** — the detection timing is not yet trustworthy enough to expand
+the blast radius. The `meeting-ended` event fires after a 10-second debounce,
+and in practice the auto-stop fires too late for the feature to feel reliable.
+Resolve the detection latency issue first, then consider lifting the guard.
+
+Tracking note: this was observed in the 2026-05-13 smoke test (auto-detect
+started recording; stop-prompt fired but may not have registered correctly —
+needs controlled repro with verbally-announced button presses).

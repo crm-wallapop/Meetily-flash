@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
 // Removed unused import
@@ -69,11 +69,6 @@ static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
 static LANGUAGE_PREFERENCE: std::sync::LazyLock<StdMutex<String>> =
     std::sync::LazyLock::new(|| StdMutex::new("auto-translate".to_string()));
 
-#[derive(Debug, Deserialize)]
-struct RecordingArgs {
-    save_path: String,
-}
-
 #[derive(Debug, Serialize, Clone)]
 struct TranscriptionStatus {
     chunks_in_queue: usize,
@@ -143,42 +138,25 @@ async fn start_recording<R: Runtime>(
 }
 
 #[tauri::command]
-async fn stop_recording<R: Runtime>(app: AppHandle<R>, args: RecordingArgs) -> Result<(), String> {
+async fn stop_recording<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<audio::recording_commands::StopRecordingResult, String> {
     log_info!("Attempting to stop recording...");
 
-    // Check the actual audio recording system state instead of the flag
     if !audio::recording_commands::is_recording().await {
         log_info!("Recording is already stopped");
-        return Ok(());
+        return Ok(audio::recording_commands::StopRecordingResult {
+            folder_path: None,
+            meeting_name: None,
+        });
     }
 
-    // Call the actual audio recording system to stop
-    match audio::recording_commands::stop_recording(
-        app.clone(),
-        audio::recording_commands::RecordingArgs {
-            save_path: args.save_path.clone(),
-        },
-    )
-    .await
+    match audio::recording_commands::stop_recording(app.clone()).await
     {
-        Ok(_) => {
+        Ok(result) => {
             RECORDING_FLAG.store(false, Ordering::SeqCst);
             tray::update_tray_menu(&app);
 
-            // Create the save directory if it doesn't exist
-            if let Some(parent) = std::path::Path::new(&args.save_path).parent() {
-                if !parent.exists() {
-                    log_info!("Creating directory: {:?}", parent);
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        let err_msg = format!("Failed to create save directory: {}", e);
-                        log_error!("{}", err_msg);
-                        return Err(err_msg);
-                    }
-                }
-            }
-
-            // Show recording stopped notification through NotificationManager
-            // This respects user's notification preferences
             let notification_manager_state = app.state::<NotificationManagerState<R>>();
             if let Err(e) = notifications::commands::show_recording_stopped_notification(
                 &app,
@@ -186,19 +164,13 @@ async fn stop_recording<R: Runtime>(app: AppHandle<R>, args: RecordingArgs) -> R
             )
             .await
             {
-                log_error!(
-                    "Failed to show recording stopped notification: {}",
-                    e
-                );
-            } else {
-                log_info!("Successfully showed recording stopped notification");
+                log_error!("Failed to show recording stopped notification: {}", e);
             }
 
-            Ok(())
+            Ok(result)
         }
         Err(e) => {
             log_error!("Failed to stop audio recording: {}", e);
-            // Still update the flag even if stopping failed
             RECORDING_FLAG.store(false, Ordering::SeqCst);
             tray::update_tray_menu(&app);
             Err(format!("Failed to stop recording: {}", e))

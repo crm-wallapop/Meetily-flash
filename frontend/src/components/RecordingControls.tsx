@@ -1,7 +1,6 @@
 'use client';
 
 import { invoke } from '@tauri-apps/api/core';
-import { appDataDir } from '@tauri-apps/api/path';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { Play, Pause, Square, Mic, AlertCircle, X } from 'lucide-react';
 import { ProcessRequest, SummaryResponse } from '@/types/summary';
@@ -46,11 +45,9 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const isPaused = recordingState.isPaused;
 
   const [showPlayback, setShowPlayback] = useState(false);
-  const [recordingPath, setRecordingPath] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
-  const [isStopping, setIsStopping] = useState(false);
   const [isPausing, setIsPausing] = useState(false);
   const [isResuming, setIsResuming] = useState(false);
   const MIN_RECORDING_DURATION = 2000; // 2 seconds minimum recording time
@@ -138,68 +135,34 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   }, [onRecordingStart, isStarting, isValidatingModel, selectedDevices, meetingName, isRecording]);
 
   const stopRecordingAction = useCallback(async () => {
-    console.log('Executing stop recording...');
+    console.log('Executing stop recording (delegating to handleRecordingStop)...');
     try {
       setIsProcessing(true);
-      const dataDir = await appDataDir();
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const savePath = `${dataDir}/recording-${timestamp}.wav`;
-      console.log('Saving recording to:', savePath);
-      console.log('About to call stop_recording command');
-      const result = await invoke('stop_recording', {
-        args: {
-          save_path: savePath
-        }
-      });
-      console.log('stop_recording command completed successfully:', result);
-      setRecordingPath(savePath);
-      // setShowPlayback(true);
-      setIsProcessing(false);
-      // Track successful transcription
       Analytics.trackTranscriptionSuccess();
-      onRecordingStop(true);
+      // The backend stop_recording call lives inside handleRecordingStop now, so the
+      // auto-detect banner path and this manual-button path go through one code path.
+      await onRecordingStop(true);
+      setIsProcessing(false);
     } catch (error) {
       console.error('Failed to stop recording:', error);
-      if (error instanceof Error) {
-        console.error('Error details:', {
-          message: error.message,
-          name: error.name,
-          stack: error.stack,
-        });
-        if (error.message.includes('No recording in progress')) {
-          return;
-        }
-      } else if (typeof error === 'string' && error.includes('No recording in progress')) {
-        return;
-      } else if (error && typeof error === 'object' && 'toString' in error) {
-        if (error.toString().includes('No recording in progress')) {
-          return;
-        }
-      }
       setIsProcessing(false);
       onRecordingStop(false);
-    } finally {
-      setIsStopping(false);
     }
   }, [onRecordingStop]);
 
   const handleStopRecording = useCallback(async () => {
-    console.log('handleStopRecording called - isRecording:', isRecording, 'isStarting:', isStarting, 'isStopping:', isStopping);
-    if (!isRecording || isStarting || isStopping) {
+    console.log('handleStopRecording called - isRecording:', isRecording, 'isStarting:', isStarting);
+    if (!isRecording || isStarting) {
       console.log('Early return from handleStopRecording due to state check');
       return;
     }
 
     console.log('Stopping recording...');
 
-    // Notify parent immediately (for UI state updates)
     onStopInitiated?.();
 
-    setIsStopping(true);
-
-    // Immediately trigger the stop action
     await stopRecordingAction();
-  }, [isRecording, isStarting, isStopping, stopRecordingAction, onStopInitiated]);
+  }, [isRecording, isStarting, stopRecordingAction, onStopInitiated]);
 
   const handlePauseRecording = useCallback(async () => {
     if (!isRecording || isPaused || isPausing) return;
@@ -426,8 +389,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                                 handlePauseRecording();
                               }
                             }}
-                            disabled={isPausing || isResuming || isStopping}
-                            className={`w-10 h-10 flex items-center justify-center ${isPausing || isResuming || isStopping
+                            disabled={isPausing || isResuming}
+                            className={`w-10 h-10 flex items-center justify-center ${isPausing || isResuming
                               ? 'bg-gray-200 border-2 border-gray-300 text-gray-400'
                               : 'bg-white border-2 border-gray-300 text-gray-600 hover:border-gray-400 hover:bg-gray-50'
                               } rounded-full transition-colors relative`}
@@ -452,16 +415,11 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                               Analytics.trackButtonClick('stop_recording', 'recording_controls');
                               handleStopRecording();
                             }}
-                            disabled={isStopping || isPausing || isResuming}
-                            className={`w-10 h-10 flex items-center justify-center ${isStopping || isPausing || isResuming ? 'bg-gray-400' : 'bg-red-500 hover:bg-red-600'
+                            disabled={isPausing || isResuming}
+                            className={`w-10 h-10 flex items-center justify-center ${isPausing || isResuming ? 'bg-gray-400' : 'bg-red-500 hover:bg-red-600'
                               } rounded-full text-white transition-colors relative`}
                           >
                             <Square size={16} />
-                            {isStopping && (
-                              <div className="absolute -top-8 text-gray-600 font-medium text-xs">
-                                Stopping...
-                              </div>
-                            )}
                           </button>
                         </TooltipTrigger>
                         <TooltipContent>
