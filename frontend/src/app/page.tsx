@@ -141,9 +141,7 @@ export default function Home() {
 
       if (result.success) {
         toast.success('Meeting recovered successfully!', {
-          description: result.audioRecoveryStatus?.status === 'success'
-            ? 'Transcripts and audio recovered'
-            : 'Transcripts recovered (no audio available)',
+          description: 'Transcripts recovered successfully',
           action: result.meetingId ? {
             label: 'View Meeting',
             onClick: () => {
