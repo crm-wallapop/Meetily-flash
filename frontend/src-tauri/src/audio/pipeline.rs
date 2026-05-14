@@ -1084,3 +1084,86 @@ impl Default for AudioPipelineManager {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::{
+        recording_state::{AudioChunk, DeviceType},
+        device_detection::InputDeviceKind,
+    };
+    use crate::audio::recording_state::RecordingState;
+
+    /// Synthetic speech at 16 kHz identical to vad::tests::generate_test_audio_with_speech.
+    /// At 16 kHz Silero receives the samples without resampling, so the same audio
+    /// that makes the vad.rs tests pass is guaranteed to trigger SpeechStart here.
+    fn make_speech_audio_16k(duration_secs: f32) -> Vec<f32> {
+        let n = (16000.0 * duration_secs) as usize;
+        let mut samples = vec![0.0f32; n];
+        for i in 0..n {
+            let t = i as f32 / 16000.0;
+            let cycle_time = t % 10.0;
+            if cycle_time < 5.0 {
+                let f1 = 200.0 + (t * 50.0).sin() * 100.0;
+                let a = 0.3 + 0.1 * (t * 5.0).sin();
+                samples[i] = a * (
+                    0.5 * (2.0 * std::f32::consts::PI * f1 * t).sin()
+                        + 0.3 * (2.0 * std::f32::consts::PI * f1 * 2.0 * t).sin()
+                        + 0.2 * (2.0 * std::f32::consts::PI * f1 * 3.0 * t).sin()
+                );
+            }
+        }
+        samples
+    }
+
+    /// RED test for task 1.2 (remove ContinuousVadProcessor from AudioPipeline).
+    ///
+    /// Currently FAILS: the pipeline contains ContinuousVadProcessor.  When fed
+    /// 5 s of 16 kHz speech-like audio (no resampling → same signal that triggers
+    /// Silero in vad.rs tests), the VAD emits ≥1 segment via transcription_sender.
+    ///
+    /// After task 1.2 removes the VAD path this test must PASS: nothing reaches the
+    /// transcription channel because the pipeline no longer has one.
+    #[tokio::test]
+    async fn pipeline_does_not_initialise_vad() {
+        let (audio_tx, audio_rx) = mpsc::unbounded_channel::<AudioChunk>();
+        let (transcription_tx, mut transcription_rx) = mpsc::unbounded_channel::<AudioChunk>();
+        let state = RecordingState::new();
+
+        // 16 kHz pipeline: VAD receives samples directly (no resampling).
+        let pipeline = AudioPipeline::new(
+            audio_rx,
+            transcription_tx,
+            state,
+            50,
+            16000,
+            "test_mic".to_string(),
+            InputDeviceKind::Unknown,
+            "test_system".to_string(),
+            InputDeviceKind::Unknown,
+        );
+
+        // 5 s of 16 kHz speech (entirely within the 5 s "on" phase of the pattern).
+        // ContinuousVadProcessor (currently present) will emit ≥1 segment on flush.
+        let samples = make_speech_audio_16k(5.0);
+        audio_tx
+            .send(AudioChunk {
+                data: samples,
+                sample_rate: 16000,
+                timestamp: 0.0,
+                chunk_id: 0,
+                device_type: DeviceType::Microphone,
+            })
+            .unwrap();
+        drop(audio_tx); // close channel → pipeline reaches Ok(None) → flush → complete
+
+        pipeline.run().await.expect("pipeline completed without error");
+
+        // After task 1.2: nothing in the transcription channel.
+        assert!(
+            transcription_rx.try_recv().is_err(),
+            "AudioPipeline must not forward audio to the transcription channel \
+             (ContinuousVadProcessor must be removed — task 1.2)"
+        );
+    }
+}
