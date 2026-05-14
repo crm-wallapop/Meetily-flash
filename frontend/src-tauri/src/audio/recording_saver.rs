@@ -148,27 +148,10 @@ impl RecordingSaver {
         let (sender, receiver) = mpsc::unbounded_channel::<AudioChunk>();
         self.chunk_receiver = Some(receiver);
 
-        // Initialize meeting folder and incremental saver ONLY if auto_save is enabled
-        if auto_save {
-            if let Some(name) = self.meeting_name.clone() {
-                match self.initialize_meeting_folder(&name, true) {
-                    Ok(()) => info!("Successfully initialized meeting folder with checkpoints"),
-                    Err(e) => {
-                        error!("Failed to initialize meeting folder: {}", e);
-                        // Continue anyway - will use fallback flat structure
-                    }
-                }
-            }
-        } else {
-            // When auto_save is false, still create meeting folder for transcripts/metadata
-            // but skip .checkpoints directory
-            if let Some(name) = self.meeting_name.clone() {
-                match self.initialize_meeting_folder(&name, false) {
-                    Ok(()) => info!("Successfully initialized meeting folder (transcripts only)"),
-                    Err(e) => {
-                        error!("Failed to initialize meeting folder: {}", e);
-                    }
-                }
+        if let Some(name) = self.meeting_name.clone() {
+            match self.initialize_meeting_folder(&name, auto_save) {
+                Ok(()) => info!("Successfully initialized meeting folder (auto_save={})", auto_save),
+                Err(e) => error!("Failed to initialize meeting folder: {}", e),
             }
         }
 
@@ -222,28 +205,18 @@ impl RecordingSaver {
         sender
     }
 
-    /// Initialize meeting folder structure and metadata
-    ///
-    /// # Arguments
-    /// * `meeting_name` - Name of the meeting
-    /// * `create_checkpoints` - Whether to create .checkpoints/ directory and IncrementalAudioSaver
-    fn initialize_meeting_folder(&mut self, meeting_name: &str, create_checkpoints: bool) -> Result<()> {
-        // Load preferences to get base recordings folder
+    fn initialize_meeting_folder(&mut self, meeting_name: &str, auto_save: bool) -> Result<()> {
         let base_folder = super::recording_preferences::get_default_recordings_folder();
+        let meeting_folder = create_meeting_folder(&base_folder, meeting_name)?;
 
-        // Create meeting folder structure (with or without .checkpoints/ subdirectory)
-        let meeting_folder = create_meeting_folder(&base_folder, meeting_name, create_checkpoints)?;
-
-        // Only initialize incremental saver if checkpoints are needed (auto_save is true)
-        if create_checkpoints {
+        if auto_save {
             let incremental_saver = IncrementalAudioSaver::new(meeting_folder.clone(), 48000)?;
             self.incremental_saver = Some(Arc::new(AsyncMutex::new(incremental_saver)));
-            info!("✅ Incremental audio saver initialized for meeting: {}", meeting_name);
+            info!("✅ Audio saver initialized for meeting: {}", meeting_name);
         } else {
-            info!("⚠️  Skipped incremental audio saver (auto-save disabled)");
+            info!("⚠️  Skipped audio saver (auto-save disabled)");
         }
 
-        // Create initial metadata
         let metadata = MeetingMetadata {
             version: "1.0".to_string(),
             meeting_id: None,  // Will be set by backend
@@ -255,7 +228,7 @@ impl RecordingSaver {
                 microphone: None,  // Could be enhanced to store actual device names
                 system_audio: None,
             },
-            audio_file: if create_checkpoints { "audio.mp4".to_string() } else { "".to_string() },
+            audio_file: if auto_save { "audio.mp4".to_string() } else { "".to_string() },
             transcript_file: "transcripts.json".to_string(),
             sample_rate: 48000,
             status: "recording".to_string(),
@@ -337,17 +310,8 @@ impl RecordingSaver {
         Ok(())
     }
 
-    // in frontend/src-tauri/src/audio/recording_saver.rs
     pub fn get_stats(&self) -> (usize, u32) {
-        if let Some(ref saver) = self.incremental_saver {
-            if let Ok(guard) = saver.try_lock() {
-                (guard.get_checkpoint_count() as usize, 48000)
-            } else {
-                (0, 48000)
-            }
-        } else {
-            (0, 48000)
-        }
+        (0, 48000)
     }
 
     /// Stop and save using incremental saving approach
