@@ -83,14 +83,11 @@ impl Drop for PhaseGuard {
     }
 }
 
-// Global recording manager and transcription task to keep them alive during recording
+// Global recording manager to keep it alive during recording
 static RECORDING_MANAGER: Mutex<Option<RecordingManager>> = Mutex::new(None);
-static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 // Background shutdown task handle — guarded so a concurrent stop_recording call can detect it
 static SHUTDOWN_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
-// Listener ID for proper cleanup - prevents microphone from staying active after recording stops
-static TRANSCRIPT_LISTENER_ID: Mutex<Option<tauri::EventId>> = Mutex::new(None);
 
 // ============================================================================
 // PUBLIC TYPES
@@ -120,40 +117,6 @@ pub struct TranscriptionStatus {
 /// Start recording with default devices
 pub async fn start_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     start_recording_with_meeting_name(app, None).await
-}
-
-/// Registers the transcript-update listener and stores its ID for cleanup in stop_recording.
-/// Late transcripts that arrive after stop_recording would be processed against a closed
-/// session, so the listener must be unregistered before the mic is released.
-fn register_transcript_listener<R: Runtime>(app: &AppHandle<R>) {
-    use tauri::Listener;
-    let listener_id = app.listen("transcript-update", |event: tauri::Event| {
-        if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
-            let segment = crate::audio::recording_saver::TranscriptSegment {
-                id: format!("seg_{}", update.sequence_id),
-                text: update.text.clone(),
-                audio_start_time: update.audio_start_time,
-                audio_end_time: update.audio_end_time,
-                duration: update.duration,
-                display_time: update.timestamp.clone(),
-                confidence: update.confidence,
-                sequence_id: update.sequence_id,
-            };
-
-            if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
-                if let Some(manager) = manager_guard.as_ref() {
-                    manager.add_transcript_segment(segment);
-                }
-            }
-        }
-    });
-    match TRANSCRIPT_LISTENER_ID.lock() {
-        Ok(mut g) => {
-            *g = Some(listener_id);
-            info!("✅ Transcript-update event listener registered for history persistence");
-        }
-        Err(e) => error!("TRANSCRIPT_LISTENER_ID lock poisoned, listener not stored: {}", e),
-    }
 }
 
 /// Start recording with default devices and optional meeting name
@@ -333,7 +296,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     }
 
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
-    let transcription_receiver = manager
+    let _transcription_receiver = manager
         .start_recording(microphone_device, system_device, auto_save, gate_floor_dbfs)
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
@@ -351,20 +314,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Emit phase transition event
     let _ = app.emit("recording-state-changed", serde_json::json!({ "phase": "Recording" }));
 
-    // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
-    {
-        let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
-        *global_task = Some(task_handle);
-    }
-
-    register_transcript_listener(&app);
-
     // Emit success event
     app.emit("recording-started", serde_json::json!({
-        "message": "Recording started successfully with parallel processing",
+        "message": "Recording started successfully",
         "devices": ["Default Microphone", "Default System Audio"],
-        "workers": 3
     })).map_err(|e| e.to_string())?;
 
     // Update tray menu to reflect recording state
@@ -488,7 +441,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     }
 
     // Start recording with specified devices and auto_save setting
-    let transcription_receiver = manager
+    let _transcription_receiver = manager
         .start_recording(mic_device, system_device, auto_save, gate_floor_dbfs)
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
@@ -506,23 +459,13 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Emit phase transition event
     let _ = app.emit("recording-state-changed", serde_json::json!({ "phase": "Recording" }));
 
-    // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
-    {
-        let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
-        *global_task = Some(task_handle);
-    }
-
-    register_transcript_listener(&app);
-
     // Emit success event
     app.emit("recording-started", serde_json::json!({
-        "message": "Recording started with custom devices and parallel processing",
+        "message": "Recording started with custom devices",
         "devices": [
             mic_device_name.unwrap_or_else(|| "Default Microphone".to_string()),
             system_device_name.unwrap_or_else(|| "Default System Audio".to_string())
         ],
-        "workers": 3
     })).map_err(|e| e.to_string())?;
 
     // Update tray menu to reflect recording state
@@ -582,15 +525,6 @@ where
         error!("❌ Stream release error (continuing to Saving): {}", e);
     }
 
-    // Clean up transcript listener before transitioning (releases mic reference)
-    {
-        use tauri::Listener;
-        if let Some(lid) = TRANSCRIPT_LISTENER_ID.lock().unwrap().take() {
-            app.unlisten(lid);
-            info!("✅ Transcript-update listener removed");
-        }
-    }
-
     // Extract analytics snapshot NOW while we still hold the manager, before the background
     // task takes ownership. This avoids re-borrowing across the spawn boundary.
     let analytics_snapshot: Option<(Option<f64>, f64, f64, u64, bool, Option<String>, Option<String>, u64)> =
@@ -608,12 +542,6 @@ where
                 stats.chunks_processed,
             )
         });
-
-    // Take transcription task handle before spawning so the background task owns it
-    let transcription_task = {
-        let mut t = TRANSCRIPTION_TASK.lock().unwrap();
-        t.take()
-    };
 
     // Extract folder/name now (synchronously) so we can return them AND emit recording-stopped
     // before the manager moves into the background task. The frontend save flow needs these
@@ -656,7 +584,6 @@ where
         let result = background_shutdown(
             app_bg.clone(),
             manager_for_background.take(),
-            transcription_task,
             analytics_snapshot,
         )
         .await;
@@ -695,45 +622,8 @@ where
 async fn background_shutdown<R: Runtime>(
     app: AppHandle<R>,
     mut manager: Option<RecordingManager>,
-    transcription_task: Option<JoinHandle<()>>,
     analytics_snapshot: Option<(Option<f64>, f64, f64, u64, bool, Option<String>, Option<String>, u64)>,
 ) -> Result<(), String> {
-    // Drain transcription queue
-    let _ = app.emit(
-        "recording-shutdown-progress",
-        serde_json::json!({ "stage": "processing_transcripts", "message": "Processing remaining transcript chunks...", "progress": 40 }),
-    );
-
-    if let Some(task_handle) = transcription_task {
-        info!("⏳ Background: waiting for ALL transcription chunks to be processed");
-
-        let progress_app = app.clone();
-        let progress_task = tokio::spawn(async move {
-            let start = std::time::Instant::now();
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                let elapsed = start.elapsed().as_secs();
-                let _ = progress_app.emit(
-                    "recording-shutdown-progress",
-                    serde_json::json!({
-                        "stage": "processing_transcripts",
-                        "message": format!("Processing transcripts... ({}s elapsed)", elapsed),
-                        "progress": 40, "detailed": true, "elapsed_seconds": elapsed
-                    }),
-                );
-            }
-        });
-
-        match tokio::time::timeout(tokio::time::Duration::from_secs(600), task_handle).await {
-            Ok(Ok(())) => info!("✅ ALL transcription chunks processed — no data lost"),
-            Ok(Err(e)) => warn!("⚠️ Transcription task error: {:?}", e),
-            Err(_) => warn!("⏱️ Transcription timeout (10 min) — continuing shutdown"),
-        }
-        progress_task.abort();
-    } else {
-        info!("ℹ️ No transcription task to drain");
-    }
-
     // Unload model
     let _ = app.emit(
         "recording-shutdown-progress",
@@ -1076,15 +966,6 @@ pub(crate) fn cancel_audio_capture_inner() -> Option<std::path::PathBuf> {
         }
     };
 
-    match TRANSCRIPTION_TASK.lock() {
-        Ok(mut task) => {
-            if let Some(handle) = task.take() {
-                handle.abort();
-            }
-        }
-        Err(e) => error!("TRANSCRIPTION_TASK lock poisoned during cancel: {}", e),
-    }
-
     folder
 }
 
@@ -1097,20 +978,6 @@ pub async fn cancel_recording_impl(
     info!("🚫 cancel_recording called for meeting_id={}", meeting_id);
 
     let folder = cancel_audio_capture_inner();
-
-    // cancel_recording bypasses stop_recording, so the transcript listener must be
-    // cleaned up here — stop_recording will not run for this session.
-    {
-        use tauri::Listener;
-        match TRANSCRIPT_LISTENER_ID.lock() {
-            Ok(mut g) => {
-                if let Some(listener_id) = g.take() {
-                    app.unlisten(listener_id);
-                }
-            }
-            Err(e) => error!("TRANSCRIPT_LISTENER_ID lock poisoned during cancel: {}", e),
-        }
-    }
 
     crate::tray::update_tray_menu(app);
 

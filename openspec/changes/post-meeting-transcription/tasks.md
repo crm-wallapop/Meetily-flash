@@ -1,10 +1,10 @@
 ## 1. Remove live transcription path
 
 - [x] 1.1 Write a failing test `pipeline_does_not_initialise_vad`: assert that starting a recording does NOT construct `ContinuousVadProcessor` and emits no `transcript-update` events
-- [ ] 1.2 Delete the VAD processor initialisation and the Whisper inference path from `pipeline.rs`; delete unused VAD config plumbing
-- [ ] 1.3 Remove all `transcript-update` event emissions from the recording path
-- [ ] 1.4 Remove `transcript-update` listeners from `TranscriptContext.tsx`
-- [ ] 1.5 Run test 1.1 green; remove now-dead `VadProcessor` callers
+- [x] 1.2 Delete the VAD processor initialisation and the Whisper inference path from `pipeline.rs`; delete unused VAD config plumbing
+- [x] 1.3 Remove all `transcript-update` event emissions from the recording path
+- [x] 1.4 Remove `transcript-update` listeners from `TranscriptContext.tsx`
+- [x] 1.5 Run test 1.1 green; remove now-dead `VadProcessor` callers
 
 ## 2. Remove audio checkpoint files and recovery
 
