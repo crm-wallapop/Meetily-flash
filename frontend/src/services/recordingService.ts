@@ -8,18 +8,49 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 
+export type RecordingPhase = 'Idle' | 'Recording' | 'Saving';
+
 export interface RecordingState {
   is_recording: boolean;
   is_paused: boolean;
   is_active: boolean;
   recording_duration: number | null;
   active_duration: number | null;
+  /** Phase reflects the three-state lifecycle: Idle | Recording | Saving */
+  phase: RecordingPhase;
 }
 
 export interface RecordingStoppedPayload {
   message: string;
   folder_path?: string;
   meeting_name?: string;
+}
+
+/**
+ * Result returned synchronously from stop_recording.
+ * Use these values directly for the save flow — they're guaranteed to be
+ * populated before invoke() resolves, unlike the recording-stopped event
+ * which has Tauri-event-delivery timing semantics.
+ */
+export interface StopRecordingResult {
+  folder_path: string | null;
+  meeting_name: string | null;
+}
+
+/**
+ * Payload of `recording-saved` event, fired when the MP4 finalize step completes
+ * inside the background shutdown task. Use for UI refresh of audio players,
+ * NOT for the meeting-row save (use the return value of stop_recording for that).
+ */
+export interface RecordingSavedPayload {
+  audio_file: string;
+  transcript_file?: string;
+  meeting_name?: string;
+  meeting_folder?: string;
+}
+
+export interface RecordingStateChangedPayload {
+  phase: RecordingPhase;
 }
 
 /**
@@ -79,14 +110,12 @@ export class RecordingService {
   }
 
   /**
-   * Stop recording and save to file
-   * @param savePath - Path to save audio file
-   * @returns Promise<void>
+   * Stop the active recording. Returns synchronously with folder/meeting info so the
+   * save flow can write a DB row with folder_path populated. The audio file itself is
+   * finalized asynchronously and announced via the `recording-saved` event.
    */
-  async stopRecording(savePath: string): Promise<void> {
-    return invoke('stop_recording', {
-      args: { save_path: savePath }
-    });
+  async stopRecording(): Promise<StopRecordingResult> {
+    return invoke<StopRecordingResult>('stop_recording');
   }
 
   /**
@@ -143,6 +172,42 @@ export class RecordingService {
    */
   async onRecordingResumed(callback: () => void): Promise<UnlistenFn> {
     return listen('recording-resumed', callback);
+  }
+
+  /**
+   * Listen for recording-state-changed event (phase transitions: Idle | Recording | Saving)
+   * @param callback - Function to call on every phase transition
+   * @returns Promise that resolves to unlisten function
+   */
+  async onRecordingStateChanged(
+    callback: (payload: RecordingStateChangedPayload) => void
+  ): Promise<UnlistenFn> {
+    return listen<RecordingStateChangedPayload>('recording-state-changed', (event) => {
+      callback(event.payload);
+    });
+  }
+
+  /**
+   * Listen for recording-save-failed event (background shutdown error)
+   * @param callback - Function to call when background save fails
+   * @returns Promise that resolves to unlisten function
+   */
+  async onRecordingSaveFailed(callback: (error: string) => void): Promise<UnlistenFn> {
+    return listen<{ error: string }>('recording-save-failed', (event) => {
+      callback(event.payload.error);
+    });
+  }
+
+  /**
+   * Listen for recording-saved event (audio.mp4 finalized on disk).
+   * Use this to refresh audio-player UIs that loaded a meeting before its
+   * audio file existed. The DB row is already populated with folder_path
+   * via the synchronous stopRecording() return value.
+   */
+  async onRecordingSaved(callback: (payload: RecordingSavedPayload) => void): Promise<UnlistenFn> {
+    return listen<RecordingSavedPayload>('recording-saved', (event) => {
+      callback(event.payload);
+    });
   }
 
   /**

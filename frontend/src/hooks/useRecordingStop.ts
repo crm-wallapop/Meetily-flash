@@ -7,6 +7,7 @@ import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { storageService } from '@/services/storageService';
 import { transcriptService } from '@/services/transcriptService';
+import { recordingService, type StopRecordingResult } from '@/services/recordingService';
 import Analytics from '@/lib/analytics';
 
 type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
@@ -115,10 +116,6 @@ export function useRecordingStop(
 
   // Main recording stop handler
   const handleRecordingStop = useCallback(async (isCallApi: boolean) => {
-    if (recordingStoppedDataRef.current) {
-      await recordingStoppedDataRef.current;
-    }
-
     // Guard: prevent duplicate/concurrent stop calls
     if (stopInProgressRef.current) {
       return;
@@ -131,15 +128,36 @@ export function useRecordingStop(
     setIsRecordingDisabled(true);
     const stopStartTime = Date.now();
 
+    // Invoke the backend stop here — this is the single call site for stop_recording.
+    // Both the manual Stop button (RecordingControls) and the auto-detect banner (useAutoDetect)
+    // route through this function, so the backend stop is guaranteed exactly once per stop.
+    // stop_recording returns folder_path/meeting_name synchronously so we don't need to
+    // race the recording-stopped event for the save flow.
+    let stopResult: StopRecordingResult = { folder_path: null, meeting_name: null };
     try {
-      console.log('Post-stop processing (new implementation)...', {
-        stop_initiated_at: new Date(stopStartTime).toISOString(),
-        current_transcript_count: transcriptsRef.current.length
-      });
+      stopResult = await recordingService.stopRecording();
+      console.log('✅ stop_recording returned:', stopResult);
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      // "No recording in progress" is benign — the backend was already idle.
+      if (errMsg.toLowerCase().includes('no recording in progress')) {
+        console.log('Backend already stopped; continuing save flow with empty result');
+      } else {
+        console.error('stop_recording invoke failed:', error);
+        stopInProgressRef.current = false;
+        setStatus(RecordingStatus.ERROR, errMsg);
+        setIsRecordingDisabled(false);
+        return;
+      }
+    }
 
-      // Note: stop_recording is already called by RecordingControls.stopRecordingAction
-      // This function only handles post-stop processing (transcription wait, API call, navigation)
-      console.log('Recording already stopped by RecordingControls, processing transcription...');
+    try {
+      console.log('Post-stop processing...', {
+        stop_initiated_at: new Date(stopStartTime).toISOString(),
+        current_transcript_count: transcriptsRef.current.length,
+        folder_path: stopResult.folder_path,
+        meeting_name: stopResult.meeting_name,
+      });
 
       // Wait for transcription to complete
       setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, 'Waiting for transcription...');
@@ -236,9 +254,13 @@ export function useRecordingStop(
         // Get fresh transcript state (ALL transcripts including late ones)
         const freshTranscripts = [...transcriptsRef.current];
 
-        // Get folder_path and meeting_name from recording-stopped event
-        const folderPath = sessionStorage.getItem('last_recording_folder_path');
-        const savedMeetingName = sessionStorage.getItem('last_recording_meeting_name');
+        // folder_path/meeting_name came directly from stop_recording's return value.
+        // Fall back to the event-driven sessionStorage in case something else routes
+        // through here without going through invoke (e.g., a future tray-driven stop).
+        const folderPath =
+          stopResult.folder_path ?? sessionStorage.getItem('last_recording_folder_path');
+        const savedMeetingName =
+          stopResult.meeting_name ?? sessionStorage.getItem('last_recording_meeting_name');
 
         console.log('💾 Saving COMPLETE transcripts to database...', {
           transcript_count: freshTranscripts.length,

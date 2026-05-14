@@ -1,7 +1,7 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { recordingService } from '@/services/recordingService';
+import { recordingService, type RecordingPhase } from '@/services/recordingService';
 
 /**
  * Recording state synchronized with backend
@@ -31,18 +31,20 @@ interface RecordingState {
   recordingDuration: number | null;  // Total duration including pauses
   activeDuration: number | null;     // Active recording time (excluding pauses)
 
-  // NEW: Lifecycle status
+  // Lifecycle status
   status: RecordingStatus;
   statusMessage?: string;  // Optional message for current status
+  /** Backend phase from recording-state-changed event */
+  phase: RecordingPhase;
 }
 
 interface RecordingStateContextType extends RecordingState {
-  // NEW: Setters for status management
   setStatus: (status: RecordingStatus, message?: string) => void;
 
-  // Computed helpers (derived from status)
+  // Computed helpers
   isStopping: boolean;
   isProcessing: boolean;
+  /** True only when backend phase is Saving (background shutdown in progress) */
   isSaving: boolean;
 }
 
@@ -63,8 +65,9 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     isActive: false,
     recordingDuration: null,
     activeDuration: null,
-    status: RecordingStatus.IDLE,  // NEW: Initialize with IDLE status
-    statusMessage: undefined,       // NEW: No message initially
+    status: RecordingStatus.IDLE,
+    statusMessage: undefined,
+    phase: 'Idle',
   });
 
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -87,20 +90,28 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
   const syncWithBackend = async () => {
     try {
       const backendState = await recordingService.getRecordingState();
+      const phase = backendState.phase ?? 'Idle';
 
       setState(prev => ({
         ...prev,
-        isRecording: backendState.is_recording,
+        isRecording: phase === 'Recording',
         isPaused: backendState.is_paused,
         isActive: backendState.is_active,
         recordingDuration: backendState.recording_duration,
         activeDuration: backendState.active_duration,
+        phase,
+        status: phase === 'Recording'
+          ? RecordingStatus.RECORDING
+          : phase === 'Saving'
+            ? RecordingStatus.SAVING
+            : prev.status === RecordingStatus.RECORDING
+              ? RecordingStatus.COMPLETED
+              : prev.status,
       }));
 
       console.log('[RecordingStateContext] Synced with backend:', backendState);
     } catch (error) {
       console.error('[RecordingStateContext] Failed to sync with backend:', error);
-      // Don't update state on error - keep current state
     }
   };
 
@@ -150,32 +161,57 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         });
         unsubscribers.push(unlistenStarted);
 
-        // Recording stopped
-        const unlistenStopped = await recordingService.onRecordingStopped((payload) => {
-          console.log('[RecordingStateContext] Recording stopped event:', payload);
-          setState(prev => {
-            // Set status to STOPPING if not already in stop flow
-            // This ensures smooth UI transition for tray/keyboard stops
-            const newStatus = [
-              RecordingStatus.STOPPING,
-              RecordingStatus.PROCESSING_TRANSCRIPTS,
-              RecordingStatus.SAVING
-            ].includes(prev.status)
-              ? prev.status  // Already in stop flow
-              : RecordingStatus.STOPPING;  // New stop, transition smoothly
+        // recording-state-changed: authoritative phase transitions from backend
+        const unlistenPhaseChanged = await recordingService.onRecordingStateChanged((payload) => {
+          console.log('[RecordingStateContext] Phase changed:', payload.phase);
+          const phase = payload.phase;
 
-            return {
-              ...prev,
-              status: newStatus,
-              statusMessage: newStatus === RecordingStatus.STOPPING ? 'Stopping recording...' : prev.statusMessage,
-              isRecording: false,
-              isPaused: false,
-              isActive: false,
-              recordingDuration: null,
-              activeDuration: null,
-            };
+          setState(prev => {
+            if (phase === 'Recording') {
+              return {
+                ...prev,
+                phase,
+                isRecording: true,
+                status: RecordingStatus.RECORDING,
+                statusMessage: undefined,
+              };
+            } else if (phase === 'Saving') {
+              return {
+                ...prev,
+                phase,
+                isRecording: false,
+                isActive: false,
+                status: RecordingStatus.SAVING,
+                statusMessage: 'Saving…',
+              };
+            } else {
+              // Idle — background shutdown complete; keep polling stopped
+              return {
+                ...prev,
+                phase,
+                isRecording: false,
+                isPaused: false,
+                isActive: false,
+                status: RecordingStatus.COMPLETED,
+                statusMessage: undefined,
+                recordingDuration: null,
+                activeDuration: null,
+              };
+            }
           });
-          stopPolling();
+
+          if (phase !== 'Recording') {
+            stopPolling();
+          }
+        });
+        unsubscribers.push(unlistenPhaseChanged);
+
+        // Recording stopped — backwards-compat: fires when background shutdown finishes (Idle)
+        const unlistenStopped = await recordingService.onRecordingStopped((payload) => {
+          console.log('[RecordingStateContext] Recording stopped event (compat):', payload);
+          // The phase-based listener above already handles the Idle transition.
+          // This listener is kept for any callers that depend on recording-stopped
+          // (e.g., TranscriptContext which listens for folder_path).
         });
         unsubscribers.push(unlistenStopped);
 
@@ -225,13 +261,14 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     syncWithBackend();
   }, []);
 
-  // NEW: Computed helpers from status
+  // Computed helpers — phase is the authoritative source for isRecording/isSaving
   const contextValue = useMemo(() => ({
     ...state,
     setStatus,
+    isRecording: state.phase === 'Recording',
+    isSaving: state.phase === 'Saving',
     isStopping: state.status === RecordingStatus.STOPPING,
     isProcessing: state.status === RecordingStatus.PROCESSING_TRANSCRIPTS,
-    isSaving: state.status === RecordingStatus.SAVING,
   }), [state, setStatus]);
 
   return (
