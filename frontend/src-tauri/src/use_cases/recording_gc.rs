@@ -115,6 +115,53 @@ pub async fn run_startup_gc(db: &DatabaseManager, recordings_dir: &Path) -> GcRe
         }
     }
 
+    // ── 3. Orphan .checkpoints directories (pre-migration cleanup) ────────────
+    // Folders from before the post-meeting-transcription change may have a
+    // .checkpoints/ subdirectory alongside audio.mp4. Now that the saver writes
+    // directly to audio.mp4, these subdirectories are dead and should be removed.
+
+    let all_candidate_dirs: Vec<std::path::PathBuf> = {
+        let mut v: Vec<_> = known_folders
+            .iter()
+            .map(|s| std::path::PathBuf::from(s))
+            .collect();
+
+        // Also scan the recordings dir for any folder not yet in known_folders
+        // (e.g., meetings whose audio.mp4 exists but has no DB row — already cleaned
+        // above, but we handle the case defensively).
+        if recordings_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(recordings_dir) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        v.push(p);
+                    }
+                }
+            }
+        }
+        v.sort();
+        v.dedup();
+        v
+    };
+
+    for folder in &all_candidate_dirs {
+        let ckpt_dir = folder.join(".checkpoints");
+        if ckpt_dir.is_dir() {
+            match std::fs::remove_dir_all(&ckpt_dir) {
+                Ok(_) => {
+                    log::info!("gc: removed orphan .checkpoints dir in {}", folder.display());
+                    report.orphan_files_deleted += 1;
+                }
+                Err(e) => {
+                    report.errors.push(format!(
+                        "gc: failed to remove .checkpoints in {}: {e}",
+                        folder.display()
+                    ));
+                }
+            }
+        }
+    }
+
     report
 }
 
@@ -223,6 +270,44 @@ mod tests {
 
         assert_eq!(report.orphan_files_deleted, 2);
         assert!(report.errors.is_empty());
+    }
+
+    // Task 2.5: orphan .checkpoints dir alongside audio.mp4 → GC deletes it.
+    #[tokio::test]
+    async fn gc_deletes_orphan_checkpoints_dir() {
+        let (db, _dir) = test_db().await;
+        let pool = db.pool();
+
+        let temp_recordings = TempDir::new().unwrap();
+        let meeting_folder = temp_recordings.path().join("Meeting_With_Ckpt_2024-01-01_10-00");
+        std::fs::create_dir_all(&meeting_folder).unwrap();
+
+        // Simulate a pre-migration folder: has audio.mp4 AND an orphan .checkpoints dir
+        std::fs::write(meeting_folder.join("audio.mp4"), b"fake-mp4").unwrap();
+        let ckpt_dir = meeting_folder.join(".checkpoints");
+        std::fs::create_dir_all(&ckpt_dir).unwrap();
+        std::fs::write(ckpt_dir.join("audio_chunk_000.mp4"), b"chunk0").unwrap();
+
+        // Register the meeting in DB so the folder is considered "known"
+        let folder_str = meeting_folder.to_string_lossy().to_string();
+        let now = chrono::Utc::now();
+        sqlx::query(
+            "INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("meeting-ckpt-cleanup")
+        .bind("Meeting with checkpoint dir")
+        .bind(now)
+        .bind(now)
+        .bind(&folder_str)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let report = run_startup_gc(&db, temp_recordings.path()).await;
+
+        assert!(!ckpt_dir.exists(), ".checkpoints dir must be removed by GC");
+        assert!(report.errors.is_empty(), "no errors expected: {:?}", report.errors);
+        assert!(report.orphan_files_deleted >= 1, "should count checkpoint dir as deleted");
     }
 
     // Task 6.5: partial failure — one folder locked, GC records error and continues

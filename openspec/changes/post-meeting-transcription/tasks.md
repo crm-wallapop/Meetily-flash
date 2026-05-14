@@ -10,10 +10,10 @@
 
 - [x] 2.1 Write a failing test `incremental_saver_writes_no_ckpt_files`: assert that during a recording the only files written to the meeting folder are `audio.mp4` (in progress) and `metadata.json`
 - [x] 2.2 Remove `.ckpt` writes from `incremental_saver.rs`; the saver streams directly to MP4 without intermediate checkpoint files
-- [ ] 2.3 Remove Tauri commands `recover_audio_from_checkpoints`, `has_audio_checkpoints`, `cleanup_checkpoints` from `lib.rs` and their implementations
-- [ ] 2.4 Remove the calls to these commands from `useTranscriptRecovery.ts`
-- [ ] 2.5 Update `recording_gc.rs` to delete any orphan `.ckpt` files found alongside an `audio.mp4` (migration cleanup for pre-existing folders); add test for this
-- [ ] 2.6 Run test 2.1 green
+- [x] 2.3 Remove Tauri commands `recover_audio_from_checkpoints`, `has_audio_checkpoints`, `cleanup_checkpoints` from `lib.rs` and their implementations
+- [x] 2.4 Remove the calls to these commands from `useTranscriptRecovery.ts`
+- [x] 2.5 Update `recording_gc.rs` to delete any orphan `.ckpt` files found alongside an `audio.mp4` (migration cleanup for pre-existing folders); add test for this
+- [x] 2.6 Run test 2.1 green
 
 ## 3. IndexedDB schema migration to queue persistence
 
