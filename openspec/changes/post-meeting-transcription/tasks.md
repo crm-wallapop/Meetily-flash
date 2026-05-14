@@ -17,11 +17,11 @@
 
 ## 3. IndexedDB schema migration to queue persistence
 
-- [ ] 3.1 Write a failing test `indexeddb_queue_schema_v2_supports_status_transitions`: assert the new schema allows insert/update of `{ meetingId, status, queuePosition, pauseReason?, startedAt?, completedAt?, lastError? }` and rejects unknown statuses
-- [ ] 3.2 Define the v2 schema in `indexedDBService.ts` with the new object store; bump the IndexedDB version number to trigger `onupgradeneeded`
-- [ ] 3.3 Implement a one-time migration in `onupgradeneeded`: read any existing v1 transcript chunks, present them through the legacy recovery path on first launch only, then drop the old object stores. After migration completes, store a `migration_v2_complete` flag
-- [ ] 3.4 Remove all live-transcript-chunk write paths from the frontend (any code calling `indexedDBService.saveTranscript`/equivalent)
-- [ ] 3.5 Run test 3.1 green
+- [x] 3.1 Write a failing test `indexeddb_queue_schema_v2_supports_status_transitions`: assert the new schema allows insert/update of `{ meetingId, status, queuePosition, pauseReason?, startedAt?, completedAt?, lastError? }` and rejects unknown statuses
+- [x] 3.2 Define the v2 schema in `indexedDBService.ts` with the new object store; bump the IndexedDB version number to trigger `onupgradeneeded`
+- [x] 3.3 Implement a one-time migration in `onupgradeneeded`: read any existing v1 transcript chunks, present them through the legacy recovery path on first launch only, then drop the old object stores. After migration completes, store a `migration_v2_complete` flag
+- [x] 3.4 Remove all live-transcript-chunk write paths from the frontend (any code calling `indexedDBService.saveTranscript`/equivalent)
+- [x] 3.5 Run test 3.1 green
 
 ## 4. Transcription queue use case (Rust)
 

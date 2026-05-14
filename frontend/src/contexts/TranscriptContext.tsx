@@ -84,78 +84,26 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
   // Initialize IndexedDB and listen for recording-started/stopped events
   useEffect(() => {
     let unlistenRecordingStarted: (() => void) | undefined;
-    let unlistenRecordingStopped: (() => void) | undefined;
 
     const setupRecordingListeners = async () => {
       try {
-        // Initialize IndexedDB
+        // Initialize IndexedDB (opens v2 schema with transcription_queue store).
         await indexedDBService.init();
 
         // Listen for recording-started event
         unlistenRecordingStarted = await recordingService.onRecordingStarted(async () => {
           try {
-            // Generate unique meeting ID
+            // Track meeting ID for markMeetingAsSaved (used by useRecordingStop).
             const meetingId = `meeting-${Date.now()}`;
             setCurrentMeetingId(meetingId);
-
-            // Store in sessionStorage as fallback for markMeetingAsSaved
             sessionStorage.setItem('indexeddb_current_meeting_id', meetingId);
-            console.log('[Recording Started] 💾 IndexedDB meeting ID stored:', meetingId);
 
-            // Get meeting name
+            // Get meeting name and sync title to state (fixes tray stop title issue).
             const meetingName = await recordingService.getRecordingMeetingName();
-
-            // Use a better fallback that matches the backend's naming pattern
             const effectiveTitle = meetingName || `Meeting ${new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-')}`;
-
-            // Initialize meeting metadata in IndexedDB
-            await indexedDBService.saveMeetingMetadata({
-              meetingId,
-              title: effectiveTitle,
-              startTime: Date.now(),
-              lastUpdated: Date.now(),
-              transcriptCount: 0,
-              savedToSQLite: false,
-              folderPath: undefined // Will update shortly
-            });
-
-            // Synchronize meeting title to state (fixes tray stop title issue)
             setMeetingTitle(effectiveTitle);
-
-            // Fetch folder path from backend and update metadata
-            // This ensures folder path is persisted even if app crashes
-            try {
-              const { invoke } = await import('@tauri-apps/api/core');
-              const folderPath = await invoke<string>('get_meeting_folder_path');
-              if (folderPath) {
-                const metadata = await indexedDBService.getMeetingMetadata(meetingId);
-                if (metadata) {
-                  metadata.folderPath = folderPath;
-                  await indexedDBService.saveMeetingMetadata(metadata);
-                }
-              }
-            } catch (error) {
-              // Non-fatal - will be set on stop if recording completes normally
-            }
           } catch (error) {
-            console.error('Failed to initialize meeting in IndexedDB:', error);
-          }
-        });
-
-        // Listen for recording-stopped event
-        unlistenRecordingStopped = await recordingService.onRecordingStopped(async (payload) => {
-          try {
-            if (currentMeetingId) {
-              // Update folder path in IndexedDB
-              const metadata = await indexedDBService.getMeetingMetadata(currentMeetingId);
-
-              if (metadata && payload.folder_path) {
-                metadata.folderPath = payload.folder_path;
-                await indexedDBService.saveMeetingMetadata(metadata);
-              }
-            }
-          } catch (error) {
-            console.error('Failed to update meeting metadata on stop:', error);
+            console.error('Failed to initialize meeting on recording start:', error);
           }
         });
       } catch (error) {
@@ -168,18 +116,12 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
     return () => {
       if (unlistenRecordingStarted) {
         unlistenRecordingStarted();
-        console.log('🧹 Recording started listener cleaned up');
-      }
-      if (unlistenRecordingStopped) {
-        unlistenRecordingStopped();
-        console.log('🧹 Recording stopped listener cleaned up');
       }
     };
   }, [currentMeetingId]);
 
   // Main transcript buffering logic with sequence_id ordering
   useEffect(() => {
-    let unlistenFn: (() => void) | undefined;
     let transcriptCounter = 0;
     const transcriptBuffer = new Map<number, Transcript>();
     let lastProcessedSequence = 0;
@@ -282,81 +224,12 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
     // Assign final flush function to ref for external access
     finalFlushRef.current = () => processBufferedTranscripts(true);
 
-    const setupListener = async () => {
-      try {
-        console.log('🔥 Setting up MAIN transcript listener during component initialization...');
-        unlistenFn = await transcriptService.onTranscriptUpdate((update) => {
-          const now = Date.now();
-          console.log('🎯 MAIN LISTENER: Received transcript update:', {
-            sequence_id: update.sequence_id,
-            text: update.text.substring(0, 50) + '...',
-            timestamp: update.timestamp,
-            is_partial: update.is_partial,
-            received_at: new Date(now).toISOString(),
-            buffer_size_before: transcriptBuffer.size
-          });
-
-          // Check for duplicate sequence_id before processing
-          if (transcriptBuffer.has(update.sequence_id)) {
-            console.log('🚫 MAIN LISTENER: Duplicate sequence_id, skipping buffer:', update.sequence_id);
-            return;
-          }
-
-          // Create transcript for buffer with NEW timestamp fields
-          const newTranscript: Transcript = {
-            id: `${Date.now()}-${transcriptCounter++}`,
-            text: update.text,
-            timestamp: update.timestamp,
-            sequence_id: update.sequence_id,
-            chunk_start_time: update.chunk_start_time,
-            is_partial: update.is_partial,
-            confidence: update.confidence,
-            // NEW: Recording-relative timestamps for playback sync
-            audio_start_time: update.audio_start_time,
-            audio_end_time: update.audio_end_time,
-            duration: update.duration,
-          };
-
-          // Add to buffer
-          transcriptBuffer.set(update.sequence_id, newTranscript);
-          console.log(`✅ MAIN LISTENER: Buffered transcript with sequence_id ${update.sequence_id}. Buffer size: ${transcriptBuffer.size}, Last processed: ${lastProcessedSequence}`);
-
-          // Save to IndexedDB (non-blocking)
-          if (currentMeetingId) {
-            indexedDBService.saveTranscript(currentMeetingId, update)
-              .catch(err => console.warn('IndexedDB save failed:', err));
-          }
-
-          // Clear any existing timer and set a new one
-          if (processingTimer) {
-            clearTimeout(processingTimer);
-          }
-
-          // Process buffer with minimal delay for immediate UI updates (serial workers = sequential order)
-          processingTimer = setTimeout(processBufferedTranscripts, 10);
-        });
-        console.log('✅ MAIN transcript listener setup complete');
-      } catch (error) {
-        console.error('❌ Failed to setup MAIN transcript listener:', error);
-        alert('Failed to setup transcript listener. Check console for details.');
-      }
-    };
-
-    setupListener();
-    console.log('Started enhanced listener setup');
-
     return () => {
-      console.log('🧹 CLEANUP: Cleaning up MAIN transcript listener...');
       if (processingTimer) {
         clearTimeout(processingTimer);
-        console.log('🧹 CLEANUP: Cleared processing timer');
-      }
-      if (unlistenFn) {
-        unlistenFn();
-        console.log('🧹 CLEANUP: MAIN transcript listener cleaned up');
       }
     };
-  }, [currentMeetingId]); // Add currentMeetingId dependency
+  }, [currentMeetingId]);
 
   // Sync transcript history and meeting name from backend on reload
   // This fixes the issue where reloading during active recording causes state desync

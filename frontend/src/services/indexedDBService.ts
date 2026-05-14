@@ -1,54 +1,74 @@
 /**
- * IndexedDB Service for Transcript Recovery
- * Provides browser-based persistence for meeting transcripts and metadata
- * to enable recovery after app crashes or unexpected closures.
+ * IndexedDB Service — v2 schema
+ *
+ * v1: stored live-transcript chunks (meetings + transcripts stores).
+ * v2: repurposed as transcription-queue persistence. The transcripts store is
+ *     dropped; a new transcription_queue store holds one job row per meeting.
+ *     Legacy v1 meeting metadata is preserved in a migration_v1_meetings store
+ *     so the one-shot recovery modal can offer it on the first post-upgrade
+ *     launch (see useTranscriptRecovery.ts / task 11.2).
  */
 import { TranscriptUpdate } from '@/types';
 
-// Database schema interfaces
+// ── v1 schema interfaces (kept for the migration read path) ──────────────────
+
 export interface MeetingMetadata {
-  meetingId: string;          // Primary key: "meeting-{timestamp}"
-  title: string;              // Meeting title
-  startTime: number;          // Unix timestamp (ms)
-  lastUpdated: number;        // Unix timestamp (ms)
-  transcriptCount: number;    // Number of transcript segments
-  savedToSQLite: boolean;     // Flag: saved to backend DB
-  folderPath?: string;        // Path to recording folder
+  meetingId: string;
+  title: string;
+  startTime: number;
+  lastUpdated: number;
+  transcriptCount: number;
+  savedToSQLite: boolean;
+  folderPath?: string;
 }
 
 export interface StoredTranscript {
-  id?: number;                // Auto-increment primary key
-  meetingId: string;          // Foreign key to meetings store
-  text: string;               // Transcript text
-  timestamp: string;          // ISO 8601 timestamp
-  confidence: number;         // Whisper confidence score
-  sequenceId: number;         // Sequence number for ordering
-  storedAt: number;           // Unix timestamp when saved
-  audio_start_time?: number;  // Recording-relative start time in seconds
-  audio_end_time?: number;    // Recording-relative end time in seconds
-  duration?: number;          // Duration in seconds
-  [key: string]: unknown;     // Allow additional fields from TranscriptUpdate
+  id?: number;
+  meetingId: string;
+  text: string;
+  timestamp: string;
+  confidence: number;
+  sequenceId: number;
+  storedAt: number;
+  audio_start_time?: number;
+  audio_end_time?: number;
+  duration?: number;
+  [key: string]: unknown;
 }
+
+// ── v2 schema: transcription queue ──────────────────────────────────────────
+
+export type QueueJobStatus = 'pending' | 'in_progress' | 'paused' | 'done' | 'failed';
+
+export const VALID_QUEUE_STATUSES: readonly QueueJobStatus[] = [
+  'pending',
+  'in_progress',
+  'paused',
+  'done',
+  'failed',
+] as const;
+
+export interface TranscriptionQueueJob {
+  meetingId: string;
+  status: QueueJobStatus;
+  queuePosition: number;
+  pauseReason?: string;
+  startedAt?: number;
+  completedAt?: number;
+  lastError?: string;
+}
+
+// ── Service ──────────────────────────────────────────────────────────────────
 
 class IndexedDBService {
   private db: IDBDatabase | null = null;
   private readonly DB_NAME = 'MeetilyRecoveryDB';
-  private readonly DB_VERSION = 1;
+  private readonly DB_VERSION = 2;
   private initPromise: Promise<void> | null = null;
 
-  /**
-   * Initialize database connection
-   */
   async init(): Promise<void> {
-    // Return existing promise if initialization is in progress
-    if (this.initPromise) {
-      return this.initPromise;
-    }
-
-    // Return immediately if already initialized
-    if (this.db) {
-      return Promise.resolve();
-    }
+    if (this.initPromise) return this.initPromise;
+    if (this.db) return Promise.resolve();
 
     this.initPromise = new Promise((resolve, reject) => {
       try {
@@ -66,22 +86,43 @@ class IndexedDBService {
 
         request.onupgradeneeded = (event) => {
           const db = (event.target as IDBOpenDBRequest).result;
+          const tx = (event.target as IDBOpenDBRequest).transaction!;
+          const oldVersion = event.oldVersion;
 
-          // Create meetings store
-          if (!db.objectStoreNames.contains('meetings')) {
-            const meetingsStore = db.createObjectStore('meetings', { keyPath: 'meetingId' });
-            meetingsStore.createIndex('lastUpdated', 'lastUpdated', { unique: false });
-            meetingsStore.createIndex('savedToSQLite', 'savedToSQLite', { unique: false });
+          // ── v1 → v2 migration ────────────────────────────────────────────
+          // Preserve v1 meeting metadata in a migration store so the one-shot
+          // recovery modal can present them on first post-upgrade launch.
+          if (oldVersion === 1) {
+            if (db.objectStoreNames.contains('meetings')) {
+              const meetingsStore = tx.objectStore('meetings');
+              const getAllReq = meetingsStore.getAll();
+
+              getAllReq.onsuccess = () => {
+                const legacyMeetings = getAllReq.result as MeetingMetadata[];
+                if (legacyMeetings.length > 0) {
+                  const migStore = db.createObjectStore('migration_v1_meetings', { keyPath: 'meetingId' });
+                  migStore.createIndex('lastUpdated', 'lastUpdated', { unique: false });
+                  for (const m of legacyMeetings) {
+                    migStore.add(m);
+                  }
+                }
+              };
+            }
+
+            // Drop v1 live-transcript stores.
+            if (db.objectStoreNames.contains('transcripts')) {
+              db.deleteObjectStore('transcripts');
+            }
+            if (db.objectStoreNames.contains('meetings')) {
+              db.deleteObjectStore('meetings');
+            }
           }
 
-          // Create transcripts store
-          if (!db.objectStoreNames.contains('transcripts')) {
-            const transcriptsStore = db.createObjectStore('transcripts', {
-              keyPath: 'id',
-              autoIncrement: true
-            });
-            transcriptsStore.createIndex('meetingId', 'meetingId', { unique: false });
-            transcriptsStore.createIndex('storedAt', 'storedAt', { unique: false });
+          // ── Create transcription_queue store (v2, all paths) ─────────────
+          if (!db.objectStoreNames.contains('transcription_queue')) {
+            const queueStore = db.createObjectStore('transcription_queue', { keyPath: 'meetingId' });
+            queueStore.createIndex('status', 'status', { unique: false });
+            queueStore.createIndex('queuePosition', 'queuePosition', { unique: false });
           }
         };
       } catch (error) {
@@ -93,359 +134,190 @@ class IndexedDBService {
     return this.initPromise;
   }
 
-  // Meeting operations
+  // ── Queue operations ────────────────────────────────────────────────────────
 
-  /**
-   * Save or update meeting metadata
-   */
-  async saveMeetingMetadata(metadata: MeetingMetadata): Promise<void> {
-    try {
-      if (!this.db) await this.init();
-
-      const transaction = this.db!.transaction(['meetings'], 'readwrite');
-      const store = transaction.objectStore('meetings');
-
-      await new Promise<void>((resolve, reject) => {
-        const request = store.put(metadata);
-        request.onsuccess = () => resolve();
-        request.onerror = () => reject(request.error);
-      });
-    } catch (error) {
-      console.warn('Failed to save meeting metadata to IndexedDB:', error);
-      // Fail silently - don't interrupt recording
-    }
+  async enqueueJob(job: TranscriptionQueueJob): Promise<void> {
+    if (!this.db) await this.init();
+    const tx = this.db!.transaction(['transcription_queue'], 'readwrite');
+    const store = tx.objectStore('transcription_queue');
+    return new Promise<void>((resolve, reject) => {
+      const req = store.put(job);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
   }
 
-  /**
-   * Get meeting metadata by ID
-   */
-  async getMeetingMetadata(meetingId: string): Promise<MeetingMetadata | null> {
-    try {
-      if (!this.db) await this.init();
-
-      const transaction = this.db!.transaction(['meetings'], 'readonly');
-      const store = transaction.objectStore('meetings');
-
-      return new Promise((resolve, reject) => {
-        const request = store.get(meetingId);
-        request.onsuccess = () => resolve(request.result || null);
-        request.onerror = () => reject(request.error);
-      });
-    } catch (error) {
-      console.error('Failed to get meeting metadata from IndexedDB:', error);
-      return null;
-    }
-  }
-
-  /**
-   * Get all unsaved meetings (savedToSQLite = false)
-   */
-  async getAllMeetings(): Promise<MeetingMetadata[]> {
-    try {
-      if (!this.db) await this.init();
-
-      const transaction = this.db!.transaction(['meetings'], 'readonly');
-      const store = transaction.objectStore('meetings');
-
-      return new Promise((resolve, reject) => {
-        const request = store.getAll();
-        request.onsuccess = () => {
-          const allMeetings = request.result as MeetingMetadata[];
-          // Filter for unsaved meetings (savedToSQLite = false)
-          const unsavedMeetings = allMeetings.filter(m => m.savedToSQLite === false);
-
-          // Sort by most recent first
-          unsavedMeetings.sort((a, b) => b.lastUpdated - a.lastUpdated);
-          resolve(unsavedMeetings);
-        };
-        request.onerror = () => reject(request.error);
-      });
-    } catch (error) {
-      console.error('Failed to get meetings from IndexedDB:', error);
-      return [];
-    }
-  }
-
-  /**
-   * Mark meeting as saved to SQLite
-   */
-  async markMeetingSaved(meetingId: string): Promise<void> {
-    try {
-      if (!this.db) await this.init();
-
-      const transaction = this.db!.transaction(['meetings'], 'readwrite');
-      const store = transaction.objectStore('meetings');
-
-      return new Promise((resolve, reject) => {
-        const getRequest = store.get(meetingId);
-        getRequest.onsuccess = () => {
-          const meeting = getRequest.result;
-          if (meeting) {
-            meeting.savedToSQLite = true;
-            meeting.lastUpdated = Date.now();
-            const putRequest = store.put(meeting);
-            putRequest.onsuccess = () => resolve();
-            putRequest.onerror = () => reject(putRequest.error);
-          } else {
-            resolve();
-          }
-        };
-        getRequest.onerror = () => reject(getRequest.error);
-      });
-    } catch (error) {
-      console.warn('Failed to mark meeting as saved:', error);
-    }
-  }
-
-  /**
-   * Delete meeting and all its transcripts
-   */
-  async deleteMeeting(meetingId: string): Promise<void> {
-    try {
-      if (!this.db) await this.init();
-
-      const transaction = this.db!.transaction(['meetings', 'transcripts'], 'readwrite');
-      const meetingsStore = transaction.objectStore('meetings');
-      const transcriptsStore = transaction.objectStore('transcripts');
-
-      // Delete transcripts
-      await this.deleteTranscriptsForMeetingInternal(transcriptsStore, meetingId);
-
-      // Delete meeting
-      await new Promise<void>((resolve, reject) => {
-        const request = meetingsStore.delete(meetingId);
-        request.onsuccess = () => resolve();
-        request.onerror = () => reject(request.error);
-      });
-    } catch (error) {
-      console.error('Failed to delete meeting from IndexedDB:', error);
-      throw error;
-    }
-  }
-
-  // Transcript operations
-
-  /**
-   * Save a transcript segment
-   */
-  async saveTranscript(meetingId: string, transcript: TranscriptUpdate): Promise<void> {
-    try {
-      if (!this.db) await this.init();
-
-      const storedTranscript: StoredTranscript = {
-        ...transcript,
-        meetingId,
-        storedAt: Date.now(),
-        sequenceId: transcript.sequence_id,
-      };
-
-      const transaction = this.db!.transaction(['transcripts', 'meetings'], 'readwrite');
-      const transcriptsStore = transaction.objectStore('transcripts');
-      const meetingsStore = transaction.objectStore('meetings');
-
-      // Save transcript
-      await new Promise<void>((resolve, reject) => {
-        const request = transcriptsStore.add(storedTranscript);
-        request.onsuccess = () => resolve();
-        request.onerror = () => reject(request.error);
-      });
-
-      // Update meeting metadata
-      const meeting = await new Promise<MeetingMetadata | null>((resolve, reject) => {
-        const request = meetingsStore.get(meetingId);
-        request.onsuccess = () => resolve(request.result || null);
-        request.onerror = () => reject(request.error);
-      });
-
-      if (meeting) {
-        meeting.lastUpdated = Date.now();
-        meeting.transcriptCount += 1;
-        await new Promise<void>((resolve, reject) => {
-          const request = meetingsStore.put(meeting);
-          request.onsuccess = () => resolve();
-          request.onerror = () => reject(request.error);
-        });
-      }
-    } catch (error) {
-      console.warn('Failed to save transcript to IndexedDB:', error);
-      // Fail silently - don't interrupt recording
-    }
-  }
-
-  /**
-   * Get all transcripts for a meeting
-   */
-  async getTranscripts(meetingId: string): Promise<StoredTranscript[]> {
-    try {
-      if (!this.db) await this.init();
-
-      const transaction = this.db!.transaction(['transcripts'], 'readonly');
-      const store = transaction.objectStore('transcripts');
-      const index = store.index('meetingId');
-
-      return new Promise((resolve, reject) => {
-        const request = index.getAll(meetingId);
-        request.onsuccess = () => {
-          const transcripts = request.result as StoredTranscript[];
-          // Sort by sequence ID
-          transcripts.sort((a, b) => a.sequenceId - b.sequenceId);
-          resolve(transcripts);
-        };
-        request.onerror = () => reject(request.error);
-      });
-    } catch (error) {
-      console.error('Failed to get transcripts from IndexedDB:', error);
-      return [];
-    }
-  }
-
-  /**
-   * Get transcript count for a meeting
-   */
-  async getTranscriptCount(meetingId: string): Promise<number> {
-    try {
-      if (!this.db) await this.init();
-
-      const transaction = this.db!.transaction(['transcripts'], 'readonly');
-      const store = transaction.objectStore('transcripts');
-      const index = store.index('meetingId');
-
-      return new Promise((resolve, reject) => {
-        const request = index.count(meetingId);
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-    } catch (error) {
-      console.error('Failed to get transcript count from IndexedDB:', error);
-      return 0;
-    }
-  }
-
-  // Cleanup operations
-
-  /**
-   * Delete meetings older than specified days
-   * @param daysOld Number of days threshold
-   * @returns Number of meetings deleted
-   */
-  async deleteOldMeetings(daysOld: number): Promise<number> {
-    try {
-      if (!this.db) await this.init();
-
-      const cutoffTime = Date.now() - (daysOld * 24 * 60 * 60 * 1000);
-      const transaction = this.db!.transaction(['meetings', 'transcripts'], 'readwrite');
-      const meetingsStore = transaction.objectStore('meetings');
-      const transcriptsStore = transaction.objectStore('transcripts');
-
-      // Get all meetings
-      const allMeetings = await new Promise<MeetingMetadata[]>((resolve, reject) => {
-        const request = meetingsStore.getAll();
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-
-      let deletedCount = 0;
-
-      for (const meeting of allMeetings) {
-        if (meeting.lastUpdated < cutoffTime) {
-          // Delete transcripts
-          await this.deleteTranscriptsForMeetingInternal(transcriptsStore, meeting.meetingId);
-
-          // Delete meeting
-          await new Promise<void>((resolve, reject) => {
-            const request = meetingsStore.delete(meeting.meetingId);
-            request.onsuccess = () => resolve();
-            request.onerror = () => reject(request.error);
-          });
-
-          deletedCount++;
-        }
-      }
-
-      console.log(`Cleaned up ${deletedCount} old meetings`);
-      return deletedCount;
-    } catch (error) {
-      console.error('Failed to delete old meetings:', error);
-      return 0;
-    }
-  }
-
-  /**
-   * Delete saved meetings older than specified hours
-   * @param hoursOld Number of hours threshold after save
-   * @returns Number of meetings deleted
-   */
-  async deleteSavedMeetings(hoursOld: number): Promise<number> {
-    try {
-      if (!this.db) await this.init();
-
-      const cutoffTime = Date.now() - (hoursOld * 60 * 60 * 1000);
-      const transaction = this.db!.transaction(['meetings', 'transcripts'], 'readwrite');
-      const meetingsStore = transaction.objectStore('meetings');
-      const transcriptsStore = transaction.objectStore('transcripts');
-
-      // Get all meetings and filter for saved ones
-      const allMeetings = await new Promise<MeetingMetadata[]>((resolve, reject) => {
-        const request = meetingsStore.getAll();
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-
-      // Filter for saved meetings (savedToSQLite = true)
-      const savedMeetings = allMeetings.filter(m => m.savedToSQLite === true);
-
-      let deletedCount = 0;
-
-      for (const meeting of savedMeetings) {
-        if (meeting.lastUpdated < cutoffTime) {
-          // Delete transcripts
-          await this.deleteTranscriptsForMeetingInternal(transcriptsStore, meeting.meetingId);
-
-          // Delete meeting
-          await new Promise<void>((resolve, reject) => {
-            const request = meetingsStore.delete(meeting.meetingId);
-            request.onsuccess = () => resolve();
-            request.onerror = () => reject(request.error);
-          });
-
-          deletedCount++;
-        }
-      }
-
-      console.log(`Cleaned up ${deletedCount} saved meetings`);
-      return deletedCount;
-    } catch (error) {
-      console.error('Failed to delete saved meetings:', error);
-      return 0;
-    }
-  }
-
-  /**
-   * Helper to delete all transcripts for a meeting
-   */
-  private async deleteTranscriptsForMeetingInternal(
-    transcriptsStore: IDBObjectStore,
-    meetingId: string
+  async updateJobStatus(
+    meetingId: string,
+    status: QueueJobStatus,
+    updates?: Partial<Omit<TranscriptionQueueJob, 'meetingId' | 'status'>>,
   ): Promise<void> {
-    const index = transcriptsStore.index('meetingId');
+    if (!this.db) await this.init();
+    const tx = this.db!.transaction(['transcription_queue'], 'readwrite');
+    const store = tx.objectStore('transcription_queue');
+
+    return new Promise<void>((resolve, reject) => {
+      const getReq = store.get(meetingId);
+      getReq.onsuccess = () => {
+        const existing = getReq.result as TranscriptionQueueJob | undefined;
+        if (!existing) {
+          reject(new Error(`Queue job not found: ${meetingId}`));
+          return;
+        }
+        const updated: TranscriptionQueueJob = { ...existing, status, ...updates };
+        const putReq = store.put(updated);
+        putReq.onsuccess = () => resolve();
+        putReq.onerror = () => reject(putReq.error);
+      };
+      getReq.onerror = () => reject(getReq.error);
+    });
+  }
+
+  async getQueueJob(meetingId: string): Promise<TranscriptionQueueJob | null> {
+    if (!this.db) await this.init();
+    const tx = this.db!.transaction(['transcription_queue'], 'readonly');
+    const store = tx.objectStore('transcription_queue');
+    return new Promise((resolve, reject) => {
+      const req = store.get(meetingId);
+      req.onsuccess = () => resolve((req.result as TranscriptionQueueJob) ?? null);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async getPendingQueueJobs(): Promise<TranscriptionQueueJob[]> {
+    if (!this.db) await this.init();
+    const tx = this.db!.transaction(['transcription_queue'], 'readonly');
+    const store = tx.objectStore('transcription_queue');
+    return new Promise((resolve, reject) => {
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const all = req.result as TranscriptionQueueJob[];
+        resolve(all.filter(j => j.status === 'pending' || j.status === 'in_progress'));
+      };
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  /** Delete and re-open the database. For test isolation only. */
+  async resetForTests(): Promise<void> {
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+    }
+    this.initPromise = null;
+
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.deleteDatabase(this.DB_NAME);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+      req.onblocked = () => resolve(); // proceed anyway
+    });
+
+    await this.init();
+  }
+
+  // ── Legacy v1 recovery (one-shot migration path) ──────────────────────────
+  // Used by useTranscriptRecovery.ts until migration_v2_complete is set.
+
+  async getLegacyMeetings(): Promise<MeetingMetadata[]> {
+    if (!this.db) await this.init();
+    if (!this.db!.objectStoreNames.contains('migration_v1_meetings')) return [];
+    const tx = this.db!.transaction(['migration_v1_meetings'], 'readonly');
+    const store = tx.objectStore('migration_v1_meetings');
+    return new Promise((resolve, reject) => {
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const all = (req.result as MeetingMetadata[]).filter(m => !m.savedToSQLite);
+        all.sort((a, b) => b.lastUpdated - a.lastUpdated);
+        resolve(all);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  // ── Existing v1 methods kept for backward compatibility ──────────────────
+  // These read from the migration_v1_meetings store (post-upgrade) or the
+  // original meetings store (pre-upgrade, when oldVersion was 1 and this
+  // code ran before the migration dropped the store). They will be removed
+  // once the migration is complete (task 11).
+
+  async getAllMeetings(): Promise<MeetingMetadata[]> {
+    return this.getLegacyMeetings();
+  }
+
+  async getMeetingMetadata(meetingId: string): Promise<MeetingMetadata | null> {
+    if (!this.db) await this.init();
+    const storeName = this.db!.objectStoreNames.contains('migration_v1_meetings')
+      ? 'migration_v1_meetings'
+      : null;
+    if (!storeName) return null;
+
+    const tx = this.db!.transaction([storeName], 'readonly');
+    const store = tx.objectStore(storeName);
+    return new Promise((resolve, reject) => {
+      const req = store.get(meetingId);
+      req.onsuccess = () => resolve((req.result as MeetingMetadata) ?? null);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async markMeetingSaved(meetingId: string): Promise<void> {
+    if (!this.db) await this.init();
+    if (!this.db!.objectStoreNames.contains('migration_v1_meetings')) return;
+    const tx = this.db!.transaction(['migration_v1_meetings'], 'readwrite');
+    const store = tx.objectStore('migration_v1_meetings');
 
     return new Promise((resolve, reject) => {
-      const request = index.openCursor(IDBKeyRange.only(meetingId));
-
-      request.onsuccess = (event) => {
-        const cursor = (event.target as IDBRequest<IDBCursorWithValue>).result;
-        if (cursor) {
-          cursor.delete();
-          cursor.continue();
+      const getReq = store.get(meetingId);
+      getReq.onsuccess = () => {
+        const meeting = getReq.result as MeetingMetadata | undefined;
+        if (meeting) {
+          meeting.savedToSQLite = true;
+          meeting.lastUpdated = Date.now();
+          const putReq = store.put(meeting);
+          putReq.onsuccess = () => resolve();
+          putReq.onerror = () => reject(putReq.error);
         } else {
           resolve();
         }
       };
-
-      request.onerror = () => reject(request.error);
+      getReq.onerror = () => reject(getReq.error);
     });
   }
+
+  async deleteMeeting(meetingId: string): Promise<void> {
+    if (!this.db) await this.init();
+    const stores: string[] = [];
+    if (this.db!.objectStoreNames.contains('migration_v1_meetings')) {
+      stores.push('migration_v1_meetings');
+    }
+    if (stores.length === 0) return;
+
+    const tx = this.db!.transaction(stores, 'readwrite');
+    await new Promise<void>((resolve, reject) => {
+      const req = tx.objectStore('migration_v1_meetings').delete(meetingId);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async getTranscripts(meetingId: string): Promise<StoredTranscript[]> {
+    // The transcripts store no longer exists in v2. Return empty array so
+    // callers don't crash; the legacy recovery modal handles this gracefully.
+    void meetingId;
+    return [];
+  }
+
+  async getTranscriptCount(meetingId: string): Promise<number> {
+    void meetingId;
+    return 0;
+  }
+
+  // saveTranscript removed in task 3.4 — no callers remain after §1 cleanup.
+
+  // v1 cleanup methods — no-ops in v2 (the meetings/transcripts stores no longer exist).
+  async deleteOldMeetings(_daysOld: number): Promise<number> { return 0; }
+  async deleteSavedMeetings(_hoursOld: number): Promise<number> { return 0; }
 }
 
-// Export singleton instance
 export const indexedDBService = new IndexedDBService();
