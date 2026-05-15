@@ -31,7 +31,15 @@ interface TranscriptPanelProps {
   onRefetchTranscripts?: () => Promise<void>;
 }
 
-function TranscriptionStatusBanner({ job, onRetry }: { job: QueueJob; onRetry: () => void }) {
+function TranscriptionStatusBanner({
+  job,
+  onRetry,
+  isRetrying,
+}: {
+  job: QueueJob;
+  onRetry: () => void;
+  isRetrying: boolean;
+}) {
   if (job.status === 'Done') return null;
 
   const isActive = job.status === 'InProgress';
@@ -108,9 +116,10 @@ function TranscriptionStatusBanner({ job, onRetry }: { job: QueueJob; onRetry: (
         {isFailed && (
           <button
             onClick={onRetry}
-            className="mt-1 px-3 py-1.5 rounded-md bg-red-100 hover:bg-red-200 text-red-800 text-xs font-medium transition-colors"
+            disabled={isRetrying}
+            className="mt-1 px-3 py-1.5 rounded-md bg-red-100 hover:bg-red-200 text-red-800 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Retry transcription
+            {isRetrying ? 'Retrying…' : 'Retry transcription'}
           </button>
         )}
       </div>
@@ -141,7 +150,7 @@ export function TranscriptPanel({
   const [isRetrying, setIsRetrying] = useState(false);
 
   const handleRetry = useCallback(async () => {
-    if (!queueJob || isRetrying) return;
+    if (!queueJob) return;
     setIsRetrying(true);
     try {
       await cancelQueuedJob(queueJob.meeting_id);
@@ -151,7 +160,7 @@ export function TranscriptPanel({
     } finally {
       setIsRetrying(false);
     }
-  }, [queueJob, isRetrying]);
+  }, [queueJob]);
 
   const convertedSegments = useMemo(() => {
     if (usePagination && segments) {
@@ -185,7 +194,7 @@ export function TranscriptPanel({
       {/* Transcript content */}
       <div className="flex-1 overflow-hidden pb-4">
         {isEmpty && !isRecording && queueJob && queueJob.status !== 'Done' ? (
-          <TranscriptionStatusBanner job={queueJob} onRetry={handleRetry} />
+          <TranscriptionStatusBanner job={queueJob} onRetry={handleRetry} isRetrying={isRetrying} />
         ) : (
           <VirtualizedTranscriptView
             segments={convertedSegments}
