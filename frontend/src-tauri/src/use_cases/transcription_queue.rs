@@ -637,6 +637,18 @@ mod tests {
         let state = queue2.get_state().await;
         let job = state.jobs.iter().find(|j| j.meeting_id == "s7-no-provider").unwrap();
         assert_eq!(job.phase, JobPhase::Transcribing, "job must remain in Transcribing phase when no provider");
+
+        // Edge case: CompletedChain returned but no summary_processor registered → Done, no panic.
+        let queue3 = Arc::new(TranscriptionQueue::with_processors(
+            Arc::new(|_id, _path| Box::pin(async { JobResult::CompletedChain })),
+            None,
+        ));
+        let _handle3 = queue3.spawn_worker();
+        queue3.enqueue("s7-chain-no-proc".to_string(), PathBuf::from("/audio.mp4")).await;
+        wait_for_status(&queue3, "s7-chain-no-proc", JobStatus::Done).await;
+        let state3 = queue3.get_state().await;
+        let job3 = state3.jobs.iter().find(|j| j.meeting_id == "s7-chain-no-proc").unwrap();
+        assert_eq!(job3.phase, JobPhase::Transcribing, "CompletedChain with no processor must go to Done in Transcribing phase");
     }
 
     #[tokio::test]
@@ -666,7 +678,9 @@ mod tests {
         let job = state.jobs.iter().find(|j| j.meeting_id == "s7-gates").unwrap();
         assert_ne!(job.status, JobStatus::Done, "job must not complete while scheduler is paused");
 
-        // Clear the pause — worker woken by resume_all.
+        // Clear the pause; resume_all() calls notify_one() to wake the sleeping worker.
+        // The job is already Pending so no Paused→Pending flip is needed here — the
+        // notify is what matters.
         queue.scheduler.manual_pause_all.store(false, Ordering::SeqCst);
         queue.resume_all().await;
 
