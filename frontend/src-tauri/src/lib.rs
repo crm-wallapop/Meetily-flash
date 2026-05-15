@@ -62,6 +62,9 @@ use notifications::commands::NotificationManagerState;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::RwLock;
+use use_cases::transcription_queue::TranscriptionQueue;
+
+pub type TranscriptionQueueState = Arc<TranscriptionQueue>;
 
 static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
 
@@ -390,6 +393,83 @@ pub fn get_language_preference_internal() -> Option<String> {
     LANGUAGE_PREFERENCE.lock().ok().map(|lang| lang.clone())
 }
 
+/// Read all transcript text from a `transcripts.json` file produced by `write_transcripts_json`.
+async fn read_transcript_text(path: &std::path::Path) -> anyhow::Result<String> {
+    let content = tokio::fs::read_to_string(path).await?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    let segments = root
+        .get("segments")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow::anyhow!("missing segments array"))?;
+    let text = segments
+        .iter()
+        .filter_map(|s| s.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(text)
+}
+
+// ── Queue Tauri commands (task 8.1) ───────────────────────────────────────────
+
+#[tauri::command]
+async fn pause_all_background_work(
+    state: tauri::State<'_, TranscriptionQueueState>,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    state.scheduler.manual_pause_all.store(true, Ordering::SeqCst);
+    state.pause_all().await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn resume_all_background_work(
+    state: tauri::State<'_, TranscriptionQueueState>,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    state.scheduler.manual_pause_all.store(false, Ordering::SeqCst);
+    state.resume_all().await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_queue_state(
+    state: tauri::State<'_, TranscriptionQueueState>,
+) -> Result<use_cases::transcription_queue::QueueSnapshot, String> {
+    Ok(state.get_state().await)
+}
+
+#[tauri::command]
+async fn cancel_queued_job<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, TranscriptionQueueState>,
+    meeting_id: String,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    state.cancel(&meeting_id).await;
+    // Emit the updated snapshot so the frontend badge disappears immediately.
+    let snapshot = state.get_state().await;
+    let _ = app.emit("transcription-queue-changed", &snapshot);
+    Ok(())
+}
+
+/// Enqueue a transcription job. Called by the frontend after saveMeeting returns the UUID,
+/// and by the recovery modal on restart. No existence check: when called after a fresh
+/// recording, the MP4 is being finalised concurrently; the recording gate (cleared by
+/// background_shutdown after save completes) prevents the worker from starting until the
+/// file is on disk.
+#[tauri::command]
+async fn enqueue_transcription_job(
+    state: tauri::State<'_, TranscriptionQueueState>,
+    meeting_id: String,
+    audio_path: String,
+) -> Result<(), String> {
+    log::info!("enqueue_transcription_job: meeting_id={} audio_path={}", meeting_id, audio_path);
+    let path = std::path::PathBuf::from(&audio_path);
+    state.enqueue(meeting_id, path).await;
+    log::info!("enqueue_transcription_job: job enqueued successfully");
+    Ok(())
+}
+
 pub fn run() {
     // Max level is set by env_logger (via RUST_LOG) in main.rs — don't override it here.
 
@@ -407,6 +487,123 @@ pub fn run() {
         .manage(summary::summary_engine::ModelManagerState(Arc::new(tokio::sync::Mutex::new(None))))
         .setup(|_app| {
             log::info!("Application setup complete");
+
+            // Wire the transcription queue with production processors.
+            {
+                use audio::retranscription::YIELD_SENTINEL;
+                use use_cases::transcription_queue::{JobResult, ProcessorFn, StateChangeNotifier, TranscriptionQueue};
+
+                let retranscription_processor: ProcessorFn = {
+                    let app = _app.handle().clone();
+                    Arc::new(move |meeting_id: String, audio_path: std::path::PathBuf| {
+                        let app = app.clone();
+                        Box::pin(async move {
+                            let folder = match audio_path.parent() {
+                                Some(p) => p.to_string_lossy().to_string(),
+                                None => return JobResult::Failed("invalid audio path".to_string()),
+                            };
+                            match audio::retranscription::start_retranscription(
+                                app, meeting_id, folder, None, None, None,
+                            )
+                            .await
+                            {
+                                Ok(_) => JobResult::Completed,
+                                Err(e) if e.to_string().contains(YIELD_SENTINEL) => {
+                                    JobResult::Yielded
+                                }
+                                Err(e) => JobResult::Failed(e.to_string()),
+                            }
+                        })
+                    })
+                };
+
+                let summary_processor: ProcessorFn = {
+                    let app = _app.handle().clone();
+                    Arc::new(move |meeting_id: String, audio_path: std::path::PathBuf| {
+                        let app = app.clone();
+                        Box::pin(async move {
+                            use crate::database::repositories::setting::SettingsRepository;
+
+                            let (pool, config) = {
+                                let app_state = match app.try_state::<state::AppState>() {
+                                    Some(s) => s,
+                                    None => return JobResult::Completed,
+                                };
+                                let pool = app_state.db_manager.pool().clone();
+                                let config = match SettingsRepository::get_model_config(&pool).await {
+                                    Ok(Some(c)) if !c.provider.is_empty() => c,
+                                    _ => return JobResult::Completed,
+                                };
+                                (pool, config)
+                            };
+
+                            let folder = match audio_path.parent() {
+                                Some(p) => p.to_path_buf(),
+                                None => return JobResult::Completed,
+                            };
+                            let transcript_path = folder.join("transcripts.json");
+                            let text = match read_transcript_text(&transcript_path).await {
+                                Ok(t) if !t.is_empty() => t,
+                                _ => return JobResult::Completed,
+                            };
+
+                            summary::SummaryService::process_transcript_background(
+                                app,
+                                pool,
+                                meeting_id,
+                                text,
+                                config.provider,
+                                config.model,
+                                String::new(),
+                                "daily_standup".to_string(),
+                            )
+                            .await;
+                            JobResult::Completed
+                        })
+                    })
+                };
+
+                let queue = Arc::new(TranscriptionQueue::with_processors(
+                    retranscription_processor,
+                    Some(summary_processor),
+                ));
+                _app.manage(queue.clone() as TranscriptionQueueState);
+
+                let app_for_notifier = _app.handle().clone();
+                let notifier: StateChangeNotifier = Arc::new(move |snapshot| {
+                    use tauri::Emitter;
+                    let _ = app_for_notifier.emit("transcription-queue-changed", &snapshot);
+                });
+                let _worker_handle = queue.spawn_worker_with_notifier(Some(notifier));
+                log::info!("Transcription queue worker started");
+
+                // Sysinfo CPU/RAM polling — feeds the scheduler hysteresis gates every 5 s.
+                // The first sysinfo sample after a refresh_cpu_usage() call is always 0.0;
+                // a 200 ms warm-up sleep is done before entering the loop so the first
+                // real sample is accurate.  An initial 0.0 sample maps to "clear" which
+                // is safe (the threshold is 70 % CPU / 80 % RAM).
+                let scheduler = Arc::clone(&queue.scheduler);
+                tauri::async_runtime::spawn(async move {
+                    use sysinfo::System;
+                    let mut sys = System::new_all();
+                    sys.refresh_cpu_usage();
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    loop {
+                        sys.refresh_cpu_usage();
+                        sys.refresh_memory();
+                        let cpu_pct = sys.global_cpu_usage() as f64;
+                        let ram_pct = if sys.total_memory() > 0 {
+                            sys.used_memory() as f64 / sys.total_memory() as f64 * 100.0
+                        } else {
+                            0.0
+                        };
+                        scheduler.feed_cpu_sample(cpu_pct);
+                        scheduler.feed_ram_sample(ram_pct);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    }
+                });
+                log::info!("Sysinfo CPU/RAM scheduler polling started");
+            }
 
             // Initialize system tray
             if let Err(e) = tray::create_tray(_app.handle()) {
@@ -526,6 +723,15 @@ pub fn run() {
                         struct AppEmitter<R: tauri::Runtime>(tauri::AppHandle<R>);
                         impl<R: tauri::Runtime> DetectorEventEmitter for AppEmitter<R> {
                             fn emit_detected(&self, default_title: String, candidate_titles: Vec<String>) {
+                                use std::sync::atomic::Ordering;
+                                use use_cases::transcription_queue::SHOULD_YIELD;
+
+                                // Pause background transcription while a meeting is active.
+                                if let Some(q) = self.0.try_state::<TranscriptionQueueState>() {
+                                    q.scheduler.meeting_busy.store(true, Ordering::SeqCst);
+                                    SHOULD_YIELD.store(true, Ordering::SeqCst);
+                                }
+
                                 let handler = crate::notifications::system::SystemNotificationHandler::new(self.0.clone());
                                 let notif = crate::notifications::types::Notification::recording_started(Some(default_title.clone()));
                                 tauri::async_runtime::spawn(async move {
@@ -544,6 +750,17 @@ pub fn run() {
                                 }));
                             }
                             fn emit_ended(&self) {
+                                use std::sync::atomic::Ordering;
+
+                                // Clear the meeting gate and resume background transcription.
+                                if let Some(q) = self.0.try_state::<TranscriptionQueueState>() {
+                                    q.scheduler.meeting_busy.store(false, Ordering::SeqCst);
+                                    let q_arc = q.inner().clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        q_arc.resume_all().await;
+                                    });
+                                }
+
                                 let handler = crate::notifications::system::SystemNotificationHandler::new(self.0.clone());
                                 let notif = crate::notifications::types::Notification::new(
                                     "Meetily — Meeting ended",
@@ -812,6 +1029,12 @@ pub fn run() {
             // System settings commands
             #[cfg(target_os = "macos")]
             utils::open_system_settings,
+            // Transcription queue commands (tasks 8.1, 9.3)
+            pause_all_background_work,
+            resume_all_background_work,
+            get_queue_state,
+            cancel_queued_job,
+            enqueue_transcription_job,
             // Retranscription commands
             audio::retranscription::start_retranscription_command,
             audio::retranscription::cancel_retranscription_command,

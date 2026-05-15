@@ -1,5 +1,17 @@
 ## ADDED Requirements
 
+### Requirement: Recording start is synchronous — no pre-flight model checks
+
+The recording-start path SHALL NOT perform any asynchronous Tauri IPC calls before invoking `start_recording`. In particular, the Parakeet model-readiness checks (`parakeet_init`, `parakeet_has_available_models`, `parakeet_get_available_models`) SHALL NOT be called at recording-start time. Transcription model readiness is irrelevant to the recording-start path because transcription happens post-recording via the Whisper retranscription pipeline, not via Parakeet.
+
+#### Scenario: Start button responds immediately on click
+
+- **WHEN** the user clicks "Start recording"
+- **THEN** the recording-start path calls `start_recording` without any preceding Tauri IPC round-trips
+- **AND** the button responds within one render frame (no async latency before the UI reflects `STARTING` status)
+
+---
+
 ### Requirement: The recording pipeline does not run VAD or Whisper during capture
 
 The audio pipeline SHALL only encode audio to MP4 during a recording session. No VAD processor SHALL be initialised and no Whisper inference SHALL occur during recording. No `transcript-update` events SHALL be emitted while a recording is in progress.

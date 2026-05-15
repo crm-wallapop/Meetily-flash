@@ -21,6 +21,7 @@ import { TranscriptRecovery } from '@/components/TranscriptRecovery';
 import { AutoDetectBanner } from '@/components/AutoDetectBanner';
 import { useAutoDetect } from '@/hooks/useAutoDetect';
 import { indexedDBService } from '@/services/indexedDBService';
+import { onQueueChanged } from '@/services/queueService';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
 
@@ -121,6 +122,37 @@ export default function Home() {
 
     performStartupChecks();
   }, [checkForRecoverableTranscripts, recordingState.isRecording, status]);
+
+  // Sync transcription-queue-changed events to IndexedDB so the recovery modal
+  // can detect incomplete jobs on the next launch after a crash or forced quit.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    onQueueChanged((snapshot) => {
+      const now = Date.now();
+      snapshot.jobs.forEach((job) => {
+        if (job.status === 'Done' || job.status === 'Failed') {
+          // Mark completed/failed jobs so they no longer appear in recovery scan.
+          indexedDBService.updateJobStatus(
+            job.meeting_id,
+            job.status === 'Done' ? 'done' : 'failed',
+          ).catch(() => {/* ignore — row may not exist yet if job was instant */});
+        } else {
+          // Upsert the job; upsertQueueJob preserves enqueuedAt if the row
+          // already exists so the original enqueue timestamp is never overwritten.
+          indexedDBService.upsertQueueJob({
+            meetingId: job.meeting_id,
+            status: job.status.toLowerCase() as import('@/services/indexedDBService').QueueJobStatus,
+            queuePosition: 0,
+            enqueuedAt: now,
+            audioPath: job.audio_path,
+          }).catch(() => {/* ignore write errors — recovery is best-effort */});
+        }
+      });
+    }).then((fn) => { unlisten = fn; });
+
+    return () => { unlisten?.(); };
+  }, []);
 
   // Watch for recoverable meetings changes and show dialog once per session
   useEffect(() => {

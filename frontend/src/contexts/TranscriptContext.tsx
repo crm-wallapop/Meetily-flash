@@ -122,7 +122,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
 
   // Main transcript buffering logic with sequence_id ordering
   useEffect(() => {
-    let transcriptCounter = 0;
+    const transcriptCounter = 0;
     const transcriptBuffer = new Map<number, Transcript>();
     let lastProcessedSequence = 0;
     let processingTimer: NodeJS.Timeout | undefined;

@@ -23,10 +23,7 @@ use super::{
 };
 
 // Import transcription modules
-use super::transcription::{
-    self,
-    reset_speech_detected_flag,
-};
+use super::transcription::reset_speech_detected_flag;
 
 // Re-export TranscriptUpdate for backward compatibility
 pub use super::transcription::TranscriptUpdate;
@@ -119,6 +116,16 @@ pub async fn start_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), String
     start_recording_with_meeting_name(app, None).await
 }
 
+/// Set the transcription-scheduler recording gate and signal any active job to yield.
+/// Called by every start_recording variant; inverted by stop and cancel paths.
+fn set_recording_gate<R: Runtime>(app: &AppHandle<R>, busy: bool) {
+    let queue = app.state::<crate::TranscriptionQueueState>();
+    queue.scheduler.recording_busy.store(busy, Ordering::SeqCst);
+    if busy {
+        crate::use_cases::transcription_queue::SHOULD_YIELD.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Start recording with default devices and optional meeting name
 pub async fn start_recording_with_meeting_name<R: Runtime>(
     app: AppHandle<R>,
@@ -138,23 +145,6 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     if phase == RecordingPhase::Recording {
         return Err("Recording already in progress".to_string());
     }
-
-    // Validate that transcription models are available before starting recording
-    info!("🔍 Validating transcription model availability before starting recording...");
-    if let Err(validation_error) = transcription::validate_transcription_model_ready(&app).await {
-        error!("Model validation failed: {}", validation_error);
-
-        // Emit error event for frontend - actionable: false to show toast instead of modal
-        // (download progress is already shown in top-right toast)
-        let _ = app.emit("transcription-error", serde_json::json!({
-            "error": validation_error,
-            "userMessage": "Recording cannot start: Transcription model is still downloading. Please wait for the download to complete.",
-            "actionable": false
-        }));
-
-        return Err(validation_error);
-    }
-    info!("✅ Transcription model validation passed");
 
     // Async-first approach - no more blocking operations!
     info!("🚀 Starting async recording initialization");
@@ -310,6 +300,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Transition to Recording phase
     set_phase(RecordingPhase::Recording);
     reset_speech_detected_flag(); // Reset for new recording session
+    set_recording_gate(&app, true);
 
     // Emit phase transition event
     let _ = app.emit("recording-state-changed", serde_json::json!({ "phase": "Recording" }));
@@ -358,23 +349,6 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     if phase == RecordingPhase::Recording {
         return Err("Recording already in progress".to_string());
     }
-
-    // Validate that transcription models are available before starting recording
-    info!("🔍 Validating transcription model availability before starting recording...");
-    if let Err(validation_error) = transcription::validate_transcription_model_ready(&app).await {
-        error!("Model validation failed: {}", validation_error);
-
-        // Emit error event for frontend - actionable: false to show toast instead of modal
-        // (download progress is already shown in top-right toast)
-        let _ = app.emit("transcription-error", serde_json::json!({
-            "error": validation_error,
-            "userMessage": "Recording cannot start: Transcription model is still downloading. Please wait for the download to complete.",
-            "actionable": false
-        }));
-
-        return Err(validation_error);
-    }
-    info!("✅ Transcription model validation passed");
 
     // Parse devices
     let mic_device = if let Some(ref name) = mic_device_name {
@@ -455,6 +429,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Transition to Recording phase
     set_phase(RecordingPhase::Recording);
     reset_speech_detected_flag(); // Reset for new recording session
+    set_recording_gate(&app, true);
 
     // Emit phase transition event
     let _ = app.emit("recording-state-changed", serde_json::json!({ "phase": "Recording" }));
@@ -709,18 +684,40 @@ async fn background_shutdown<R: Runtime>(
         serde_json::json!({ "stage": "finalizing", "message": "Finalizing recording...", "progress": 90 }),
     );
 
+    // Always clear the recording gate, regardless of save outcome. Jobs paused by this
+    // recording's gate should unblock even if the save itself fails — they are independent.
+    // Read manual_pause_all at each callsite (not snapshotted) so a mid-save Pause All
+    // from the user is respected rather than overridden by a stale boolean.
+    let queue = app.state::<crate::TranscriptionQueueState>();
+    set_recording_gate(&app, false);
+
+    macro_rules! resume_if_not_paused {
+        () => {
+            if !queue.scheduler.manual_pause_all.load(Ordering::SeqCst) {
+                queue.resume_all().await;
+            }
+        };
+    }
+
     if let Some(ref mut mgr) = manager {
         match tokio::time::timeout(tokio::time::Duration::from_secs(300), mgr.save_recording_only(&app)).await {
-            Ok(Ok(_)) => info!("✅ Recording saved"),
+            Ok(Ok(_)) => {
+                info!("✅ Recording saved");
+                resume_if_not_paused!();
+            }
             Ok(Err(e)) => {
                 warn!("⚠️ Save error (transcripts preserved): {}", e);
+                resume_if_not_paused!();
                 return Err(format!("save_recording_only failed: {}", e));
             }
             Err(_) => {
                 warn!("⏱️ File I/O timeout during save");
+                resume_if_not_paused!();
                 return Err("save_recording_only timed out after 5 minutes".into());
             }
         }
+    } else {
+        resume_if_not_paused!();
     }
 
     // Emit completion progress. The synchronous recording-stopped event already fired in
@@ -978,6 +975,15 @@ pub async fn cancel_recording_impl(
     info!("🚫 cancel_recording called for meeting_id={}", meeting_id);
 
     let folder = cancel_audio_capture_inner();
+
+    // Streams are stopped; clear the scheduler gate unconditionally. Any I/O that follows
+    // (folder delete, DB row delete) may still fail, but that's no reason to leave the
+    // transcription queue blocked for the rest of the session.
+    set_recording_gate(app, false);
+    let queue = app.state::<crate::TranscriptionQueueState>();
+    if !queue.scheduler.manual_pause_all.load(Ordering::SeqCst) {
+        queue.resume_all().await;
+    }
 
     crate::tray::update_tray_menu(app);
 

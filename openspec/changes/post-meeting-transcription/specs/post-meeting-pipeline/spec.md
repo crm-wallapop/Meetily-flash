@@ -78,14 +78,18 @@ The thresholds and durations in this spec are the hardcoded defaults in this cha
 
 - **GIVEN** a transcription job is in progress AND the user starts a new recording (phase transitions to `Recording`)
 - **WHEN** the current Whisper chunk completes
-- **THEN** the job transitions to `status = "paused"` with `pauseReason = "recording_active"`
+- **THEN** the job transitions to `status = "paused"`
 - **AND** the job resumes once the user stops the new recording AND the other gates remain clear
+
+> `pauseReason` field is deferred to `transcription-scheduler-advanced`.
 
 #### Scenario: Pause when CPU is sustained over 70 % for 30 s
 
 - **GIVEN** a transcription job is in progress
 - **WHEN** CPU readings stay above 70 % for 30 consecutive seconds
-- **THEN** the job transitions to `status = "paused"` with `pauseReason = "cpu_high"` at the next chunk boundary
+- **THEN** the job transitions to `status = "paused"` at the next chunk boundary
+
+> `pauseReason = "cpu_high"` field is deferred to `transcription-scheduler-advanced`.
 
 #### Scenario: Resume requires sustained-clear, not single-sample-clear (hysteresis)
 
@@ -99,7 +103,8 @@ The thresholds and durations in this spec are the hardcoded defaults in this cha
 
 - **WHEN** the user invokes `pause_all_background_work`
 - **THEN** all in-flight jobs yield at the next chunk boundary AND no pending jobs are picked up until `resume_all_background_work` is invoked
-- **AND** the per-job `pauseReason` is `"manual"`
+
+> `pauseReason = "manual"` field is deferred to `transcription-scheduler-advanced`.
 
 ---
 
@@ -124,7 +129,11 @@ The system SHALL emit a `transcription-queue-changed` Tauri event whenever any j
 #### Scenario: State change emits queue snapshot
 
 - **WHEN** a job transitions from `pending` to `in_progress`, or `in_progress` to `paused`/`done`/`failed`, or the scheduler transitions a gate
-- **THEN** a `transcription-queue-changed` event is emitted with `{ jobs: [{ meetingId, status, phase, queuePosition, progressPercent?, pauseReason?, startedAt?, completedAt?, lastError? }], schedulerState: { gates: { recording, meeting, cpu, ram, manual } } }`
+- **THEN** a `transcription-queue-changed` event is emitted with `{ jobs: [{ meeting_id, audio_path, status, phase }] }`
+
+> **Implementation note (drift):** The initial implementation ships a simplified payload. The following fields are deferred to `transcription-scheduler-advanced` and are absent from the payload in this change:
+> `queuePosition`, `progressPercent`, `pauseReason`, `startedAt`, `completedAt`, `lastError`, and the top-level `schedulerState.gates` object.
+> The per-meeting badge therefore shows `Transcribing…` / `Queued` / `Paused` rather than the `Transcribing 34%` / `Queued #2` / `Paused — <reason>` labels described in the proposal. Those labels become available once `transcription-scheduler-advanced` adds `pauseReason` to the payload.
 
 ---
 

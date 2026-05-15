@@ -81,6 +81,28 @@ Change site: `audio_processing.rs` — the constant passed as the target LUFS to
 
 ---
 
+## fix(queue): wire meeting template selection into the transcription queue
+
+`lib.rs:551` hardcodes `"daily_standup".to_string()` as the meeting template
+passed to `SummaryService::process_transcript_background`. Every meeting is
+summarised with the daily-standup prompt structure regardless of content, which
+produces wrong section headings for non-standup meetings.
+
+Fix options (pick one):
+- Auto-detect template from the meeting title or transcript keywords.
+- Expose a `meeting_template` field on `QueueJob` / `TranscriptionQueueJob` and
+  let the user set it per-meeting before the queue picks it up.
+- Default to a generic `"general"` template until per-meeting selection exists.
+
+Change sites:
+- `frontend/src-tauri/src/lib.rs` — the `summary_processor` closure (search for
+  `"daily_standup"`)
+- `frontend/src-tauri/src/use_cases/transcription_queue.rs` — `Job` struct if a
+  `template` field is added
+- `frontend/src/services/queueService.ts` — `QueueJob` TypeScript type
+
+---
+
 ## ux(auto-detect): prompt for manually-started recordings when Meet call ends
 
 Currently `meeting-ended` only triggers the stop-prompt banner for
