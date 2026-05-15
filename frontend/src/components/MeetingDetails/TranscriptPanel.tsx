@@ -3,9 +3,9 @@
 import { Transcript, TranscriptSegmentData } from '@/types';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
-import { useMemo } from 'react';
+import { useMemo, useCallback, useState } from 'react';
 import { useQueueJob } from '@/hooks/useQueueJobStatus';
-import { QueueJob } from '@/services/queueService';
+import { QueueJob, cancelQueuedJob, enqueueTranscriptionJob } from '@/services/queueService';
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -31,7 +31,7 @@ interface TranscriptPanelProps {
   onRefetchTranscripts?: () => Promise<void>;
 }
 
-function TranscriptionStatusBanner({ job }: { job: QueueJob }) {
+function TranscriptionStatusBanner({ job, onRetry }: { job: QueueJob; onRetry: () => void }) {
   if (job.status === 'Done') return null;
 
   const isActive = job.status === 'InProgress';
@@ -66,7 +66,7 @@ function TranscriptionStatusBanner({ job }: { job: QueueJob }) {
     : isPaused
     ? 'Transcription is paused — it will resume automatically when the system is ready.'
     : isFailed
-    ? 'Something went wrong. You can retry using the Re-transcribe button above.'
+    ? 'Something went wrong. You can retry transcription below.'
     : isPending
     ? 'Your recording is queued and will start transcribing shortly.'
     : '';
@@ -105,6 +105,14 @@ function TranscriptionStatusBanner({ job }: { job: QueueJob }) {
         {detail && (
           <p className={`text-xs leading-relaxed ${detailColor}`}>{detail}</p>
         )}
+        {isFailed && (
+          <button
+            onClick={onRetry}
+            className="mt-1 px-3 py-1.5 rounded-md bg-red-100 hover:bg-red-200 text-red-800 text-xs font-medium transition-colors"
+          >
+            Retry transcription
+          </button>
+        )}
       </div>
     </div>
   );
@@ -130,6 +138,20 @@ export function TranscriptPanel({
   onRefetchTranscripts,
 }: TranscriptPanelProps) {
   const queueJob = useQueueJob(meetingId);
+  const [isRetrying, setIsRetrying] = useState(false);
+
+  const handleRetry = useCallback(async () => {
+    if (!queueJob || isRetrying) return;
+    setIsRetrying(true);
+    try {
+      await cancelQueuedJob(queueJob.meeting_id);
+      await enqueueTranscriptionJob(queueJob.meeting_id, queueJob.audio_path);
+    } catch (e) {
+      console.error('Failed to retry transcription job:', e);
+    } finally {
+      setIsRetrying(false);
+    }
+  }, [queueJob, isRetrying]);
 
   const convertedSegments = useMemo(() => {
     if (usePagination && segments) {
@@ -163,7 +185,7 @@ export function TranscriptPanel({
       {/* Transcript content */}
       <div className="flex-1 overflow-hidden pb-4">
         {isEmpty && !isRecording && queueJob && queueJob.status !== 'Done' ? (
-          <TranscriptionStatusBanner job={queueJob} />
+          <TranscriptionStatusBanner job={queueJob} onRetry={handleRetry} />
         ) : (
           <VirtualizedTranscriptView
             segments={convertedSegments}
