@@ -92,7 +92,13 @@ impl Scheduler {
 
 #[derive(Debug, PartialEq)]
 pub enum JobResult {
+    /// This phase is done; no further phases should run (go directly to Done).
     Completed,
+    /// This phase is done AND a follow-on phase should run if one is registered.
+    /// The transcription processor returns this when an LLM provider is configured
+    /// so the worker chains into the summary phase. When no provider is configured,
+    /// it returns plain `Completed` and the job goes directly to Done.
+    CompletedChain,
     Yielded,
     Failed(String),
 }
@@ -319,10 +325,13 @@ async fn worker_loop(
                 if let Some(j) = jobs.iter_mut().find(|j| j.meeting_id == meeting_id) {
                     match result {
                         JobResult::Completed => {
+                            j.status = JobStatus::Done;
+                        }
+                        JobResult::CompletedChain => {
                             if j.phase == JobPhase::Transcribing
                                 && summary_processor.is_some()
                             {
-                                // Transcription done; queue the summary phase.
+                                // Transcription done and provider configured; queue the summary phase.
                                 j.phase = JobPhase::Summarising;
                                 j.status = JobStatus::Pending;
                             } else {
@@ -602,7 +611,7 @@ mod tests {
         let flag = summary_called.clone();
 
         let queue = Arc::new(TranscriptionQueue::with_processors(
-            Arc::new(|_id, _path| Box::pin(async { JobResult::Completed })),
+            Arc::new(|_id, _path| Box::pin(async { JobResult::CompletedChain })),
             Some(Arc::new(move |_id, _path| {
                 let f = flag.clone();
                 Box::pin(async move {
@@ -617,6 +626,7 @@ mod tests {
         assert!(summary_called.load(Ordering::SeqCst), "summary must run when provider is configured");
 
         // Without provider: transcription → Done (summary not called).
+        // Transcription processor returns Completed (not CompletedChain) when no provider.
         let queue2 = Arc::new(TranscriptionQueue::with_processors(
             Arc::new(|_id, _path| Box::pin(async { JobResult::Completed })),
             None,
@@ -635,7 +645,7 @@ mod tests {
         let flag = summary_called.clone();
 
         let queue = Arc::new(TranscriptionQueue::with_processors(
-            Arc::new(|_id, _path| Box::pin(async { JobResult::Completed })),
+            Arc::new(|_id, _path| Box::pin(async { JobResult::CompletedChain })),
             Some(Arc::new(move |_id, _path| {
                 let f = flag.clone();
                 Box::pin(async move {

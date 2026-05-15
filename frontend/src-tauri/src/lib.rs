@@ -503,11 +503,28 @@ pub fn run() {
                                 None => return JobResult::Failed("invalid audio path".to_string()),
                             };
                             match audio::retranscription::start_retranscription(
-                                app, meeting_id, folder, None, None, None,
+                                app.clone(), meeting_id, folder, None, None, None,
                             )
                             .await
                             {
-                                Ok(_) => JobResult::Completed,
+                                Ok(_) => {
+                                    // Chain to summary only if an LLM provider is configured.
+                                    use crate::database::repositories::setting::SettingsRepository;
+                                    let has_provider = if let Some(s) = app.try_state::<state::AppState>() {
+                                        let pool = s.db_manager.pool().clone();
+                                        matches!(
+                                            SettingsRepository::get_model_config(&pool).await,
+                                            Ok(Some(c)) if !c.provider.is_empty()
+                                        )
+                                    } else {
+                                        false
+                                    };
+                                    if has_provider {
+                                        JobResult::CompletedChain
+                                    } else {
+                                        JobResult::Completed
+                                    }
+                                }
                                 Err(e) if e.to_string().contains(YIELD_SENTINEL) => {
                                     JobResult::Yielded
                                 }
