@@ -605,7 +605,7 @@ mod tests {
     // ── Summary chain tests (tasks 7.1–7.2) ──────────────────────────────────
 
     #[tokio::test]
-    async fn summary_fires_after_transcription_when_provider_configured() {
+    async fn summary_chain_routing() {
         // With provider: transcription → summary → Done.
         let summary_called = Arc::new(AtomicBool::new(false));
         let flag = summary_called.clone();
