@@ -53,6 +53,10 @@ export interface TranscriptionQueueJob {
   status: QueueJobStatus;
   queuePosition: number;
   pauseReason?: string;
+  /** Unix ms timestamp when the job was first written to IndexedDB. */
+  enqueuedAt: number;
+  /** Absolute path to audio.mp4 on disk — needed to re-enqueue on recovery. */
+  audioPath: string;
   startedAt?: number;
   completedAt?: number;
   lastError?: string;
@@ -145,6 +149,21 @@ class IndexedDBService {
       req.onsuccess = () => resolve();
       req.onerror = () => reject(req.error);
     });
+  }
+
+  /**
+   * Write a job to the queue store, preserving `enqueuedAt` if the row
+   * already exists.  Use this for syncing Tauri queue-changed snapshots to
+   * IndexedDB so `enqueuedAt` is set once and never overwritten.
+   */
+  async upsertQueueJob(job: Omit<TranscriptionQueueJob, 'enqueuedAt'> & { enqueuedAt?: number }): Promise<void> {
+    if (!this.db) await this.init();
+    const existing = await this.getQueueJob(job.meetingId);
+    const record: TranscriptionQueueJob = {
+      ...job,
+      enqueuedAt: existing?.enqueuedAt ?? job.enqueuedAt ?? Date.now(),
+    };
+    return this.enqueueJob(record);
   }
 
   async updateJobStatus(

@@ -1,10 +1,11 @@
 "use client";
 
 import { Transcript, TranscriptSegmentData } from '@/types';
-import { TranscriptView } from '@/components/TranscriptView';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { useMemo } from 'react';
+import { useQueueJob } from '@/hooks/useQueueJobStatus';
+import { QueueJob } from '@/services/queueService';
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -30,6 +31,85 @@ interface TranscriptPanelProps {
   onRefetchTranscripts?: () => Promise<void>;
 }
 
+function TranscriptionStatusBanner({ job }: { job: QueueJob }) {
+  if (job.status === 'Done') return null;
+
+  const isActive = job.status === 'InProgress';
+  const isPaused = job.status === 'Paused';
+  const isFailed = job.status === 'Failed';
+  const isPending = job.status === 'Pending';
+
+  const icon = isActive ? (
+    <span className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-pulse flex-shrink-0" />
+  ) : isPaused ? (
+    <span className="w-2.5 h-2.5 rounded-full bg-orange-400 flex-shrink-0" />
+  ) : isFailed ? (
+    <span className="text-red-500 text-base leading-none flex-shrink-0">✕</span>
+  ) : (
+    <span className="w-2.5 h-2.5 rounded-full border-2 border-yellow-500 flex-shrink-0" />
+  );
+
+  const headline = isActive
+    ? job.phase === 'Summarising'
+      ? 'Generating summary…'
+      : 'Transcribing your recording…'
+    : isPaused
+    ? 'Transcription paused'
+    : isFailed
+    ? 'Transcription failed'
+    : 'Waiting to transcribe…';
+
+  const detail = isActive
+    ? job.phase === 'Summarising'
+      ? 'The AI summary will appear here once complete.'
+      : 'The transcript will appear here once Whisper finishes processing your audio.'
+    : isPaused
+    ? 'Transcription is paused — it will resume automatically when the system is ready.'
+    : isFailed
+    ? 'Something went wrong. You can retry using the Re-transcribe button above.'
+    : isPending
+    ? 'Your recording is queued and will start transcribing shortly.'
+    : '';
+
+  const containerColor = isFailed
+    ? 'bg-red-50 border-red-200'
+    : isPaused
+    ? 'bg-orange-50 border-orange-200'
+    : isActive
+    ? 'bg-blue-50 border-blue-200'
+    : 'bg-yellow-50 border-yellow-200';
+
+  const headlineColor = isFailed
+    ? 'text-red-800'
+    : isPaused
+    ? 'text-orange-800'
+    : isActive
+    ? 'text-blue-800'
+    : 'text-yellow-800';
+
+  const detailColor = isFailed
+    ? 'text-red-600'
+    : isPaused
+    ? 'text-orange-600'
+    : isActive
+    ? 'text-blue-600'
+    : 'text-yellow-600';
+
+  return (
+    <div className="flex flex-col items-center justify-center h-full px-6 text-center">
+      <div className={`w-full max-w-xs rounded-xl border p-5 flex flex-col items-center gap-3 ${containerColor}`}>
+        <div className="flex items-center gap-2">
+          {icon}
+          <span className={`text-sm font-semibold ${headlineColor}`}>{headline}</span>
+        </div>
+        {detail && (
+          <p className={`text-xs leading-relaxed ${detailColor}`}>{detail}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function TranscriptPanel({
   transcripts,
   customPrompt,
@@ -49,12 +129,12 @@ export function TranscriptPanel({
   meetingFolderPath,
   onRefetchTranscripts,
 }: TranscriptPanelProps) {
-  // Convert transcripts to segments if pagination is not used but we want virtualization
+  const queueJob = useQueueJob(meetingId);
+
   const convertedSegments = useMemo(() => {
     if (usePagination && segments) {
       return segments;
     }
-    // Convert transcripts to segments for virtualization
     return transcripts.map(t => ({
       id: t.id,
       timestamp: t.audio_start_time ?? 0,
@@ -63,6 +143,8 @@ export function TranscriptPanel({
       confidence: t.confidence,
     }));
   }, [transcripts, usePagination, segments]);
+
+  const isEmpty = convertedSegments.length === 0;
 
   return (
     <div className="hidden md:flex md:w-1/4 lg:w-1/3 min-w-0 border-r border-gray-200 bg-white flex-col relative shrink-0">
@@ -78,23 +160,27 @@ export function TranscriptPanel({
         />
       </div>
 
-      {/* Transcript content - use virtualized view for better performance */}
+      {/* Transcript content */}
       <div className="flex-1 overflow-hidden pb-4">
-        <VirtualizedTranscriptView
-          segments={convertedSegments}
-          isRecording={isRecording}
-          isPaused={false}
-          isProcessing={false}
-          isStopping={false}
-          enableStreaming={false}
-          showConfidence={true}
-          disableAutoScroll={disableAutoScroll}
-          hasMore={hasMore}
-          isLoadingMore={isLoadingMore}
-          totalCount={totalCount}
-          loadedCount={loadedCount}
-          onLoadMore={onLoadMore}
-        />
+        {isEmpty && !isRecording && queueJob && queueJob.status !== 'Done' ? (
+          <TranscriptionStatusBanner job={queueJob} />
+        ) : (
+          <VirtualizedTranscriptView
+            segments={convertedSegments}
+            isRecording={isRecording}
+            isPaused={false}
+            isProcessing={false}
+            isStopping={false}
+            enableStreaming={false}
+            showConfidence={true}
+            disableAutoScroll={disableAutoScroll}
+            hasMore={hasMore}
+            isLoadingMore={isLoadingMore}
+            totalCount={totalCount}
+            loadedCount={loadedCount}
+            onLoadMore={onLoadMore}
+          />
+        )}
       </div>
 
       {/* Custom prompt input at bottom of transcript section */}

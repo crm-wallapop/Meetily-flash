@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
@@ -287,6 +288,24 @@ export function useRecordingStop(
           console.log('   Transcripts:', freshTranscripts.length);
           console.log('   folder_path:', folderPath);
 
+          // Enqueue transcription job using the UUID from the DB row so the queue
+          // and the meeting view agree on the meeting_id.
+          if (folderPath) {
+            const audioPath = folderPath.replace(/\\/g, '/') + '/audio.mp4';
+            try {
+              await invoke('enqueue_transcription_job', { meetingId, audioPath });
+              console.log('✅ Transcription job enqueued for', meetingId);
+            } catch (enqueueError) {
+              console.error('Failed to enqueue transcription job:', enqueueError);
+              toast.error('Transcription could not be queued.', {
+                description: String(enqueueError),
+              });
+            }
+          } else {
+            console.warn('Cannot enqueue transcription: folderPath is null for meetingId', meetingId);
+            toast.error('Transcription could not be queued — audio path is unknown.');
+          }
+
           // Mark meeting as saved in IndexedDB (for recovery system)
           await markMeetingAsSaved();
 
@@ -318,7 +337,9 @@ export function useRecordingStop(
 
           // Show success toast with navigation option
           toast.success('Recording saved successfully!', {
-            description: `${freshTranscripts.length} transcript segments saved.`,
+            description: freshTranscripts.length > 0
+              ? `${freshTranscripts.length} transcript segments saved.`
+              : 'Transcription queued — processing in background.',
             action: {
               label: 'View Meeting',
               onClick: () => {

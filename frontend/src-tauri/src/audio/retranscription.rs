@@ -16,6 +16,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
+/// Error message used when retranscription exits at a chunk boundary due to SHOULD_YIELD.
+/// The queue worker detects this sentinel and marks the job as Paused (not Failed).
+pub const YIELD_SENTINEL: &str = "__retranscription_yield__";
+
 /// Global flag to track if retranscription is in progress
 static RETRANSCRIPTION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
@@ -86,6 +90,26 @@ pub fn cancel_retranscription() {
     RETRANSCRIPTION_CANCELLED.store(true, Ordering::SeqCst);
 }
 
+/// Read the configured transcription provider from the DB ("parakeet", "localWhisper", etc.).
+/// Falls back to "whisper" if the setting is absent or the DB is unreachable.
+async fn resolve_provider_from_db<R: Runtime>(app: &AppHandle<R>) -> String {
+    let Some(app_state) = app.try_state::<crate::state::AppState>() else {
+        warn!("resolve_provider_from_db: app state unavailable, defaulting to whisper");
+        return "whisper".to_string();
+    };
+    let result: Option<(String,)> =
+        sqlx::query_as("SELECT provider FROM transcript_settings WHERE id = '1'")
+            .fetch_optional(app_state.db_manager.pool())
+            .await
+            .unwrap_or_else(|e| {
+                error!("resolve_provider_from_db: DB query failed ({}), defaulting to whisper", e);
+                None
+            });
+    let provider = result.map(|(p,)| p).unwrap_or_else(|| "whisper".to_string());
+    info!("resolve_provider_from_db: using provider '{}'", provider);
+    provider
+}
+
 /// Start retranscription of a meeting's audio
 pub async fn start_retranscription<R: Runtime>(
     app: AppHandle<R>,
@@ -101,8 +125,15 @@ pub async fn start_retranscription<R: Runtime>(
     // Reset cancellation flag
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
 
-    let use_parakeet = provider.as_deref() == Some("parakeet");
-    let result = run_retranscription(app.clone(), meeting_id.clone(), meeting_folder_path, language, model, provider).await;
+    // When the caller doesn't specify a provider, read it from the DB so
+    // the correct engine is used regardless of what was configured for live
+    // transcription.  Defaults to "whisper" if the setting is missing.
+    let resolved_provider = match provider {
+        Some(ref p) => p.clone(),
+        None => resolve_provider_from_db(&app).await,
+    };
+    let use_parakeet = resolved_provider == "parakeet";
+    let result = run_retranscription(app.clone(), meeting_id.clone(), meeting_folder_path, language, model, Some(resolved_provider)).await;
 
     // Unload the engine after the batch job (success, failure, or cancellation)
     super::common::unload_engine_after_batch(use_parakeet).await;
@@ -340,9 +371,13 @@ async fn run_retranscription<R: Runtime>(
     let mut total_confidence = 0.0f32;
 
     for (i, segment) in processable_segments.iter().enumerate() {
-        // Check for cancellation before each segment
+        // Check for cancellation or scheduler yield before each segment.
         if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
             return Err(anyhow!("Retranscription cancelled"));
+        }
+        if crate::use_cases::transcription_queue::SHOULD_YIELD.load(Ordering::SeqCst) {
+            info!("🔔 Retranscription yielding at chunk boundary (segment {})", i);
+            return Err(anyhow!(YIELD_SENTINEL));
         }
 
         // Calculate progress (25% to 80% range for transcription)
@@ -604,12 +639,23 @@ async fn get_configured_whisper_model<R: Runtime>(app: &AppHandle<R>) -> Result<
         Some((provider, model)) => {
             info!("Found transcript config: provider={}, model={}", provider, model);
 
-            // Check if provider is Whisper-based
+            // Return the stored model name when the DB row is for a Whisper provider.
+            // If the user has since switched to Parakeet, the model column holds a Parakeet
+            // model name — passing that to the Whisper engine would be wrong, so fall back
+            // to DEFAULT_WHISPER_MODEL.  The queue path never reaches here (provider is
+            // resolved by resolve_provider_from_db before branching); this fallback only
+            // fires for explicit-Whisper calls from the retranscription UI when the user
+            // has no Whisper model stored.
             if provider == "localWhisper" || provider == "whisper" {
                 Ok(model)
             } else {
-                error!("Retranscription requires Whisper provider, but configured provider is: {}", provider);
-                Err(anyhow!("Retranscription requires Whisper. Current provider '{}' does not support retranscription with language selection.", provider))
+                // No Whisper model is configured — the stored row belongs to a different
+                // provider.  Return a user-readable error so the retranscription-error
+                // event carries a clear message rather than failing later with a cryptic
+                // "model not found" during load.
+                Err(anyhow!(
+                    "No Whisper model configured. Go to Settings → Transcription, switch to Whisper, and select a model."
+                ))
             }
         },
         None => {

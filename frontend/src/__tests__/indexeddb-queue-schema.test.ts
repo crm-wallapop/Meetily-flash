@@ -28,6 +28,8 @@ describe('indexeddb_queue_schema_v2_supports_status_transitions', () => {
       meetingId: 'meeting-001',
       status: 'pending',
       queuePosition: 1,
+      enqueuedAt: Date.now(),
+      audioPath: '/recordings/meeting-001/audio.mp4',
     };
     await expect(indexedDBService.enqueueJob(job)).resolves.toBeUndefined();
 
@@ -44,6 +46,8 @@ describe('indexeddb_queue_schema_v2_supports_status_transitions', () => {
       meetingId: 'meeting-002',
       status: 'paused',
       queuePosition: 2,
+      enqueuedAt: now - 10_000,
+      audioPath: '/recordings/meeting-002/audio.mp4',
       pauseReason: 'cpu_load',
       startedAt: now - 5000,
       completedAt: undefined,
@@ -60,7 +64,8 @@ describe('indexeddb_queue_schema_v2_supports_status_transitions', () => {
 
   it('updates status through the full lifecycle: pending → in_progress → done', async () => {
     const meetingId = 'meeting-003';
-    await indexedDBService.enqueueJob({ meetingId, status: 'pending', queuePosition: 1 });
+    const now = Date.now();
+    await indexedDBService.enqueueJob({ meetingId, status: 'pending', queuePosition: 1, enqueuedAt: now, audioPath: '/recordings/meeting-003/audio.mp4' });
 
     const t1 = Date.now();
     await indexedDBService.updateJobStatus(meetingId, 'in_progress', { startedAt: t1 });
@@ -77,7 +82,8 @@ describe('indexeddb_queue_schema_v2_supports_status_transitions', () => {
 
   it('updates status to failed with lastError', async () => {
     const meetingId = 'meeting-004';
-    await indexedDBService.enqueueJob({ meetingId, status: 'in_progress', queuePosition: 1, startedAt: Date.now() });
+    const now = Date.now();
+    await indexedDBService.enqueueJob({ meetingId, status: 'in_progress', queuePosition: 1, enqueuedAt: now, audioPath: '/recordings/meeting-004/audio.mp4', startedAt: now });
 
     await indexedDBService.updateJobStatus(meetingId, 'failed', { lastError: 'whisper crashed' });
     const stored = await indexedDBService.getQueueJob(meetingId);
@@ -87,7 +93,8 @@ describe('indexeddb_queue_schema_v2_supports_status_transitions', () => {
 
   it('updates status to paused with pauseReason', async () => {
     const meetingId = 'meeting-005';
-    await indexedDBService.enqueueJob({ meetingId, status: 'in_progress', queuePosition: 1, startedAt: Date.now() });
+    const now = Date.now();
+    await indexedDBService.enqueueJob({ meetingId, status: 'in_progress', queuePosition: 1, enqueuedAt: now, audioPath: '/recordings/meeting-005/audio.mp4', startedAt: now });
 
     await indexedDBService.updateJobStatus(meetingId, 'paused', { pauseReason: 'recording_active' });
     const stored = await indexedDBService.getQueueJob(meetingId);
@@ -103,10 +110,11 @@ describe('indexeddb_queue_schema_v2_supports_status_transitions', () => {
   });
 
   it('getPendingQueueJobs returns only pending and in_progress jobs', async () => {
-    await indexedDBService.enqueueJob({ meetingId: 'q-pending', status: 'pending', queuePosition: 1 });
-    await indexedDBService.enqueueJob({ meetingId: 'q-in-prog', status: 'in_progress', queuePosition: 0, startedAt: Date.now() });
-    await indexedDBService.enqueueJob({ meetingId: 'q-done', status: 'done', queuePosition: 0, completedAt: Date.now() });
-    await indexedDBService.enqueueJob({ meetingId: 'q-failed', status: 'failed', queuePosition: 0, lastError: 'err' });
+    const now = Date.now();
+    await indexedDBService.enqueueJob({ meetingId: 'q-pending', status: 'pending', queuePosition: 1, enqueuedAt: now, audioPath: '/recordings/q-pending/audio.mp4' });
+    await indexedDBService.enqueueJob({ meetingId: 'q-in-prog', status: 'in_progress', queuePosition: 0, enqueuedAt: now, audioPath: '/recordings/q-in-prog/audio.mp4', startedAt: now });
+    await indexedDBService.enqueueJob({ meetingId: 'q-done', status: 'done', queuePosition: 0, enqueuedAt: now, audioPath: '/recordings/q-done/audio.mp4', completedAt: now });
+    await indexedDBService.enqueueJob({ meetingId: 'q-failed', status: 'failed', queuePosition: 0, enqueuedAt: now, audioPath: '/recordings/q-failed/audio.mp4', lastError: 'err' });
 
     const pending = await indexedDBService.getPendingQueueJobs();
     const ids = pending.map(j => j.meetingId);

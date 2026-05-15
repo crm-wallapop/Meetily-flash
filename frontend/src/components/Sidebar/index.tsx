@@ -31,6 +31,9 @@ import Info from '../Info';
 import { ComplianceNotification } from '../ComplianceNotification';
 import { Input } from '../ui/input';
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '../ui/input-group';
+import { useQueueSnapshot } from '@/hooks/useQueueJobStatus';
+import { QueueStatusBadge } from '@/components/QueueStatusBadge/QueueStatusBadge';
+import { GlobalQueueIndicator } from '@/components/GlobalQueueIndicator/GlobalQueueIndicator';
 
 interface SidebarItem {
   id: string;
@@ -59,6 +62,7 @@ const Sidebar: React.FC = () => {
 
   // Get recording state from RecordingStateContext (single source of truth)
   const { isRecording } = useRecordingState();
+  const queueSnapshot = useQueueSnapshot();
   const { openImportDialog } = useImportDialog();
   const { betaFeatures } = useConfig();
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(['meetings']));
@@ -643,6 +647,14 @@ const Sidebar: React.FC = () => {
                 )}
               </div>
 
+              {isMeetingItem && (
+                <QueueStatusBadge
+                  job={queueSnapshot.jobs.find(j => j.meeting_id === item.id)}
+                  showCancel={true}
+                  className="mt-0.5 ml-8 self-start"
+                />
+              )}
+
               {/* Show transcript match snippet if available */}
               {hasTranscriptMatch && (
                 <div className="mt-1 ml-8 text-xs text-gray-500 bg-yellow-50 p-1.5 rounded border border-yellow-100 line-clamp-2">
@@ -775,6 +787,7 @@ const Sidebar: React.FC = () => {
         {!isCollapsed && (
 
           <div className="flex-shrink-0 p-2 border-t border-gray-100">
+            <GlobalQueueIndicator className="mb-2 w-full" />
             <button
               onClick={handleRecordingToggle}
               disabled={isRecording}

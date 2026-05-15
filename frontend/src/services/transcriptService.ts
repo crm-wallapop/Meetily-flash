@@ -7,7 +7,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { TranscriptUpdate, TranscriptHistorySegment } from '@/types';
+import { TranscriptHistorySegment } from '@/types';
 
 export interface TranscriptionStatus {
   chunks_in_queue: number;
@@ -47,17 +47,6 @@ export class TranscriptService {
   }
 
   // Event Listeners
-
-  /**
-   * Listen for real-time transcript updates
-   * @param callback - Function to call when new transcript segment arrives
-   * @returns Promise that resolves to unlisten function
-   */
-  async onTranscriptUpdate(callback: (update: TranscriptUpdate) => void): Promise<UnlistenFn> {
-    return listen<TranscriptUpdate>('transcript-update', (event) => {
-      callback(event.payload);
-    });
-  }
 
   /**
    * Listen for transcription-complete event
