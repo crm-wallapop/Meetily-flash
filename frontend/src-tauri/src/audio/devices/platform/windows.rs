@@ -214,6 +214,12 @@ pub fn get_windows_device(audio_device: &AudioDevice) -> Result<(cpal::Device, c
                         if let Ok(config) = default_device.default_output_config() {
                             return Ok((default_device, config));
                         }
+                        // Device name matched but no config could be resolved.
+                        // Return an error rather than falling through to the slow enumeration path
+                        // (which would re-pay the 4+ second EnumAudioEndpoints cost for a device
+                        // that is already confirmed broken, not merely non-default).
+                        warn!("⚠️ Default output device '{}' matched but config resolution failed", name);
+                        return Err(anyhow!("No compatible output configuration for default device: {}", name));
                     }
                 }
             }
