@@ -19,7 +19,6 @@ interface RecordingControlsProps {
   onTranscriptionError?: (message: string) => void;
   onStopInitiated?: () => void; // Called immediately when stop button is clicked
   isRecordingDisabled: boolean;
-  isParentProcessing: boolean;
   selectedDevices?: {
     micDevice: string | null;
     systemDevice: string | null;
@@ -32,11 +31,9 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   barHeights,
   onRecordingStop,
   onRecordingStart,
-  onTranscriptReceived,
   onTranscriptionError,
   onStopInitiated,
   isRecordingDisabled,
-  isParentProcessing,
   selectedDevices,
   meetingName,
 }) => {
@@ -46,7 +43,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
 
   const [showPlayback, setShowPlayback] = useState(false);
   const [transcript, setTranscript] = useState<string>('');
-  const [isProcessing, setIsProcessing] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isPausing, setIsPausing] = useState(false);
   const [isResuming, setIsResuming] = useState(false);
@@ -81,21 +77,13 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
 
   const handleStartRecording = useCallback(async () => {
     if (isStarting) return;
-    console.log('Starting recording...');
-    console.log('Selected devices:', selectedDevices);
-    console.log('Meeting name:', meetingName);
-    console.log('Current isRecording state:', isRecording);
+    setIsStarting(true);
 
     setShowPlayback(false);
-    setTranscript(''); // Clear any previous transcript
-    setSpeechDetected(false); // Reset speech detection on new recording
+    setTranscript('');
+    setSpeechDetected(false);
 
     try {
-      // Call the validation callback which will:
-      // 1. Check if model is ready
-      // 2. Show appropriate toast/modal
-      // 3. Call backend if valid
-      // 4. Update UI state
       await onRecordingStart();
     } catch (error) {
       console.error('Failed to start recording:', error);
@@ -130,21 +118,17 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           message: 'Unable to start recording. Please check your audio device settings and try again.'
         });
       }
+    } finally {
+      setIsStarting(false);
     }
-  }, [onRecordingStart, isStarting, selectedDevices, meetingName, isRecording]);
+  }, [onRecordingStart, isStarting]);
 
   const stopRecordingAction = useCallback(async () => {
-    console.log('Executing stop recording (delegating to handleRecordingStop)...');
     try {
-      setIsProcessing(true);
       Analytics.trackTranscriptionSuccess();
-      // The backend stop_recording call lives inside handleRecordingStop now, so the
-      // auto-detect banner path and this manual-button path go through one code path.
       await onRecordingStop(true);
-      setIsProcessing(false);
     } catch (error) {
       console.error('Failed to stop recording:', error);
-      setIsProcessing(false);
       onRecordingStop(false);
     }
   }, [onRecordingStop]);
@@ -225,7 +209,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             console.log('Transcription error count incremented:', newCount);
             return newCount;
           });
-          setIsProcessing(false);
           console.log('Calling onRecordingStop(false) due to transcript error');
           onRecordingStop(false);
           if (onTranscriptionError) {
@@ -257,7 +240,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             console.log('Transcription error count incremented:', newCount);
             return newCount;
           });
-          setIsProcessing(false);
           console.log('Calling onRecordingStop(false) due to transcription error');
           onRecordingStop(false);
 
@@ -305,14 +287,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     <TooltipProvider>
       <div className="flex flex-col space-y-2">
         <div className="flex items-center space-x-2 bg-white rounded-full shadow-lg px-4 py-2">
-          {isProcessing && !isParentProcessing ? (
-            <div className="flex items-center space-x-2">
-              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-gray-900"></div>
-              <span className="text-sm text-gray-600">Processing recording...</span>
-            </div>
-          ) : (
-            <>
-              {showPlayback ? (
+          <>
+            {showPlayback ? (
                 <>
                   <button
                     onClick={handleStartRecording}
@@ -358,8 +334,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                             Analytics.trackButtonClick('start_recording', 'recording_controls');
                             handleStartRecording();
                           }}
-                          disabled={isStarting || isProcessing || isRecordingDisabled}
-                          className={`w-12 h-12 flex items-center justify-center ${isStarting || isProcessing ? 'bg-gray-400' : 'bg-red-500 hover:bg-red-600'
+                          disabled={isStarting || isRecordingDisabled}
+                          className={`w-12 h-12 flex items-center justify-center ${isStarting ? 'bg-gray-400' : 'bg-red-500 hover:bg-red-600'
                             } rounded-full text-white transition-colors relative`}
                         >
                           <Mic size={20} />
@@ -440,7 +416,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                 </>
               )}
             </>
-          )}
         </div>
 
         {/* Device error alert */}
