@@ -4,14 +4,14 @@
 // Delegates to transcription and recording modules for actual implementation.
 
 use anyhow::Result;
+use futures::FutureExt as _;
 use log::{error, info, warn};
 use serde::Serialize;
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
     Arc, Mutex,
 };
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use tokio::task::JoinHandle;
 
 use super::{
     parse_audio_device,
@@ -71,19 +71,22 @@ pub(crate) fn set_phase(phase: RecordingPhase) {
 static RECORDING_PHASE: AtomicU8 = AtomicU8::new(RecordingPhase::Idle as u8);
 
 // Drop guard: resets phase to Idle on scope exit, including on panic inside tokio::spawn.
-// Place `let _guard = PhaseGuard;` as the first line of the background shutdown task so the
-// UI never stays stuck in "Saving…" even if background_shutdown panics or the thread aborts.
+// Uses compare_exchange(Saving→Idle) so a concurrent M2 start (phase=Recording) is never
+// clobbered — the exchange only fires if we're still in Saving.
 struct PhaseGuard;
 impl Drop for PhaseGuard {
     fn drop(&mut self) {
-        set_phase(RecordingPhase::Idle);
+        let _ = RECORDING_PHASE.compare_exchange(
+            RecordingPhase::Saving as u8,
+            RecordingPhase::Idle as u8,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
     }
 }
 
 // Global recording manager to keep it alive during recording
 static RECORDING_MANAGER: Mutex<Option<RecordingManager>> = Mutex::new(None);
-// Background shutdown task handle — guarded so a concurrent stop_recording call can detect it
-static SHUTDOWN_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 
 // ============================================================================
@@ -126,6 +129,15 @@ fn set_recording_gate<R: Runtime>(app: &AppHandle<R>, busy: bool) {
     }
 }
 
+/// Returns `Err` if `phase` prevents starting a new recording.
+/// Extracted so tests can call it without an `AppHandle`.
+pub(crate) fn can_start_recording(phase: RecordingPhase) -> Result<(), String> {
+    if phase == RecordingPhase::Recording {
+        return Err("Recording already in progress".to_string());
+    }
+    Ok(())
+}
+
 /// Start recording with default devices and optional meeting name
 pub async fn start_recording_with_meeting_name<R: Runtime>(
     app: AppHandle<R>,
@@ -136,15 +148,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         meeting_name
     );
 
-    // Check if already recording or saving
+    // Check if already recording
     let phase = current_phase();
     info!("🔍 Phase check: {:?}", phase);
-    if phase == RecordingPhase::Saving {
-        return Err("a previous recording is still finalizing".to_string());
-    }
-    if phase == RecordingPhase::Recording {
-        return Err("Recording already in progress".to_string());
-    }
+    can_start_recording(phase)?;
 
     // Async-first approach - no more blocking operations!
     info!("🚀 Starting async recording initialization");
@@ -291,14 +298,32 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
 
-    // Store the manager globally to keep it alive
+    // Store the manager globally, atomically claiming Recording phase.
+    // fetch_update rejects only if another start_recording already won the race
+    // (phase == Recording). It accepts Idle and Saving — the latter is the M2 back-to-back
+    // case. The stale `phase` snapshot is intentionally not used as the expected value: by
+    // the time async device init finishes, M1's save may have already transitioned
+    // Saving→Idle, and we must not reject M2 just because Saving→Idle raced us.
+    // Whichever concurrent start loses the fetch_update has its manager dropped here,
+    // closing any cpal streams it opened.
     {
         let mut global_manager = RECORDING_MANAGER.lock().unwrap();
+        if RECORDING_PHASE
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+                if cur == RecordingPhase::Recording as u8 {
+                    None // already Recording — reject
+                } else {
+                    Some(RecordingPhase::Recording as u8)
+                }
+            })
+            .is_err()
+        {
+            return Err("Recording already in progress".to_string());
+        }
         *global_manager = Some(manager);
     }
 
-    // Transition to Recording phase
-    set_phase(RecordingPhase::Recording);
+    // Phase already set to Recording by the fetch_update above.
     reset_speech_detected_flag(); // Reset for new recording session
     set_recording_gate(&app, true);
 
@@ -340,15 +365,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         mic_device_name, system_device_name, meeting_name
     );
 
-    // Check if already recording or saving
+    // Check if already recording
     let phase = current_phase();
     info!("🔍 Phase check: {:?}", phase);
-    if phase == RecordingPhase::Saving {
-        return Err("a previous recording is still finalizing".to_string());
-    }
-    if phase == RecordingPhase::Recording {
-        return Err("Recording already in progress".to_string());
-    }
+    can_start_recording(phase)?;
 
     // Parse devices
     let mic_device = if let Some(ref name) = mic_device_name {
@@ -420,14 +440,29 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
 
-    // Store the manager globally to keep it alive
+    // Store the manager globally, atomically claiming Recording phase.
+    // fetch_update rejects only if another start_recording already won the race
+    // (phase == Recording). Accepts Idle and Saving (M2 back-to-back case). See the
+    // comment in start_recording_with_meeting_name for the full rationale.
+    // Whichever concurrent start loses has its manager dropped here, closing cpal streams.
     {
         let mut global_manager = RECORDING_MANAGER.lock().unwrap();
+        if RECORDING_PHASE
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+                if cur == RecordingPhase::Recording as u8 {
+                    None // already Recording — reject
+                } else {
+                    Some(RecordingPhase::Recording as u8)
+                }
+            })
+            .is_err()
+        {
+            return Err("Recording already in progress".to_string());
+        }
         *global_manager = Some(manager);
     }
 
-    // Transition to Recording phase
-    set_phase(RecordingPhase::Recording);
+    // Phase already set to Recording by the fetch_update above.
     reset_speech_detected_flag(); // Reset for new recording session
     set_recording_gate(&app, true);
 
@@ -482,6 +517,25 @@ where
     // (b) Stop streams + force flush — takes the manager out of global state permanently.
     let manager_for_background = {
         let mut global_manager = RECORDING_MANAGER.lock().unwrap();
+        // Atomically claim Saving inside the lock. This closes two races simultaneously:
+        // 1. cancel_audio_capture_inner(): its CAS(Recording→Idle) fails the moment we
+        //    transition to Saving, so it can no longer steal the manager.
+        // 2. Concurrent stop_recording (e.g., UI button + tray menu): the second caller's
+        //    CAS fails here and returns early — it never spawns background_shutdown and
+        //    therefore never calls clear_gate_and_resume!, which would otherwise prematurely
+        //    clear the recording gate while the winner's MP4 write is still in flight.
+        if RECORDING_PHASE
+            .compare_exchange(
+                RecordingPhase::Recording as u8,
+                RecordingPhase::Saving as u8,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            // Another concurrent stop already won (phase ≠ Recording). Nothing to do.
+            return Ok(StopRecordingResult { folder_path: None, meeting_name: None });
+        }
         global_manager.take()
     };
 
@@ -529,8 +583,7 @@ where
         .as_ref()
         .and_then(|m| m.get_meeting_name());
 
-    // (c) Transition to Saving — this is the moment the UI stops showing "Recording"
-    set_phase(RecordingPhase::Saving);
+    // (c) Emit the Saving event — phase was already set to Saving in the manager lock above.
     let _ = app.emit("recording-state-changed", serde_json::json!({ "phase": "Saving" }));
     info!("✅ Phase → Saving (streams released; background shutdown spawning)");
 
@@ -550,39 +603,75 @@ where
     // Update tray immediately so system tray reflects the Saving state
     crate::tray::update_tray_menu(&app);
 
-    // (d) Spawn background shutdown task — transcription drain, model unload, analytics, save
+    // (d) Spawn background shutdown task — save recording, then analytics
     let app_bg = app.clone();
-    let handle = tokio::spawn(async move {
-        // PhaseGuard ensures phase returns to Idle on scope exit, including on panic.
+    // Local flag: background_shutdown sets this to true after the save step completes
+    // (regardless of outcome). The panic arm reads it to distinguish a save panic
+    // from a post-save analytics panic, without relying on RECORDING_PHASE which
+    // M2's concurrent set_phase(Recording) can overwrite.
+    let save_attempted = Arc::new(AtomicBool::new(false));
+    tokio::spawn(async move {
+        // PhaseGuard: belt-and-suspenders phase reset in case catch_unwind itself fails.
         let _guard = PhaseGuard;
 
-        let result = background_shutdown(
+        // catch_unwind ensures cleanup below runs even when background_shutdown panics,
+        // preventing recording_busy from being permanently stuck for the session.
+        let result = std::panic::AssertUnwindSafe(background_shutdown(
             app_bg.clone(),
             manager_for_background.take(),
             analytics_snapshot,
-        )
+            save_attempted.clone(),
+        ))
+        .catch_unwind()
         .await;
 
-        if let Err(e) = result {
-            error!("❌ Background shutdown error: {}", e);
-            let _ = app_bg.emit(
-                "recording-save-failed",
-                serde_json::json!({ "error": e }),
-            );
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!("❌ Background shutdown error: {}", e);
+                let _ = app_bg.emit(
+                    "recording-save-failed",
+                    serde_json::json!({ "error": e }),
+                );
+            }
+            Err(_panic) => {
+                // save_attempted is set before clear_gate_and_resume! on every save outcome.
+                // If false, the panic happened mid-save — emit the error. If true, the panic
+                // was in post-save analytics; the MP4 is on disk, so don't alarm the user.
+                if save_attempted.load(Ordering::SeqCst) {
+                    error!("❌ background_shutdown panicked in post-save analytics (recording was saved)");
+                } else {
+                    error!("❌ background_shutdown panicked during save — gate and UI will be cleaned up");
+                    let _ = app_bg.emit(
+                        "recording-save-failed",
+                        serde_json::json!({ "error": "internal error during recording save" }),
+                    );
+                }
+            }
         }
 
-        // Set phase before emitting so any concurrent get_recording_state call sees Idle.
-        // _guard will also call set_phase(Idle) on drop — harmless, ensures safety on panic.
-        set_phase(RecordingPhase::Idle);
-        let _ = app_bg.emit("recording-state-changed", serde_json::json!({ "phase": "Idle" }));
-        crate::tray::update_tray_menu(&app_bg);
+        // clear_gate_and_resume! already ran on the happy/error paths (phase=Idle already).
+        // On the panic path, compare_exchange succeeds and runs the full cleanup.
+        if RECORDING_PHASE.compare_exchange(
+            RecordingPhase::Saving as u8,
+            RecordingPhase::Idle as u8,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ).is_ok() {
+            set_recording_gate(&app_bg, false);
+            let queue_bg = app_bg.state::<crate::TranscriptionQueueState>();
+            if !queue_bg.scheduler.manual_pause_all.load(Ordering::SeqCst) {
+                queue_bg.resume_all().await;
+            }
+            // Guard: M2 may have called set_phase(Recording) during resume_all().await.
+            // Skip "Idle" emit to avoid clobbering M2's "Recording" event on the frontend.
+            if current_phase() == RecordingPhase::Idle {
+                let _ = app_bg.emit("recording-state-changed", serde_json::json!({ "phase": "Idle" }));
+                crate::tray::update_tray_menu(&app_bg);
+            }
+        }
         info!("✅ Phase → Idle (background shutdown complete)");
     });
-
-    // Store handle so a concurrent stop_recording call can detect an in-flight shutdown
-    if let Ok(mut guard) = SHUTDOWN_TASK.lock() {
-        *guard = Some(handle);
-    }
 
     // (e) Return result so the frontend save flow can write the DB row with folder_path
     // populated. The audio file itself is finalized asynchronously and announced via
@@ -598,53 +687,75 @@ async fn background_shutdown<R: Runtime>(
     app: AppHandle<R>,
     mut manager: Option<RecordingManager>,
     analytics_snapshot: Option<(Option<f64>, f64, f64, u64, bool, Option<String>, Option<String>, u64)>,
+    save_attempted: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    // Unload model
+    // Save first: gate clears AFTER save so the worker never races against an in-flight MP4
+    // write (worker could call find_audio_file() on an incomplete MP4 and mark the job Failed).
+    // Phase transitions to Idle immediately after save so M2 can start a new recording without
+    // waiting for the analytics block. compare_exchange guards against overwriting M2's phase.
     let _ = app.emit(
         "recording-shutdown-progress",
-        serde_json::json!({ "stage": "unloading_model", "message": "Unloading speech recognition model...", "progress": 70 }),
+        serde_json::json!({ "stage": "finalizing", "message": "Finalizing recording...", "progress": 90 }),
     );
 
-    let config = match tokio::time::timeout(
-        tokio::time::Duration::from_secs(30),
-        crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None),
-    )
-    .await
-    {
-        Ok(Ok(Some(cfg))) => Some(cfg.provider),
-        Ok(Ok(None)) => None,
-        Ok(Err(e)) => { warn!("⚠️ Transcript config error: {:?}", e); None }
-        Err(_) => { warn!("⏱️ Transcript config timeout"); None }
-    };
+    let queue = app.state::<crate::TranscriptionQueueState>();
 
-    match config.as_deref() {
-        Some("parakeet") => {
-            let engine_clone = {
-                let g = crate::parakeet_engine::commands::PARAKEET_ENGINE.lock().unwrap();
-                g.as_ref().cloned()
-            };
-            if let Some(engine) = engine_clone {
-                let model = engine.get_current_model().await.unwrap_or_else(|| "unknown".into());
-                if !engine.unload_model().await {
-                    warn!("⚠️ Failed to unload Parakeet model '{}'", model);
+    macro_rules! clear_gate_and_resume {
+        () => {
+            // compare_exchange runs first: if M2 has fully started (phase=Recording) the
+            // exchange fails and nothing below runs — gate stays set, queue stays paused.
+            // RACE: M2 can pass can_start_recording(Saving) and be in its async startup before
+            // reaching set_phase(Recording). In that window compare_exchange succeeds, gate
+            // clears, and the worker may briefly run. M2 re-sets gate when it sets
+            // phase=Recording; the worker yields at the next chunk boundary. Benign since live
+            // transcription was removed (no engine contention during recording startup).
+            // EMIT GUARD: resume_all().await is a yield point. M2 may call set_phase(Recording)
+            // and emit "Recording" during that yield. Re-check phase before emitting "Idle" so
+            // M1's late emit cannot clobber M2's "Recording" event on the frontend.
+            if RECORDING_PHASE.compare_exchange(
+                RecordingPhase::Saving as u8,
+                RecordingPhase::Idle as u8,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ).is_ok() {
+                set_recording_gate(&app, false);
+                if !queue.scheduler.manual_pause_all.load(Ordering::SeqCst) {
+                    queue.resume_all().await;
+                }
+                if current_phase() == RecordingPhase::Idle {
+                    let _ = app.emit("recording-state-changed", serde_json::json!({ "phase": "Idle" }));
+                    crate::tray::update_tray_menu(&app);
                 }
             }
-        }
-        _ => {
-            let engine_clone = {
-                let g = crate::whisper_engine::commands::WHISPER_ENGINE.lock().unwrap();
-                g.as_ref().cloned()
-            };
-            if let Some(engine) = engine_clone {
-                let model = engine.get_current_model().await.unwrap_or_else(|| "unknown".into());
-                if !engine.unload_model().await {
-                    warn!("⚠️ Failed to unload Whisper model '{}'", model);
-                }
-            }
-        }
+        };
     }
 
-    // Analytics
+    if let Some(ref mut mgr) = manager {
+        match tokio::time::timeout(tokio::time::Duration::from_secs(300), mgr.save_recording_only(&app)).await {
+            Ok(Ok(_)) => {
+                info!("✅ Recording saved");
+                save_attempted.store(true, Ordering::SeqCst);
+                clear_gate_and_resume!();
+            }
+            Ok(Err(e)) => {
+                warn!("⚠️ Save error (transcripts preserved): {}", e);
+                save_attempted.store(true, Ordering::SeqCst);
+                clear_gate_and_resume!();
+                return Err(format!("save_recording_only failed: {}", e));
+            }
+            Err(_) => {
+                warn!("⏱️ File I/O timeout during save");
+                save_attempted.store(true, Ordering::SeqCst);
+                clear_gate_and_resume!();
+                return Err("save_recording_only timed out after 5 minutes".into());
+            }
+        }
+    } else {
+        save_attempted.store(true, Ordering::SeqCst);
+        clear_gate_and_resume!();
+    }
+
+    // Analytics runs after phase=Idle so M2 can start recording while this completes.
     if let Some((total_dur, active_dur, pause_dur, segments, had_error, mic_name, sys_name, chunks)) = analytics_snapshot {
         fn classify(name: &str) -> &'static str {
             let n = name.to_lowercase();
@@ -678,51 +789,8 @@ async fn background_shutdown<R: Runtime>(
         }
     }
 
-    // Save recording
-    let _ = app.emit(
-        "recording-shutdown-progress",
-        serde_json::json!({ "stage": "finalizing", "message": "Finalizing recording...", "progress": 90 }),
-    );
-
-    // Always clear the recording gate, regardless of save outcome. Jobs paused by this
-    // recording's gate should unblock even if the save itself fails — they are independent.
-    // Read manual_pause_all at each callsite (not snapshotted) so a mid-save Pause All
-    // from the user is respected rather than overridden by a stale boolean.
-    let queue = app.state::<crate::TranscriptionQueueState>();
-    set_recording_gate(&app, false);
-
-    macro_rules! resume_if_not_paused {
-        () => {
-            if !queue.scheduler.manual_pause_all.load(Ordering::SeqCst) {
-                queue.resume_all().await;
-            }
-        };
-    }
-
-    if let Some(ref mut mgr) = manager {
-        match tokio::time::timeout(tokio::time::Duration::from_secs(300), mgr.save_recording_only(&app)).await {
-            Ok(Ok(_)) => {
-                info!("✅ Recording saved");
-                resume_if_not_paused!();
-            }
-            Ok(Err(e)) => {
-                warn!("⚠️ Save error (transcripts preserved): {}", e);
-                resume_if_not_paused!();
-                return Err(format!("save_recording_only failed: {}", e));
-            }
-            Err(_) => {
-                warn!("⏱️ File I/O timeout during save");
-                resume_if_not_paused!();
-                return Err("save_recording_only timed out after 5 minutes".into());
-            }
-        }
-    } else {
-        resume_if_not_paused!();
-    }
-
-    // Emit completion progress. The synchronous recording-stopped event already fired in
-    // stop_recording with folder_path/meeting_name; recording-saved (with the audio path)
-    // fires from recording_saver::stop_and_save when the MP4 finalize step completes.
+    // recording-stopped fired synchronously in stop_recording with folder_path/meeting_name;
+    // recording-saved fires from recording_saver::stop_and_save when the MP4 finalizes.
     let _ = app.emit(
         "recording-shutdown-progress",
         serde_json::json!({ "stage": "complete", "message": "Recording stopped successfully", "progress": 100 }),
@@ -944,8 +1012,25 @@ async fn delete_meeting_row_inner(
 }
 
 /// Extracted so tests can assert phase state without a real AppHandle.
+///
+/// Only proceeds when the caller successfully claims the Recording→Idle phase transition.
+/// If phase is Saving (background_shutdown running) or Idle (no live session), returns None
+/// without touching the manager — prevents a stale cancel from destroying state it doesn't own.
+///
+/// RESIDUAL RISK (back-to-back): compare_exchange(Recording→Idle) succeeds for any Recording
+/// phase, including M2's. A stale M1 cancel arriving while M2 is Recording will transition M2's
+/// phase and take M2's manager. Closing this gap requires session-scoped identity tokens;
+/// defer to when a cancel button is added to the UI (task 12.3).
 pub(crate) fn cancel_audio_capture_inner() -> Option<std::path::PathBuf> {
-    set_phase(RecordingPhase::Idle);
+    // Gate: only proceed if we claimed the Recording→Idle transition. Fails for Saving/Idle.
+    if RECORDING_PHASE.compare_exchange(
+        RecordingPhase::Recording as u8,
+        RecordingPhase::Idle as u8,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    ).is_err() {
+        return None;
+    }
 
     let folder = match RECORDING_MANAGER.lock() {
         Ok(mut global) => {
@@ -976,21 +1061,25 @@ pub async fn cancel_recording_impl(
 
     let folder = cancel_audio_capture_inner();
 
-    // Streams are stopped; clear the scheduler gate unconditionally. Any I/O that follows
-    // (folder delete, DB row delete) may still fail, but that's no reason to leave the
-    // transcription queue blocked for the rest of the session.
-    set_recording_gate(app, false);
-    let queue = app.state::<crate::TranscriptionQueueState>();
-    if !queue.scheduler.manual_pause_all.load(Ordering::SeqCst) {
-        queue.resume_all().await;
+    // Only clear the gate if cancel_audio_capture_inner() actually claimed Recording→Idle.
+    // If it returned None (phase was Saving or Idle), background_shutdown owns the gate and
+    // will clear it via clear_gate_and_resume! once the MP4 write is complete. Clearing early
+    // would let the transcription worker pick up a file that is still being written.
+    if folder.is_some() {
+        set_recording_gate(app, false);
+        let queue = app.state::<crate::TranscriptionQueueState>();
+        if !queue.scheduler.manual_pause_all.load(Ordering::SeqCst) {
+            queue.resume_all().await;
+        }
+        // Guard: M2 may have called set_phase(Recording) during resume_all().await.
+        // Skip "Idle" emit and tray update to avoid clobbering M2's "Recording" event.
+        // recording-stopped is intentionally omitted regardless — it triggers the save flow
+        // against the folder we are about to delete.
+        if current_phase() == RecordingPhase::Idle {
+            let _ = app.emit("recording-state-changed", serde_json::json!({ "phase": "Idle" }));
+            crate::tray::update_tray_menu(app);
+        }
     }
-
-    crate::tray::update_tray_menu(app);
-
-    // Notify frontend immediately so RecordingStateContext updates without waiting for polling.
-    // recording-stopped is intentionally omitted here — it triggers the save flow against the
-    // folder we are about to delete.
-    let _ = app.emit("recording-state-changed", serde_json::json!({ "phase": "Idle" }));
 
     let folder_path = folder
         .as_ref()
@@ -1221,6 +1310,11 @@ pub(crate) fn stop_recording_sync_path_for_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Serializes tests that read/write RECORDING_PHASE (process-global AtomicU8).
+    // Without this, parallel test threads can interleave set_phase calls and produce
+    // flaky assertion failures (e.g. cancel_during_saving sees Recording set by another test).
+    static PHASE_TEST_LOCK: Mutex<()> = Mutex::new(());
     use tempfile::TempDir;
 
     // Helper: in-memory SQLite database for isolation.
@@ -1237,6 +1331,7 @@ mod tests {
     // Idempotent because the phase guard in stop_recording returns Ok if Saving.
     #[test]
     fn stop_recording_is_idempotent_during_saving() {
+        let _lock = PHASE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Simulate in-progress background shutdown
         set_phase(RecordingPhase::Saving);
         // Second stop: phase guard should short-circuit
@@ -1250,20 +1345,21 @@ mod tests {
         set_phase(RecordingPhase::Idle); // cleanup
     }
 
-    // Task 3.4: start_recording is rejected while phase is Saving.
-    // Tested via the guard at the top of start_recording_with_meeting_name.
+    // can_start_recording: Saving → Ok (M2 back-to-back allowed); Recording → Err (blocked).
     #[test]
-    fn start_recording_rejected_during_saving() {
-        set_phase(RecordingPhase::Saving);
-        // The phase check inside start_recording functions returns an error when Saving.
-        // We test the guard logic directly since we can't call the full async command here.
-        let phase = current_phase();
-        let rejected = phase == RecordingPhase::Saving;
+    fn can_start_recording_allows_saving_blocks_recording() {
         assert!(
-            rejected,
-            "start_recording must be rejected when phase is Saving (previous recording still finalizing)"
+            can_start_recording(RecordingPhase::Saving).is_ok(),
+            "can_start_recording must return Ok when phase is Saving (M2 back-to-back)"
         );
-        set_phase(RecordingPhase::Idle); // cleanup
+        assert!(
+            can_start_recording(RecordingPhase::Recording).is_err(),
+            "can_start_recording must return Err when phase is Recording"
+        );
+        assert!(
+            can_start_recording(RecordingPhase::Idle).is_ok(),
+            "can_start_recording must return Ok when phase is Idle"
+        );
     }
 
     // Task 5.1: cancel_recording transitions to Idle (stops audio capture).
@@ -1273,6 +1369,7 @@ mod tests {
     // with other tests that write it. In practice the other tests here don't touch it.
     #[test]
     fn test_5_1_cancel_clears_recording_flag() {
+        let _lock = PHASE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         set_phase(RecordingPhase::Recording);
         cancel_audio_capture_inner();
         assert!(
@@ -1281,10 +1378,28 @@ mod tests {
         );
     }
 
+    // cancel_audio_capture_inner must return None and leave phase unchanged when phase=Saving.
+    // A stale cancel for M1 fired while M1's background_shutdown holds Saving must be a no-op
+    // so stop_recording's phase guard and any concurrent M2 manager remain intact.
+    #[test]
+    fn cancel_during_saving_leaves_phase_unchanged() {
+        let _lock = PHASE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_phase(RecordingPhase::Saving);
+        let result = cancel_audio_capture_inner();
+        assert!(result.is_none(), "stale cancel during Saving must return None (early exit)");
+        assert_eq!(
+            current_phase(),
+            RecordingPhase::Saving,
+            "cancel must not overwrite Saving phase (compare_exchange(Recording→Idle) must fail)"
+        );
+        set_phase(RecordingPhase::Idle); // cleanup
+    }
+
     // Task 1.3: current_phase() returns the phase most recently set by set_phase()
     // for each variant — verifies the enum round-trip through AtomicU8.
     #[test]
     fn test_1_3_phase_round_trip() {
+        let _lock = PHASE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         for &phase in &[RecordingPhase::Idle, RecordingPhase::Recording, RecordingPhase::Saving] {
             set_phase(phase);
             assert_eq!(
@@ -1302,6 +1417,7 @@ mod tests {
     // Task 1.4: sequential phase transitions are observable in order.
     #[test]
     fn test_1_4_phase_sequence_observable_in_order() {
+        let _lock = PHASE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         set_phase(RecordingPhase::Recording);
         assert_eq!(current_phase(), RecordingPhase::Recording);
         set_phase(RecordingPhase::Saving);
@@ -1314,14 +1430,17 @@ mod tests {
     // the phase in Saving (streams released, background work not yet done).
     // FAILS until task 2.3: stub does not transition to Saving.
     #[test]
-    fn stop_releases_streams_within_1s() {
+    fn stop_sync_path_transitions_phase_to_saving_and_returns_fast() {
+        // Note: this stub exercises only the phase-state machine, not real stream teardown.
+        // The 1s bound is a sanity check on the stub; the real stop path is not measured here.
+        let _lock = PHASE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         set_phase(RecordingPhase::Recording);
         let start = std::time::Instant::now();
         stop_recording_sync_path_for_test();
         let elapsed = start.elapsed();
         assert!(
             elapsed < std::time::Duration::from_secs(1),
-            "synchronous stop path must complete within 1 s, took {:?}",
+            "stub must return instantly, took {:?}",
             elapsed
         );
         assert_eq!(
@@ -1332,18 +1451,19 @@ mod tests {
         set_phase(RecordingPhase::Idle); // cleanup
     }
 
-    // Task 2.2: stop_recording emits Saving phase BEFORE returning from the synchronous path.
-    // Tested via phase atomic — the Saving transition must happen on the synchronous path,
-    // not inside the spawned background task.
-    // FAILS until task 2.3: stub does not transition to Saving.
+    // Task 2.2: phase is Saving (not Recording) after the synchronous stop path returns.
+    // Validates only the phase-state machine — stream teardown is not tested here since
+    // the stub has no real streams. The Saving transition must happen synchronously, before
+    // the spawned background task runs.
     #[test]
-    fn stop_emits_saving_phase_event() {
+    fn stop_sync_path_transitions_phase_to_saving() {
+        let _lock = PHASE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         set_phase(RecordingPhase::Recording);
         stop_recording_sync_path_for_test();
         assert_eq!(
             current_phase(),
             RecordingPhase::Saving,
-            "recording-state-changed(Saving) must be emitted by the synchronous stop path"
+            "phase must be Saving on return from the synchronous stop path"
         );
         set_phase(RecordingPhase::Idle); // cleanup
     }
@@ -1351,23 +1471,45 @@ mod tests {
     // Task 4.1: PhaseGuard resets phase to Idle on normal scope exit.
     #[test]
     fn phase_guard_resets_to_idle_on_drop() {
+        let _lock = PHASE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         set_phase(RecordingPhase::Saving);
         {
             let _guard = PhaseGuard;
             assert_eq!(current_phase(), RecordingPhase::Saving, "still Saving inside guard scope");
-        } // _guard drops → set_phase(Idle)
+        } // _guard drops → compare_exchange(Saving→Idle)
         assert_eq!(
             current_phase(),
             RecordingPhase::Idle,
-            "PhaseGuard::drop must call set_phase(Idle)"
+            "PhaseGuard::drop must transition Saving→Idle"
         );
     }
 
-    // Task 4.1 (panic path): PhaseGuard resets phase to Idle even when the spawn block panics.
-    // This is the critical invariant: a Whisper panic / OOM / mutex poison inside
-    // background_shutdown must not leave the UI stuck in "Saving…" forever.
+    // PhaseGuard must not clobber M2's Recording phase (back-to-back recording scenario).
+    // M1's guard fires after M2 has already started — compare_exchange(Saving→Idle) must
+    // be a no-op when current phase is Recording.
+    #[test]
+    fn phase_guard_does_not_clobber_recording_phase() {
+        let _lock = PHASE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_phase(RecordingPhase::Saving);
+        {
+            let _guard = PhaseGuard;
+            // Simulate M2 starting mid-save (the window this fix targets)
+            set_phase(RecordingPhase::Recording);
+        } // guard drops — compare_exchange must be a no-op because phase ≠ Saving
+        assert_eq!(
+            current_phase(),
+            RecordingPhase::Recording,
+            "PhaseGuard::drop must not overwrite M2's Recording phase"
+        );
+        set_phase(RecordingPhase::Idle); // cleanup
+    }
+
+    // Task 4.1 (panic path): PhaseGuard resets phase to Idle on direct task panic.
+    // The real spawn block wraps background_shutdown in catch_unwind so panics there are
+    // handled with full cleanup; this test covers the fallback if catch_unwind itself fails.
     #[tokio::test]
     async fn phase_guard_resets_to_idle_on_panic() {
+        let _lock = PHASE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         set_phase(RecordingPhase::Saving);
 
         let handle = tokio::spawn(async {
@@ -1376,7 +1518,7 @@ mod tests {
         });
 
         // The task panics — JoinError::panicked is expected.
-        let _ = handle.await;
+        assert!(handle.await.is_err(), "spawn task must report panic as JoinError");
 
         assert_eq!(
             current_phase(),

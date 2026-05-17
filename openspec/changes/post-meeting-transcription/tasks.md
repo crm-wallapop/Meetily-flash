@@ -92,7 +92,7 @@
 
 - [x] 12.1 Run full suite: `cargo test`, `pytest backend/`, `pnpm test`, `pnpm lint` — all green
 - [x] 12.2 Manual smoke: start recording, stop normally → confirm MP4 saved, queue picks up the job, transcript appears, summary fires if provider configured
-- [ ] 12.3 Manual smoke: start recording, cancel → confirm no MP4 on disk, no job enqueued, no transcription runs
+- [~] 12.3 Manual smoke: start recording, cancel → confirm no MP4 on disk, no job enqueued, no transcription runs *(deferred — no UI cancel button exists; cancel path covered by unit tests in `recording_commands.rs`)*
 - [ ] 12.4 Manual smoke: back-to-back recordings → confirm M2 starts immediately after M1's stop, M1's transcription job pauses while M2 is recording, resumes when M2 stops, both eventually complete in order
 - [ ] 12.5 Manual smoke: long meeting → confirm progress percentage advances, cancel button works, Pause All button stops all work, Resume restarts cleanly
 - [ ] 12.6 Manual smoke: kill app mid-transcription → relaunch → confirm recovery modal lists the in-flight meeting and accepting it re-runs the job
