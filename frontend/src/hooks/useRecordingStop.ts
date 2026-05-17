@@ -171,6 +171,12 @@ export function useRecordingStop(
         const savedMeetingName =
           stopResult.meeting_name ?? sessionStorage.getItem('last_recording_meeting_name');
 
+        // Re-enable recording button before the HTTP save.
+        // Rust streams are stopped and transcript snapshot is taken — M2 can start
+        // while M1's data is being persisted. The save uses freshTranscripts (snapshot),
+        // so any M2 transcripts that arrive after this point don't contaminate M1's save.
+        setIsRecordingDisabled(false);
+
         console.log('💾 Saving COMPLETE transcripts to database...', {
           transcript_count: freshTranscripts.length,
           meeting_name: savedMeetingName || meetingTitle,
@@ -214,11 +220,6 @@ export function useRecordingStop(
             toast.error('Transcription could not be queued — audio path is unknown.');
           }
 
-          // Re-enable the record button here, before the slow tail (refetch, navigation,
-          // analytics). The meeting is saved and the transcription job is queued — M2 can
-          // start without waiting for the tail to finish.
-          setIsRecordingDisabled(false);
-
           // Mark meeting as saved in IndexedDB (for recovery system)
           await markMeetingAsSaved();
 
@@ -248,7 +249,9 @@ export function useRecordingStop(
           // Mark as completed
           setStatus(RecordingStatus.COMPLETED);
 
-          // Show success toast with navigation option
+          // Show success toast at the top so it doesn't overlap the recording button.
+          // Auto-navigate is intentionally absent: the user may want to start M2
+          // immediately. "View Meeting" is the voluntary path to the details page.
           toast.success('Recording saved successfully!', {
             description: freshTranscripts.length > 0
               ? `${freshTranscripts.length} transcript segments saved.`
@@ -257,21 +260,14 @@ export function useRecordingStop(
               label: 'View Meeting',
               onClick: () => {
                 router.push(`/meeting-details?id=${meetingId}`);
+                clearTranscripts();
                 Analytics.trackButtonClick('view_meeting_from_toast', 'recording_complete');
               }
             },
             duration: 10000,
           });
 
-          // Auto-navigate after a short delay with source parameter
-          setTimeout(() => {
-            router.push(`/meeting-details?id=${meetingId}&source=recording`);
-            clearTranscripts()
-            Analytics.trackPageView('meeting_details');
-
-            // Reset to IDLE after navigation
-            setStatus(RecordingStatus.IDLE);
-          }, 2000);
+          setStatus(RecordingStatus.IDLE);
           // Track meeting completion analytics
           try {
             // Calculate meeting duration from transcript timestamps

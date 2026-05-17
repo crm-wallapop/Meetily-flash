@@ -92,13 +92,12 @@ interface StopFlowStep {
 // boundary. Relative order within the slow-tail group is not asserted.
 // Keep this in sync manually when isSlowTail boundaries change.
 const STOP_FLOW_STEPS: StopFlowStep[] = [
-  { name: 'saveMeeting',                    isSlowTail: false },
-  { name: 'enqueueTranscriptionJob',        isSlowTail: false },
-  { name: 'setIsRecordingDisabled(false)',   isSlowTail: false }, // ← early re-enable
+  { name: 'setIsRecordingDisabled(false)',   isSlowTail: false }, // ← re-enable before HTTP save
+  { name: 'saveMeeting',                    isSlowTail: true  },
+  { name: 'enqueueTranscriptionJob',        isSlowTail: true  },
   { name: 'markMeetingAsSaved',             isSlowTail: true  },
   { name: 'refetchMeetings',                isSlowTail: true  },
   { name: 'getMeeting',                     isSlowTail: true  },
-  { name: 'navigate_2s_timer',              isSlowTail: true  }, // setTimeout registered before analytics block
   { name: 'analytics',                      isSlowTail: true  },
 ];
 
@@ -109,9 +108,9 @@ describe('useRecordingStop re-enable ordering — documented contract (not enfor
     expect(reEnableIdx).toBeGreaterThanOrEqual(0);
   });
 
-  it('setIsRecordingDisabled(false) fires after enqueueTranscriptionJob', () => {
-    const enqueueIdx = STOP_FLOW_STEPS.findIndex(s => s.name === 'enqueueTranscriptionJob');
-    expect(reEnableIdx).toBeGreaterThan(enqueueIdx);
+  it('setIsRecordingDisabled(false) fires before saveMeeting', () => {
+    const saveMeetingIdx = STOP_FLOW_STEPS.findIndex(s => s.name === 'saveMeeting');
+    expect(reEnableIdx).toBeLessThan(saveMeetingIdx);
   });
 
   it('setIsRecordingDisabled(false) fires before every slow-tail operation', () => {
