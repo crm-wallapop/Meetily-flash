@@ -172,9 +172,12 @@ export function useRecordingStop(
           stopResult.meeting_name ?? sessionStorage.getItem('last_recording_meeting_name');
 
         // Re-enable recording button before the HTTP save.
-        // Rust streams are stopped and transcript snapshot is taken — M2 can start
-        // while M1's data is being persisted. The save uses freshTranscripts (snapshot),
-        // so any M2 transcripts that arrive after this point don't contaminate M1's save.
+        // stop_recording has returned (phase → Saving, manager ownership handed off to
+        // background_shutdown), but WASAPI stream teardown is still running in the background.
+        // M2 starting here will race M1's teardown on the same audio endpoints — this is
+        // intentional and safe: cpal handles concurrent open/close on Windows loopback, and
+        // the transcript snapshot (freshTranscripts) was already taken so M2 traffic can't
+        // contaminate M1's save.
         setIsRecordingDisabled(false);
 
         console.log('💾 Saving COMPLETE transcripts to database...', {
