@@ -515,7 +515,7 @@ where
     );
 
     // (b) Stop streams + force flush — takes the manager out of global state permanently.
-    let manager_for_background = {
+    let mut manager_for_background = {
         let mut global_manager = RECORDING_MANAGER.lock().unwrap();
         // Atomically claim Saving inside the lock. This closes two races simultaneously:
         // 1. cancel_audio_capture_inner(): its CAS(Recording→Idle) fails the moment we
@@ -539,19 +539,8 @@ where
         global_manager.take()
     };
 
-    let (stream_result, mut manager_for_background) = if let Some(mut mgr) = manager_for_background {
-        info!("🚀 FORCE FLUSH — eliminating pipeline accumulation delays");
-        let r = mgr.stop_streams_and_force_flush().await;
-        (r, Some(mgr))
-    } else {
+    if manager_for_background.is_none() {
         warn!("No recording manager found to stop");
-        (Ok(()), None)
-    };
-
-    if let Err(e) = stream_result {
-        // Per design D3: even if stream release fails, transition to Saving so the UI
-        // doesn't stay stuck in Recording forever. Background task will log and clean up.
-        error!("❌ Stream release error (continuing to Saving): {}", e);
     }
 
     // Extract analytics snapshot NOW while we still hold the manager, before the background
@@ -689,6 +678,18 @@ async fn background_shutdown<R: Runtime>(
     analytics_snapshot: Option<(Option<f64>, f64, f64, u64, bool, Option<String>, Option<String>, u64)>,
     save_attempted: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    // Flush streams first — moved here from stop_recording's synchronous path so the command
+    // returns fast. Running inside background_shutdown keeps the flush inside the catch_unwind
+    // boundary, so a flush panic doesn't leave recording_busy stuck for the session.
+    // flush→save order preserved: this completes before save_recording_only.
+    if let Some(ref mut mgr) = manager {
+        info!("🚀 FORCE FLUSH — streams released in background");
+        if let Err(e) = mgr.stop_streams_and_force_flush().await {
+            // Per design D3: even if stream release fails, continue to save.
+            error!("❌ Stream release error (continuing to save): {}", e);
+        }
+    }
+
     // Save first: gate clears AFTER save so the worker never races against an in-flight MP4
     // write (worker could call find_audio_file() on an incomplete MP4 and mark the job Failed).
     // Phase transitions to Idle immediately after save so M2 can start a new recording without
