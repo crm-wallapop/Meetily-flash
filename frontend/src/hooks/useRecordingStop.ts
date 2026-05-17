@@ -171,13 +171,13 @@ export function useRecordingStop(
         const savedMeetingName =
           stopResult.meeting_name ?? sessionStorage.getItem('last_recording_meeting_name');
 
-        // Re-enable recording button before the HTTP save.
-        // stop_recording has returned (phase → Saving, manager ownership handed off to
-        // background_shutdown), but WASAPI stream teardown is still running in the background.
-        // M2 starting here will race M1's teardown on the same audio endpoints — this is
-        // intentional and safe: cpal handles concurrent open/close on Windows loopback, and
-        // the transcript snapshot (freshTranscripts) was already taken so M2 traffic can't
-        // contaminate M1's save.
+        // Re-enable recording before the HTTP save.
+        // stop_recording has returned (phase → Saving) but background_shutdown is still
+        // running: stop_streams_and_force_flush fires inside the spawned task, so WASAPI
+        // teardown is in flight. An M2 start here will race M1's stream close on the same
+        // audio endpoints. WASAPI shared-mode loopback has tolerated this in practice, but
+        // the overlap is intentional: the transcript snapshot above is already fixed, so
+        // M2 audio cannot contaminate M1's save regardless of stream ordering.
         setIsRecordingDisabled(false);
 
         console.log('💾 Saving COMPLETE transcripts to database...', {
