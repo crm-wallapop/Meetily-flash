@@ -37,7 +37,7 @@ export default function Home() {
   const recordingState = useRecordingState();
 
   // Extract status from global state
-  const { status, isStopping, isProcessing, isSaving } = recordingState;
+  const { status, isStopping, isProcessing } = recordingState;
 
   // Hooks
   const { hasMicrophone } = usePermissionCheck();
@@ -92,7 +92,6 @@ export default function Home() {
         // This prevents the recovery dialog from showing when:
         if (recordingState.isRecording ||
           status === RecordingStatus.STOPPING ||
-          status === RecordingStatus.PROCESSING_TRANSCRIPTS ||
           status === RecordingStatus.SAVING) {
           console.log('Skipping recovery check - recording in progress or processing');
           return;
@@ -233,7 +232,7 @@ export default function Home() {
   }, [recordingState.isRecording]);
 
   // Computed values using global status
-  const isProcessingStop = status === RecordingStatus.PROCESSING_TRANSCRIPTS || isProcessing;
+  const isProcessingStop = isProcessing;
 
   return (
     <motion.div
@@ -282,9 +281,7 @@ export default function Home() {
         />
 
         {/* Recording controls - only show when permissions are granted or already recording and not showing status messages */}
-        {(hasMicrophone || isRecording) &&
-          status !== RecordingStatus.PROCESSING_TRANSCRIPTS &&
-          status !== RecordingStatus.SAVING && (
+        {(hasMicrophone || isRecording) && (
             <div className="fixed bottom-12 left-0 right-0 z-10">
               <div
                 className="flex justify-center pl-8 transition-[margin] duration-300"
@@ -305,7 +302,6 @@ export default function Home() {
                         showModal('errorAlert', message);
                       }}
                       isRecordingDisabled={isRecordingDisabled}
-                      isParentProcessing={isProcessingStop}
                       selectedDevices={selectedDevices}
                       meetingName={meetingTitle}
                     />
@@ -315,9 +311,9 @@ export default function Home() {
             </div>
           )}
 
-        {/* Status Overlays - Processing and Saving */}
+        {/* Status Overlays - Stopping and Saving */}
         <StatusOverlays
-          isProcessing={status === RecordingStatus.PROCESSING_TRANSCRIPTS && !recordingState.isRecording}
+          isStopping={isStopping}
           isSaving={status === RecordingStatus.SAVING}
           sidebarCollapsed={sidebarCollapsed}
         />
