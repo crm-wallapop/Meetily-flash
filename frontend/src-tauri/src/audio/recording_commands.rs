@@ -386,7 +386,6 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     } else {
         None
     };
-
     // Async-first approach for custom devices - no more blocking operations!
     info!("🚀 Starting async recording initialization with custom devices");
 
@@ -405,7 +404,6 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
             (true, -30)
         }
     };
-
     // Always ensure a meeting name is set so incremental saver initializes
     let effective_meeting_name = meeting_name.clone().unwrap_or_else(|| {
         let now = chrono::Local::now();

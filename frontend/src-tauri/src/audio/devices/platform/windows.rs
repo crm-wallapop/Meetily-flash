@@ -185,21 +185,52 @@ pub fn get_windows_device(audio_device: &AudioDevice) -> Result<(cpal::Device, c
             }
         }
         DeviceType::Output => {
+            // Fast path: GetDefaultAudioEndpoint is a single COM call (~0ms).
+            // output_devices() calls EnumAudioEndpoints which can block for 4+ seconds
+            // on systems with USB/Bluetooth audio devices. Checking the default first
+            // covers the common case where the user's system audio IS the default output.
+            if let Some(default_device) = wasapi_host.default_output_device() {
+                if let Ok(name) = default_device.name() {
+                    if name == base_name || name.contains(base_name) {
+                        info!("⚡ Fast path: system audio matched default output: {}", name);
+                        if let Ok(supported_configs) = default_device.supported_output_configs() {
+                            let configs: Vec<_> = supported_configs.collect();
+                            if !configs.is_empty() {
+                                for config in &configs {
+                                    if config.sample_format() == cpal::SampleFormat::F32 && config.channels() == 2 {
+                                        let config = config.with_max_sample_rate();
+                                        info!("Using stereo F32 output config: {:?}", config);
+                                        return Ok((default_device, config));
+                                    }
+                                }
+                                for config in &configs {
+                                    if config.sample_format() == cpal::SampleFormat::F32 {
+                                        return Ok((default_device, config.with_max_sample_rate()));
+                                    }
+                                }
+                                return Ok((default_device, configs[0].with_max_sample_rate()));
+                            }
+                        }
+                        if let Ok(config) = default_device.default_output_config() {
+                            return Ok((default_device, config));
+                        }
+                    }
+                }
+            }
+
+            // Slow path: full enumeration via EnumAudioEndpoints (used when the target
+            // device is not the Windows default output).
             for device in wasapi_host.output_devices()? {
                 if let Ok(name) = device.name() {
                     info!("Checking output device: {}", name);
                     // Check if the device name contains our base name
                     if name == base_name || name.contains(base_name) {
-                        // info!("Found matching output device: {}", name);
-
                         // For output devices, we want to use them in loopback mode
                         if let Ok(supported_configs) = device.supported_output_configs() {
                             let configs: Vec<_> = supported_configs.collect();
                             if configs.is_empty() {
                                 warn!("No supported output configurations found for device: {}", name);
                             } else {
-                                // info!("Found {} supported output configurations", configs.len());
-
                                 // Try to find a config that supports f32 format with 2 channels (stereo)
                                 for config in &configs {
                                     if config.sample_format() == cpal::SampleFormat::F32 && config.channels() == 2 {
@@ -213,14 +244,12 @@ pub fn get_windows_device(audio_device: &AudioDevice) -> Result<(cpal::Device, c
                                 for config in &configs {
                                     if config.sample_format() == cpal::SampleFormat::F32 {
                                         let config = config.with_max_sample_rate();
-                                        // info!("Using F32 output config: {:?}", config);
                                         return Ok((device, config));
                                     }
                                 }
 
                                 // Finally, use the first available config
                                 let config = configs[0].with_max_sample_rate();
-                                // info!("Using fallback output config: {:?}", config);
                                 return Ok((device, config));
                             }
                         } else {
@@ -229,7 +258,6 @@ pub fn get_windows_device(audio_device: &AudioDevice) -> Result<(cpal::Device, c
 
                         // If we couldn't get supported configs, try default
                         if let Ok(default_config) = device.default_output_config() {
-                            // info!("Using default output config: {:?}", default_config);
                             return Ok((device, default_config));
                         }
                     }
