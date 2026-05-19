@@ -5,6 +5,7 @@
  * Render states: Transcribing | Summarising | Queued | Paused | Done | Failed | (hidden)
  */
 import React from 'react';
+import { toast } from 'sonner';
 import { QueueJob } from '@/services/queueService';
 import { queueJobLabel } from '@/hooks/useQueueJobStatus';
 import { cn } from '@/lib/utils';
@@ -37,9 +38,14 @@ export function QueueStatusBadge({ job, showCancel = false, onCancelled, classNa
     e.stopPropagation();
     try {
       await cancelQueuedJob(job.meeting_id);
+      // Cancellation removes the queue row entirely (per spec post-meeting-pipeline.md:142).
+      // Without a toast the user sees the badge silently disappear and can't tell
+      // whether the click landed or simply dismissed the badge.
+      toast.success('Transcription cancelled');
       onCancelled?.();
     } catch (err) {
       console.error('Failed to cancel queue job:', err);
+      toast.error('Failed to cancel transcription');
     }
   };
 

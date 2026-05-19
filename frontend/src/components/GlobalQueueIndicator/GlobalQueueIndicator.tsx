@@ -20,13 +20,17 @@ export function GlobalQueueIndicator({ className }: GlobalQueueIndicatorProps) {
   const [isToggling, setIsToggling] = useState(false);
 
   const activeJobs = snapshot.jobs.filter(j => j.status !== 'Done' && j.status !== 'Failed');
-  const pausedJobs = activeJobs.filter(j => j.status === 'Paused');
   const inProgressJobs = activeJobs.filter(j => j.status === 'InProgress');
-  const allPaused = activeJobs.length > 0 && pausedJobs.length === activeJobs.length;
 
-  if (activeJobs.length === 0) return null;
+  // Drive the toggle from the global manual_pause_all flag rather than per-job
+  // statuses: when the user clicks Pause, manual_pause_all flips immediately
+  // but the in-flight job stays InProgress until it yields at its next chunk
+  // boundary. A per-job heuristic would hide Resume during that window.
+  const isPaused = snapshot.manual_pause_all;
 
-  const statusLabel = allPaused
+  if (activeJobs.length === 0 && !isPaused) return null;
+
+  const statusLabel = isPaused
     ? `${activeJobs.length} queued (paused)`
     : inProgressJobs.length > 0
     ? `${activeJobs.length} queued (running)`
@@ -35,7 +39,7 @@ export function GlobalQueueIndicator({ className }: GlobalQueueIndicatorProps) {
   const handleToggle = async () => {
     setIsToggling(true);
     try {
-      if (allPaused) {
+      if (isPaused) {
         await resumeAllBackgroundWork();
       } else {
         await pauseAllBackgroundWork();
@@ -54,7 +58,7 @@ export function GlobalQueueIndicator({ className }: GlobalQueueIndicatorProps) {
         className,
       )}
     >
-      {inProgressJobs.length > 0 && (
+      {!isPaused && inProgressJobs.length > 0 && (
         <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-500 shrink-0" />
       )}
       <span className="text-muted-foreground">{statusLabel}</span>
@@ -64,10 +68,10 @@ export function GlobalQueueIndicator({ className }: GlobalQueueIndicatorProps) {
         className="h-6 w-6 p-0"
         onClick={handleToggle}
         disabled={isToggling}
-        title={allPaused ? 'Resume all background work' : 'Pause all background work'}
-        aria-label={allPaused ? 'Resume' : 'Pause'}
+        title={isPaused ? 'Resume all background work' : 'Pause all background work'}
+        aria-label={isPaused ? 'Resume' : 'Pause'}
       >
-        {allPaused
+        {isPaused
           ? <Play className="w-3 h-3" />
           : <Pause className="w-3 h-3" />
         }

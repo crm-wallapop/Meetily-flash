@@ -9,10 +9,22 @@ export interface QueueJob {
   audio_path: string;
   status: JobStatus;
   phase: JobPhase;
+  /** Decorated client-side from retranscription-progress events; not sent by Rust. */
+  progress_percent?: number;
 }
 
 export interface QueueSnapshot {
   jobs: QueueJob[];
+  /** Mirrors scheduler.manual_pause_all so the UI can render Pause vs Resume
+   *  without inferring from per-job statuses (which lag in-flight yields). */
+  manual_pause_all: boolean;
+}
+
+export interface RetranscriptionProgressEvent {
+  meeting_id: string;
+  stage: string;
+  progress_percentage: number;
+  message: string;
 }
 
 export async function pauseAllBackgroundWork(): Promise<void> {

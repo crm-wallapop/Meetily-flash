@@ -412,22 +412,29 @@ async fn read_transcript_text(path: &std::path::Path) -> anyhow::Result<String> 
 // ── Queue Tauri commands (task 8.1) ───────────────────────────────────────────
 
 #[tauri::command]
-async fn pause_all_background_work(
+async fn pause_all_background_work<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, TranscriptionQueueState>,
 ) -> Result<(), String> {
-    use std::sync::atomic::Ordering;
-    state.scheduler.manual_pause_all.store(true, Ordering::SeqCst);
+    use tauri::Emitter;
     state.pause_all().await;
+    // Emit a fresh snapshot so the UI reflects the paused state immediately;
+    // the worker-loop notifier only fires on job-status transitions and won't
+    // cover the manual-pause case where no job is mid-flight.
+    let snapshot = state.get_state().await;
+    let _ = app.emit("transcription-queue-changed", &snapshot);
     Ok(())
 }
 
 #[tauri::command]
-async fn resume_all_background_work(
+async fn resume_all_background_work<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, TranscriptionQueueState>,
 ) -> Result<(), String> {
-    use std::sync::atomic::Ordering;
-    state.scheduler.manual_pause_all.store(false, Ordering::SeqCst);
+    use tauri::Emitter;
     state.resume_all().await;
+    let snapshot = state.get_state().await;
+    let _ = app.emit("transcription-queue-changed", &snapshot);
     Ok(())
 }
 
@@ -769,13 +776,17 @@ pub fn run() {
                             fn emit_ended(&self) {
                                 use std::sync::atomic::Ordering;
 
-                                // Clear the meeting gate and resume background transcription.
+                                // Clear the meeting gate. Only resume the worker if the user
+                                // has not deliberately paused all background work — otherwise
+                                // resume_all() would silently clear manual_pause_all.
                                 if let Some(q) = self.0.try_state::<TranscriptionQueueState>() {
                                     q.scheduler.meeting_busy.store(false, Ordering::SeqCst);
-                                    let q_arc = q.inner().clone();
-                                    tauri::async_runtime::spawn(async move {
-                                        q_arc.resume_all().await;
-                                    });
+                                    if !q.scheduler.manual_pause_all.load(Ordering::SeqCst) {
+                                        let q_arc = q.inner().clone();
+                                        tauri::async_runtime::spawn(async move {
+                                            q_arc.resume_all().await;
+                                        });
+                                    }
                                 }
 
                                 let handler = crate::notifications::system::SystemNotificationHandler::new(self.0.clone());

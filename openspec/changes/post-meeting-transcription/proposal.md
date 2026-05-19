@@ -36,7 +36,8 @@ Two safety guarantees go in the same change so the new background pipeline never
 ## Impact
 
 - `frontend/src-tauri/src/audio/pipeline.rs` — remove the VAD / Whisper live path
-- `frontend/src-tauri/src/audio/recording_manager.rs` — trigger the transcription queue after `finalize()`
+- `frontend/src-tauri/src/audio/recording_manager.rs` — `background_shutdown` task: MP4 flush, SQLite row creation (returns UUID), phase reset, scheduler gate release, `resume_all()`
+- `frontend/src/hooks/useRecordingStop.ts` — calls `enqueue_transcription_job(meetingId, audioPath)` after `saveMeeting()` returns the new meeting UUID (enqueue is frontend-initiated, outside the Tauri phase boundary)
 - `frontend/src-tauri/src/audio/retranscription.rs` — add an auto-mode entry point that obeys the scheduler; chain summary trigger on completion
 - `frontend/src-tauri/src/audio/incremental_saver.rs` — remove `.ckpt` writes (only the final MP4 is needed)
 - `frontend/src-tauri/src/use_cases/` — new `transcription_queue.rs` use case (scheduler + queue state machine)
@@ -46,7 +47,7 @@ Two safety guarantees go in the same change so the new background pipeline never
 - `frontend/src/contexts/TranscriptContext.tsx` — stop subscribing to live `transcript-update` events; subscribe to queue state events
 - `frontend/src/` — replace live transcript panel with the post-recording progress view; add per-meeting state badges and the app-shell queue indicator
 - Removes Tauri commands: `recover_audio_from_checkpoints`, `has_audio_checkpoints`, `cleanup_checkpoints`
-- Adds Tauri commands: `pause_all_background_work`, `resume_all_background_work`, `get_queue_state`, `cancel_queued_job`
+- Adds Tauri commands: `pause_all_background_work`, `resume_all_background_work`, `get_queue_state`, `cancel_queued_job`, `enqueue_transcription_job`
 - Adds Tauri events: `transcription-queue-changed` (queue snapshot whenever any job state changes)
 
 ## Out of Scope (deferred to `transcription-scheduler-advanced`)

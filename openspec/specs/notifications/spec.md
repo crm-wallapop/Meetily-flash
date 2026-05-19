@@ -2,6 +2,12 @@
 
 > Status: **initial** — requirements captured, not yet fully implemented.
 > Covers Windows system toast notifications for recording lifecycle events.
+>
+> **Scope note:** This spec governs OS-level toast notifications only. The `recording-state-changed`
+> Tauri event (which drives in-app recording UI state) is specified in
+> `openspec/specs/recording-lifecycle/spec.md`. The `transcription-queue-changed` event
+> (job progress, pause/resume state) is specified in
+> `openspec/specs/post-meeting-pipeline/spec.md`.
 
 ---
 
@@ -83,3 +89,21 @@ confirming the meeting was saved with the meeting title.
 - Should it include an "Open" action button to navigate to the meeting details view?
 - Should cancelled recordings (via `cancel_recording`) suppress this notification?
   (Current intent: yes — `cancel_recording` must not show a "recording saved" notification.)
+
+---
+
+## Open question: transcription-queue-changed notifications
+
+> **Status: NOT YET DESIGNED** — added 2026-05-18 to track this gap.
+
+The `post-meeting-transcription` change introduced a `transcription-queue-changed` Tauri event
+carrying full queue state (job status, progress, `manual_pause_all` flag). Natural follow-on
+notifications when jobs complete or fail have not yet been designed.
+
+### Questions to resolve before implementing
+- Should job-completion and job-failure notifications reuse the existing consent gate, or have
+  their own per-event flags (`show_transcription_completed`, `show_transcription_failed`)?
+- What text should the toasts carry (e.g. "Transcription ready — Weekly sync")?
+- Should a completion notification carry an "Open" action button to navigate to the meeting?
+- Should a failure notification carry a "Retry" action, or is click-to-foreground sufficient?
+- Should notifications fire for every completed job, or only for the last job in a batch run?

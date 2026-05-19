@@ -1,7 +1,7 @@
 # Recording Lifecycle — Capability Spec
 
-> Status: **updated 2026-05-13** — controlled repro confirmed; UX split
-> between disabled Stop button and still-active recording state documented.
+> Status: **updated 2026-05-18** — corrected background-work description to match
+> post-meeting-transcription implementation; added cross-reference to queue enqueue step.
 
 ---
 
@@ -9,34 +9,9 @@
 
 When the user invokes `stop_recording`, the `RecordingStatusBar` SHALL disappear
 (i.e., `isRecording` becomes `false` in the frontend) no later than **1 second**
-after the audio streams are released. The remaining shutdown work — transcription
-queue drain, Whisper model unload, incremental-saver finalization — runs in the
-background and does NOT block the UI update.
-
-**Root cause of current bug (logged 2026-05-13):** `IS_RECORDING` is only set to
-`false` at the very end of `stop_recording` in `recording_commands.rs`, after all
-10 transcription chunks are drained and the file is saved. In the smoke test this
-produced a **2 m 16 s** window where the status bar showed "Recording" even though
-the CPAL streams had already been released.
-
-**Controlled repro (2026-05-13, second recording):** Auto-detect started a recording;
-user left the Meet call; stop-prompt banner appeared (after the 10 s `meeting-ended`
-debounce); user pressed Stop. `metadata.json` confirmed:
-- `created_at` → `completed_at` gap: **2 m 15 s** (consistent with first test)
-- `duration_seconds: 1.93` — streams released and audio capture halted within
-  ~2 s of the Stop press; only the UI signal (`IS_RECORDING`) was delayed.
-
-**UX symptom (confirmed):** After pressing Stop, the frontend enters a split state:
-- The sidebar Stop button is immediately **disabled** (the `isStopping` guard in
-  `RecordingControls.tsx` fires on first press to prevent double-clicks).
-- The `RecordingStatusBar` continues to show "Recording" and a "Processing…" spinner,
-  because `isRecording` in `RecordingStateContext` is driven by `IS_RECORDING` — which
-  stays `true` for the full ~2-minute shutdown sequence.
-
-The user cannot tell whether the recording is still capturing audio (it is not) or
-whether their Stop press was registered (it was). The disabled button strongly implies
-"registered" while the status bar implies "still running" — these signals contradict
-each other.
+after the audio streams are released. The remaining shutdown work — MP4 flush and
+finalization, SQLite row creation, phase reset, scheduler gate release — runs in the
+background (`background_shutdown` task) and does NOT block the UI update.
 
 ### Scenario: UI state is unambiguous immediately after Stop
 
@@ -48,21 +23,16 @@ each other.
 - **AND** the disabled Stop button and the status label convey the SAME message:
   recording has ended, background work is in progress
 
-### Scenario: Stop with large transcription backlog
+### Scenario: Stop with a background_shutdown task in flight
 
-- **GIVEN** a recording is active AND 10 audio chunks are queued for transcription
+- **GIVEN** a recording is active
 - **WHEN** `stop_recording` is invoked
 - **THEN** the audio streams are released within 1 second
 - **AND** the status bar clears within 1 second of stream release
-- **AND** transcription continues in the background
-- **AND** the recorded file is saved after background work completes
+- **AND** `background_shutdown` completes: MP4 flush → SQLite save → PhaseGuard reset (Saving → Idle) → scheduler gate release (`set_recording_gate false`) → `queue.resume_all()`
+- **AND** after `background_shutdown` the frontend (`useRecordingStop.ts`) enqueues a transcription job via `enqueue_transcription_job(meetingId, audioPath)` — this step occurs outside the Tauri phase boundary, after the meeting row UUID is returned by `saveMeeting()`
 
-### Scenario: Stop with empty transcription queue
-
-- **GIVEN** a recording is active AND no chunks are queued
-- **WHEN** `stop_recording` is invoked
-- **THEN** the status bar clears within 1 second
-- **AND** the file is saved normally
+> **Cross-reference:** The transcription job enqueue step is part of the stop lifecycle but is not governed by `RecordingPhase`. See `openspec/specs/post-meeting-pipeline/spec.md` for the queue contract.
 
 ---
 

@@ -98,6 +98,8 @@ Alternatives considered:
 - Persist queue state in SQLite (backend DB): adds a backend round-trip per state change, the backend may not be running for local-only users. Rejected.
 - Persist in a Rust-side JSON file: works but reinvents the IndexedDB infrastructure we already have wired into the recovery flow. Rejected.
 
+> **Implementation note (drift):** The Rust `TranscriptionQueue` holds jobs in-memory only; it does not write to IndexedDB directly. IndexedDB is updated from the frontend: `page.tsx` subscribes to `transcription-queue-changed` events and mirrors each snapshot to IndexedDB via `upsertQueueJob` / `updateJobStatus`. On restart, the recovery flow reads from IndexedDB to reconstruct the job list and re-enqueue stale jobs.
+
 ### D7: Recovery modal switches its backing scan
 
 The existing modal flow (detect → present list → user accepts → recover) is preserved. What changes:
@@ -124,7 +126,7 @@ This keeps the policy story coherent — one set of rules, one set of pause UI a
 
 ### D10: Auto-triggered jobs and cancellation interact via the queue, not directly
 
-`cancel_recording` already prevents `stop_recording` from finalising the MP4 (it deletes the folder instead). Since the queue is fed only from the normal stop path, cancelled recordings naturally never enqueue. We do not need a separate "if cancelled don't enqueue" guard — the data flow does it.
+The enqueue site is the frontend hook `useRecordingStop.ts`, which calls `enqueue_transcription_job(meetingId, audioPath)` after `saveMeeting()` returns the new meeting's UUID. Cancelled recordings invoke `cancel_recording` instead, which aborts the flow before a meeting row is created — so no UUID is ever returned and the `enqueue_transcription_job` call is never reached. No explicit "skip if cancelled" guard is needed at the queue level; the data flow does it.
 
 For the `cancel_queued_job` command (user removes a meeting from the queue): set status to `cancelled`, the worker loop skips it. If the worker is currently running the cancelled job, the existing `RETRANSCRIPTION_CANCELLED` flag aborts it at the next chunk boundary.
 
@@ -147,6 +149,8 @@ For the `cancel_queued_job` command (user removes a meeting from the queue): set
 - **[Trade-off]** Removing `recover_audio_from_checkpoints` deletes a meaningful amount of working code. Acceptable: the code's purpose was reassembling audio from checkpoints in the live-recording era, which no longer exists.
 
 - **[Trade-off]** Auto-triggered batch transcription means the user can't "skip" transcription for a meeting they don't care about. Acceptable: the per-meeting cancel in the queue UI gives equivalent control; the default of "always transcribe" matches the user's stated mental model.
+
+- **[Fixed 2026-05-18]** `emit_ended` in the meeting-detector event handler (wired in `lib.rs`) previously called `queue.resume_all()` unconditionally when a meeting ends, clearing `manual_pause_all` and silently lifting a user-initiated global pause. Fixed by guarding the call with `if !queue.scheduler.manual_pause_all.load(SeqCst)` so meeting-end only clears the `meeting_busy` gate.
 
 ## Migration Plan
 

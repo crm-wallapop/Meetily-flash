@@ -50,8 +50,8 @@ The system SHALL maintain a single queue of pending transcription jobs and proce
 #### Scenario: Multiple recordings stack as pending jobs
 
 - **WHEN** three recordings (M1, M2, M3) are stopped in sequence with M1's transcription still in progress
-- **THEN** M2 and M3 are enqueued with `status = "pending"`, M2's `queuePosition = 2`, M3's `queuePosition = 3`
-- **AND** they are processed in that order after M1 completes
+- **THEN** M2 and M3 are enqueued with `status = "pending"` and are processed in that order after M1 completes
+- **AND** `queuePosition` ordinals are deferred to `transcription-scheduler-advanced` (the field is absent from `QueueJob` in this change)
 
 #### Scenario: New recording does not block enqueue
 
@@ -102,7 +102,9 @@ The thresholds and durations in this spec are the hardcoded defaults in this cha
 #### Scenario: Manual pause overrides everything
 
 - **WHEN** the user invokes `pause_all_background_work`
-- **THEN** all in-flight jobs yield at the next chunk boundary AND no pending jobs are picked up until `resume_all_background_work` is invoked
+- **THEN** the `SHOULD_YIELD` signal is asserted so any in-flight retranscription exits at its next chunk boundary
+- **AND** `scheduler.manual_pause_all` is set so no pending jobs are picked up until `resume_all_background_work` is invoked
+- **AND** a `transcription-queue-changed` event with `manual_pause_all = true` is emitted synchronously
 
 > `pauseReason = "manual"` field is deferred to `transcription-scheduler-advanced`.
 
@@ -129,11 +131,22 @@ The system SHALL emit a `transcription-queue-changed` Tauri event whenever any j
 #### Scenario: State change emits queue snapshot
 
 - **WHEN** a job transitions from `pending` to `in_progress`, or `in_progress` to `paused`/`done`/`failed`, or the scheduler transitions a gate
-- **THEN** a `transcription-queue-changed` event is emitted with `{ jobs: [{ meeting_id, audio_path, status, phase }] }`
+- **THEN** a `transcription-queue-changed` event is emitted with `{ jobs: [{ meeting_id, audio_path, status, phase }], manual_pause_all: boolean }`
 
-> **Implementation note (drift):** The initial implementation ships a simplified payload. The following fields are deferred to `transcription-scheduler-advanced` and are absent from the payload in this change:
-> `queuePosition`, `progressPercent`, `pauseReason`, `startedAt`, `completedAt`, `lastError`, and the top-level `schedulerState.gates` object.
-> The per-meeting badge therefore shows `Transcribing…` / `Queued` / `Paused` rather than the `Transcribing 34%` / `Queued #2` / `Paused — <reason>` labels described in the proposal. Those labels become available once `transcription-scheduler-advanced` adds `pauseReason` to the payload.
+#### Scenario: Manual pause emits an immediate snapshot
+
+- **WHEN** the user invokes `pause_all_background_work` or `resume_all_background_work`
+- **THEN** a `transcription-queue-changed` event is emitted synchronously with the updated `manual_pause_all` flag, so the global Pause/Resume toggle reflects the new state without waiting for the next worker-loop transition
+
+#### Scenario: Per-meeting progress percentage is rendered when available
+
+- **GIVEN** a job is in `status = "in_progress"` AND `phase = "Transcribing"`
+- **WHEN** the underlying retranscription processor emits a `retranscription-progress` event with `progress_percentage`
+- **THEN** the per-meeting badge renders `Transcribing N%` rather than `Transcribing…`
+
+> **Implementation note (drift):** The following payload fields remain deferred to `transcription-scheduler-advanced` and are absent in this change:
+> `queuePosition`, `pauseReason`, `startedAt`, `completedAt`, `lastError`, and the top-level `schedulerState.gates` object.
+> Progress percentage is sourced from the existing per-meeting `retranscription-progress` event rather than embedded in `QueueJob`. The per-meeting badge therefore renders `Transcribing N%` / `Queued` / `Paused` (no `#N` ordinal, no `— <reason>` qualifier) until `transcription-scheduler-advanced` adds the remaining fields.
 
 ---
 
@@ -158,6 +171,8 @@ The user SHALL be able to cancel any queued or in-progress job. Cancellation tra
 ### Requirement: Queue state persists across app restarts via IndexedDB
 
 The transcription queue SHALL persist its state in IndexedDB so that jobs in `pending` or `in_progress` from a previous app session are detected on next launch. The queue schema in IndexedDB is the authoritative persistence layer.
+
+> **Implementation note (drift):** The Rust `TranscriptionQueue` is in-memory only. IndexedDB persistence is maintained by the frontend: `page.tsx` subscribes to `transcription-queue-changed` events and mirrors each snapshot to IndexedDB via `upsertQueueJob` / `updateJobStatus`. On restart, the recovery flow reads IndexedDB to reconstruct stale jobs.
 
 #### Scenario: Pending job survives app restart
 

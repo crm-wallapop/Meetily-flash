@@ -28,7 +28,7 @@
 - [x] 4.1 Write a failing test `queue_enqueues_job_on_stop_recording`: assert that `stop_recording` (normal path) enqueues a job with the new meeting's id and audio path; `cancel_recording` does not
 - [x] 4.2 Create `use_cases/transcription_queue.rs` with a `TranscriptionQueue` struct holding `Vec<Job>` behind a `Mutex`, plus a single worker task spawned at app start
 - [x] 4.3 Implement `enqueue(meeting_id, audio_path)`, `cancel(meeting_id)`, `pause_all()`, `resume_all()`, `get_state() -> QueueSnapshot`
-- [x] 4.4 Wire the queue into `recording_manager.rs` so that after `finalize()` succeeds in the normal stop path, the new meeting's job is enqueued
+- [x] 4.4 Add `enqueue_transcription_job(meeting_id, audio_path)` Tauri command; call it from `useRecordingStop.ts` after `saveMeeting()` returns the new meeting's UUID — enqueue is frontend-initiated, not from `recording_manager.rs`
 - [x] 4.5 Run test 4.1 green
 
 ## 5. Scheduler gates
@@ -101,3 +101,20 @@
 
 - [x] 13.1 Re-read this proposal, design, and the two delta specs; confirm implementation matches every scenario; amend any deltas that drifted during apply
 - [x] 13.2 Confirm `transcription-scheduler-advanced` change exists and its proposal references the hardcoded defaults this change ships, ready for follow-up
+
+## 14. Smoke-test 12.5 follow-ups
+
+Found by manual smoke test 12.5: Pause All was unresponsive, Resume button never surfaced, and the per-meeting badge stayed on `Transcribing…` with no progress percentage.
+
+- [x] 14.1 Write failing tests: `pause_all_asserts_should_yield_for_in_flight_chunk`, `resume_all_clears_should_yield`, `pause_all_sets_manual_pause_all_flag`, `snapshot_exposes_manual_pause_all_flag` (red against the existing implementation)
+- [x] 14.2 Move `manual_pause_all` ownership into `TranscriptionQueue::pause_all` / `resume_all`; assert `SHOULD_YIELD` on pause and clear on resume so in-flight retranscription yields at its next chunk boundary (spec `Manual pause overrides everything`)
+- [x] 14.3 Add `manual_pause_all: bool` to `QueueSnapshot`; populate it in `get_state()` and in both worker-loop snapshot construction sites
+- [x] 14.4 Make `pause_all_background_work` / `resume_all_background_work` emit `transcription-queue-changed` after the state change (so the UI doesn't wait for the next worker-loop transition)
+- [x] 14.5 Update TypeScript `QueueSnapshot` to include `manual_pause_all`; update `GlobalQueueIndicator` to drive Pause/Resume from that flag rather than the fragile `allPaused` per-job heuristic — Resume must surface immediately after click, even while an in-flight job is still finishing its chunk
+- [x] 14.6 Subscribe to existing `retranscription-progress` events in `useQueueJobStatus` and decorate the matching `QueueJob` with `progress_percent`; `queueJobLabel` renders `Transcribing N%` when known, `Transcribing…` otherwise
+- [x] 14.7 Add `sonner` toast on successful `cancelQueuedJob` so the badge disappearance has user-visible confirmation (the spec keeps `cancel = remove`; the toast addresses only the UX gap)
+- [x] 14.8 Update vitest `queue-ui-render-logic.test.ts` so the embedded `deriveIndicatorState` mirrors the new `manual_pause_all`-driven logic; add a regression case where `manual_pause_all = true` AND a job is still `InProgress` (the pre-fix bug) and `Transcribing N%` label coverage
+- [x] 14.9 Amend `specs/post-meeting-pipeline/spec.md`: scope `progress %` and `manual_pause_all` into this change; capture the synchronous-emit scenario for manual pause/resume
+- [x] 14.10 Code review pass 1 — fixed worker pickup-window race: `worker_loop` now folds the pickup, InProgress flip, AND manual_pause_all re-check into a single critical section, so a concurrent `pause_all` between `can_run()` and the InProgress flip flips the job to Paused without dispatching (regression test `worker_marks_pending_job_paused_under_manual_pause_without_dispatching`)
+- [x] 14.11 Code review pass 1 — added `serial_test` dev-dep; annotated every test that touches the global `SHOULD_YIELD` static (or `spawn_worker` which writes it) with `#[serial]` so default-parallel `cargo test` runs are deterministic
+- [ ] 14.12 Smoke test 12.5 again after Rust rebuild: Pause All flips toggle to Resume immediately, in-flight job ends up Paused (not Done), Resume picks it up, progress % advances during transcription, Cancel shows toast

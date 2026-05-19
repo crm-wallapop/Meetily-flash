@@ -19,7 +19,10 @@ use super::google_cidrs::{is_in_google_cidrs, is_in_turn_cidrs};
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
-const BROWSER_PROCESSES: &[&str] = &["chrome.exe", "msedge.exe", "firefox.exe"];
+// Chrome and Edge release the getUserMedia WASAPI capture session within ~1-2s of "Leave call".
+// Firefox and Brave are included in detection but their capture-session release timing on
+// Meet leave is unverified; exit detection may be delayed or blocked for those browsers.
+const BROWSER_PROCESSES: &[&str] = &["chrome.exe", "msedge.exe", "firefox.exe", "brave.exe"];
 
 /// Maximum number of (title, instant) entries kept in the focus history.
 const FOCUS_HISTORY_CAP: usize = 10;
@@ -297,7 +300,13 @@ fn check_turn_tcp6_connections() -> bool {
         for row in rows {
             if row.dwState != MIB_TCP_STATE_ESTAB.0 as u32 { continue; }
             let remote = &row.ucRemoteAddr;
-            let ip = IpAddr::V6(Ipv6Addr::from(*remote));
+            let raw_ip = IpAddr::V6(Ipv6Addr::from(*remote));
+            // Unwrap IPv4-mapped addresses (::ffff:x.x.x.x) so dual-stack hosts
+            // are matched against the IPv4 CIDR table where the ranges live.
+            let ip = match raw_ip {
+                IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(raw_ip),
+                other => other,
+            };
             if is_in_turn_cidrs(ip) && is_browser_process(row.dwOwningPid) {
                 return true;
             }
@@ -311,6 +320,116 @@ fn is_browser_process(pid: u32) -> bool {
     process_name_for_pid(pid)
         .map(|name| BROWSER_PROCESSES.contains(&name.as_str()))
         .unwrap_or(false)
+}
+
+// ── WASAPI browser capture detection ──────────────────────────────────────
+
+// Raw binding that returns the CoInitializeEx HRESULT as a plain i32, preserving
+// the S_OK (0) vs S_FALSE (1) distinction. The windows-rs safe wrapper maps both
+// to Ok(()), but we need to know which: S_OK means we initialised COM on this
+// thread and must call CoUninitialize; S_FALSE means it was already initialised
+// and we must NOT call CoUninitialize (D3).
+#[link(name = "ole32")]
+extern "system" {
+    #[link_name = "CoInitializeEx"]
+    fn co_initialize_ex_raw(pv_reserved: *const core::ffi::c_void, dw_co_init: u32) -> i32;
+}
+const COINIT_APARTMENTTHREADED_RAW: u32 = 0x2;
+// Thread already initialised with a different concurrency model (MTA). COM is
+// still fully usable on that thread; IMMDeviceEnumerator works from both STA and
+// MTA. This happens when the tokio thread pool reuses a thread that cpal/WASAPI
+// audio capture previously initialised as MTA (after recording starts).
+const RPC_E_CHANGED_MODE: i32 = 0x80010106_u32 as i32;
+
+fn check_browser_capture_session_inner() -> windows::core::Result<bool> {
+    use windows::core::Interface; // brings .cast::<T>() into scope for COM QI
+    use windows::Win32::Media::Audio::{
+        AudioSessionStateActive, AudioSessionStateExpired, IAudioSessionControl2,
+        IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+        eCapture,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let collection = enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)?;
+        let device_count = collection.GetCount()?;
+        for i in 0..device_count {
+            let device = collection.Item(i)?;
+            let manager: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, None)?;
+            let sessions = manager.GetSessionEnumerator()?;
+            let session_count = sessions.GetCount()?;
+            for j in 0..session_count {
+                let session = sessions.GetSession(j)?;
+                let state = session.GetState()?;
+                // Log all non-expired sessions for diagnostics; only Active browser sessions
+                // satisfy the exit signal (D10: Inactive = background/permission-only session).
+                if state != AudioSessionStateExpired {
+                    let session2: IAudioSessionControl2 = session.cast()?;
+                    let pid = session2.GetProcessId()?;
+                    let proc_name = process_name_for_pid(pid).unwrap_or_default();
+                    let display_name = session2.GetDisplayName()
+                        .ok()
+                        .and_then(|s| s.to_string().ok())
+                        .unwrap_or_default();
+                    let session_id = session2.GetSessionIdentifier()
+                        .ok()
+                        .and_then(|s| s.to_string().ok())
+                        .unwrap_or_default();
+                    log::debug!(
+                        "capture session: device={i} session={j} pid={pid} proc={proc_name:?} state={state:?} name={display_name:?} id={session_id:?}"
+                    );
+                    if state == AudioSessionStateActive && is_browser_process(pid) {
+                        log::debug!("has_browser_capture_session: hit (Active) — pid={pid} proc={proc_name:?} name={display_name:?}");
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// RAII guard that calls `CoUninitialize` on drop. Ensures the COM ref count is
+/// balanced even if a panic unwinds past the call site.
+struct CoUninitGuard;
+impl Drop for CoUninitGuard {
+    fn drop(&mut self) {
+        unsafe { windows::Win32::System::Com::CoUninitialize() };
+    }
+}
+
+/// Returns `true` if any known browser process holds an `AudioSessionStateActive` WASAPI
+/// capture session.
+///
+/// Chrome/Edge hold the `getUserMedia` session in `Active` state throughout a Meet call
+/// (even when muted — Chrome uses `track.enabled=false`, not `track.stop()`, so
+/// `IAudioClient::Start()` keeps the endpoint streaming). On "Leave call" the session
+/// transitions to `Inactive` within ~1–2 s. Background sessions for tabs that have mic
+/// permission but are not currently streaming remain `Inactive` indefinitely.
+///
+/// This is the exit signal used by `step_detector`'s InCall branch (D2 asymmetric):
+/// exit debounce starts when this returns `false`, independent of TCP state. This avoids
+/// false meeting-ended events caused by 90s+ TCP drops observed during active UDP calls.
+pub fn has_browser_capture_session() -> bool {
+    unsafe {
+        // The detection loop is tokio::spawn (async). After each sleep().await the future
+        // may resume on a different thread, so COM must be initialised per-call (D3).
+        let hr = co_initialize_ex_raw(core::ptr::null(), COINIT_APARTMENTTHREADED_RAW);
+        // RPC_E_CHANGED_MODE: thread already in MTA (e.g. tokio reused a cpal audio
+        // thread). COM is usable; IMMDeviceEnumerator works from MTA. Proceed without
+        // re-initializing and without uninitializing.
+        // All other negative HRESULTs: COM genuinely unavailable — degrade to false.
+        if hr < 0 && hr != RPC_E_CHANGED_MODE {
+            return false;
+        }
+        // S_OK (0) and S_FALSE (1) both increment the COM ref count per MSDN —
+        // both require CoUninitialize. RPC_E_CHANGED_MODE is negative (excluded above)
+        // and must NOT be balanced. The guard handles panic and early returns uniformly.
+        let _guard = if hr >= 0 { Some(CoUninitGuard) } else { None };
+        check_browser_capture_session_inner().unwrap_or(false)
+    }
 }
 
 fn check_tcp4_connections() -> bool {
@@ -407,7 +526,13 @@ fn check_tcp6_connections() -> bool {
                 continue;
             }
             let remote = &row.ucRemoteAddr;
-            let ip = IpAddr::V6(Ipv6Addr::from(*remote));
+            let raw_ip = IpAddr::V6(Ipv6Addr::from(*remote));
+            // Unwrap IPv4-mapped addresses (::ffff:x.x.x.x) so dual-stack hosts
+            // are matched against the IPv4 CIDR table where the ranges live.
+            let ip = match raw_ip {
+                IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(raw_ip),
+                other => other,
+            };
             if is_in_google_cidrs(ip) && is_browser_process(row.dwOwningPid) {
                 return true;
             }
@@ -418,17 +543,41 @@ fn check_tcp6_connections() -> bool {
 
 // ── WindowsMeetingDetector ─────────────────────────────────────────────────
 
+/// Injectable probes replacing the four Win32 free functions in test builds.
+/// The `meet_windows` probe is required alongside the network/WASAPI probes because
+/// `current_state()` branches on window presence before reaching the network checks —
+/// without it, adapter-layer tests that need non-empty windows would always see the
+/// empty-windows code path and never reach the TURN/WASAPI logic.
+///
+/// Gated `#[cfg(test)]` so release builds compile this struct out entirely.
+#[cfg(test)]
+pub(crate) struct DetectorProbes {
+    pub has_turn: Box<dyn Fn() -> bool + Send + Sync>,
+    pub has_conn: Box<dyn Fn() -> bool + Send + Sync>,
+    pub has_capture: Box<dyn Fn() -> bool + Send + Sync>,
+    pub meet_windows: Box<dyn Fn() -> Vec<MeetWindow> + Send + Sync>,
+}
+
 pub struct WindowsMeetingDetector {
+    #[cfg(not(test))]
     detector_start: Instant,
+    #[cfg(test)]
+    pub(crate) detector_start: Instant,
     first_poll_done: bool,
     connection_first_seen_at: Option<Instant>,
     pub focus_history: FocusHistory,
     /// True once a TURN relay connection has been observed for the current call.
-    /// Stays true until meet_windows goes empty (tab closed / title changes).
-    /// While true, `has_conn` is derived from TURN presence only — the Meet lobby
-    /// page also has TCP connections to broad Google IPs, so broad-check alone
-    /// would never start the exit debounce when leaving via the End-call button.
-    turn_established: bool,
+    /// Reset by `notify_exit()` (called by the use case after `MeetingEnded`) so
+    /// back-to-back calls are detectable. `pub(crate)` so adapter tests can set it
+    /// directly without going through a real TURN connection.
+    pub(crate) turn_established: bool,
+    /// Previous value of `has_browser_capture_session`. `None` before the first poll.
+    /// Used to emit an `info`-level log on every `bc` transition so smoke tests can
+    /// measure the exact WASAPI-drop lag after "Leave call" without needing `RUST_LOG=debug`.
+    last_bc: Option<bool>,
+    /// Injectable probes for unit tests — absent in release builds (D test seam).
+    #[cfg(test)]
+    pub(crate) probes: Option<DetectorProbes>,
 }
 
 impl WindowsMeetingDetector {
@@ -439,67 +588,139 @@ impl WindowsMeetingDetector {
             connection_first_seen_at: None,
             focus_history,
             turn_established: false,
+            last_bc: None,
+            #[cfg(test)]
+            probes: None,
         }
     }
 }
 
+#[cfg(test)]
+impl WindowsMeetingDetector {
+    /// Constructs a detector with injectable probes so adapter-layer tests can
+    /// control Win32 outputs without real browser windows or network state.
+    pub(crate) fn with_probes(focus_history: FocusHistory, probes: DetectorProbes) -> Self {
+        let mut det = Self::new(focus_history);
+        det.probes = Some(probes);
+        det
+    }
+}
+
 impl MeetingDetectorPort for WindowsMeetingDetector {
+    fn notify_exit(&mut self) {
+        // Reset the sticky TURN flag so the next call (potentially UDP-only)
+        // goes through the full join/exit detection flow again (D7).
+        self.turn_established = false;
+    }
+
     fn current_state(&mut self) -> DetectorObservation {
+        #[cfg(test)]
+        let meet_windows = self.probes.as_ref()
+            .map_or_else(enumerate_meet_windows, |p| (p.meet_windows)());
+        #[cfg(not(test))]
         let meet_windows = enumerate_meet_windows();
 
         log::debug!(
             "detector poll: windows={:?}",
-            meet_windows.iter().map(|w| &w.title).collect::<Vec<_>>(),
+            meet_windows.iter().map(|w| format!("{}(pid={})", w.title, w.pid)).collect::<Vec<_>>(),
         );
 
-        let has_conn = if meet_windows.is_empty() {
-            // No Meet window visible: reset TURN tracking so the next call goes
-            // through the full join-detection flow again.
-            self.turn_established = false;
+        // Always check the connection signals regardless of window state.
+        // meet_windows.is_empty() must not short-circuit exit detection: a transient
+        // tab switch makes windows disappear for several seconds while the user is
+        // still in the call and both network signals stay true. Gating exit on windows
+        // caused false `meeting-ended` events whenever focus moved away from the Meet tab.
+        // step_detector already guards entry via `has_title && has_conn`, so empty windows
+        // only prevent join — never exit.
+        #[cfg(test)]
+        let turn = self.probes.as_ref()
+            .map_or_else(has_turn_connection, |p| (p.has_turn)());
+        #[cfg(not(test))]
+        let turn = has_turn_connection();
+
+        if turn {
+            self.turn_established = true;
+        }
+
+        // Compute WASAPI capture state unconditionally for two uses:
+        //   • entry conjunction (UDP phase below): mc && bc
+        //   • exit signal in observation.has_browser_capture_session (asymmetric D2):
+        //     step_detector InCall branch uses this, not has_conn, so 90s+ TCP drops
+        //     during an active call do not start the exit debounce.
+        #[cfg(test)]
+        let bc = self.probes.as_ref()
+            .map_or_else(has_browser_capture_session, |p| (p.has_capture)());
+        #[cfg(not(test))]
+        let bc = has_browser_capture_session();
+
+        if self.last_bc != Some(bc) {
+            log::info!(
+                "bc transition: {} → {} (WASAPI browser capture {})",
+                self.last_bc.map_or("?", |v| if v { "true" } else { "false" }),
+                bc,
+                if bc { "active" } else { "dropped" },
+            );
+            self.last_bc = Some(bc);
+        }
+
+        let has_conn = if turn {
+            log::debug!("detector poll: has_turn_connection=true");
+            true
+        } else if self.turn_established {
+            // TURN was active for this call but is now gone → user hung up.
+            // The lobby page maintains HTTPS connections to general Google IPs,
+            // so falling back to the broad check here would prevent the exit
+            // debounce from ever starting. `notify_exit()` resets this flag.
+            log::debug!("detector poll: TURN gone after call — treating as disconnected");
             false
         } else {
-            let turn = has_turn_connection();
-            if turn {
-                self.turn_established = true;
-            }
-
-            if turn {
-                log::debug!("detector poll: has_turn_connection=true");
-                true
-            } else if self.turn_established {
-                // TURN was active for this call but is now gone → user hung up.
-                // The lobby page maintains HTTPS connections to general Google IPs,
-                // so falling back to the broad check here would prevent the exit
-                // debounce from ever starting (the real bug this fixes).
-                log::debug!("detector poll: TURN gone after call — treating as disconnected");
-                false
-            } else {
-                // TURN not yet established: we're in the join handshake phase
-                // (HTTPS signaling precedes TURN by 1-3 s). Use the broad check
-                // so we detect the call as soon as signaling begins.
-                let conn = has_meet_connection();
-                log::debug!("detector poll: has_meet_connection={} (join phase, TURN not yet seen)", conn);
-                conn
-            }
+            // UDP/join phase: TURN relay not yet seen. AND both signals for entry so that:
+            // • join is detected when mc && bc both true after getUserMedia opens, and
+            // • the conjunction is discriminating enough to avoid false-positive entry.
+            // Exit detection uses bc alone via has_browser_capture_session in the observation.
+            #[cfg(test)]
+            let mc = self.probes.as_ref()
+                .map_or_else(has_meet_connection, |p| (p.has_conn)());
+            #[cfg(not(test))]
+            let mc = has_meet_connection();
+            log::debug!("detector poll: has_meet_connection={mc} has_browser_capture_session={bc}");
+            mc && bc
         };
 
+        // connection_first_seen_at tracking (D15 pre-existing check):
+        //   First poll: stamp any connection as pre-existing (no window gate — a minimized
+        //   Meet window at startup would bypass D15 on the second poll if gated here).
+        //   Subsequent polls: only set when a Meet window is also visible, so background
+        //   Google TCP (Gmail, Drive) never poisons the check before the user opens Meet.
+        //   Reset: only when has_conn drops to false.
         if !self.first_poll_done {
             self.first_poll_done = true;
             if has_conn {
-                // D15: connection existed before detector started — must not trigger detection
+                // D15: stamp any connection at startup as pre-existing regardless of
+                // whether a Meet window is visible. Window gate removed from this branch:
+                // a minimized Meet window on poll 1 would leave C_FSA = None, then poll 2
+                // would set C_FSA = Instant::now() (> detector_start), making the
+                // connection look new and bypassing D15.
                 self.connection_first_seen_at = Some(self.detector_start);
             }
-        } else if has_conn && self.connection_first_seen_at.is_none() {
+        } else if has_conn && !meet_windows.is_empty() && self.connection_first_seen_at.is_none() {
             self.connection_first_seen_at = Some(Instant::now());
         } else if !has_conn {
             self.connection_first_seen_at = None;
         }
 
+        // True when TURN was established for this call and has just dropped.
+        // Tells the state machine to use the short TURN debounce (4 s) instead of
+        // the 15 s UDP debounce, restoring the ~5 s exit latency for TCP TURN calls.
+        let is_turn_exit = !turn && self.turn_established;
+
         let mut obs = DetectorObservation {
             meet_windows,
             has_meet_connection: has_conn,
+            has_browser_capture_session: bc,
             connection_first_seen_at: self.connection_first_seen_at,
             default_title: String::new(),
+            is_turn_exit,
         };
 
         if !obs.meet_windows.is_empty() {
@@ -555,8 +776,10 @@ mod tests {
                 })
                 .collect(),
             has_meet_connection: true,
+            has_browser_capture_session: true,
             connection_first_seen_at: None,
             default_title: String::new(),
+            is_turn_exit: false,
         }
     }
 
@@ -666,5 +889,199 @@ mod tests {
         let history = empty_history();
         let title = resolve_default_title(&obs, &history);
         assert!(!title.is_empty());
+    }
+
+    // ── Task 3.1 — has_browser_capture_session ─────────────────────────────
+
+    #[test]
+    fn has_browser_capture_session_smoke() {
+        // Returns a bool without panicking. CI has no browser with active mic, so
+        // this should be false — but any value is valid if a browser capture is live.
+        let _ = has_browser_capture_session();
+    }
+
+    #[test]
+    #[ignore = "only valid in headless CI; fails when a browser holds an active capture session"]
+    fn has_browser_capture_session_false_in_non_interactive_env() {
+        // Adversarial: no browser process holds an active WASAPI capture session in
+        // headless CI. Must return false without hanging or panicking.
+        // Fails if run while a browser is actively capturing audio — correct behaviour.
+        assert!(!has_browser_capture_session());
+    }
+
+    #[test]
+    fn check_browser_capture_session_inner_no_sessions_returns_false() {
+        // Adversarial (empty session list): when COM initialises but no browser holds
+        // a capture session, the inner function must return Ok(false). In CI, there are
+        // no browser audio sessions, so this exercises the zero-session code path.
+        let result = check_browser_capture_session_inner();
+        match result {
+            Ok(v) => assert!(!v, "no browser capture session should be present in CI"),
+            Err(_) => {} // COM unavailable in this test environment — also acceptable
+        }
+    }
+
+    // ── Task 5.1 b/c — WindowsMeetingDetector adapter layer ───────────────
+
+    fn probe_windows(titles: &'static [&'static str]) -> Box<dyn Fn() -> Vec<MeetWindow> + Send + Sync> {
+        Box::new(move || {
+            titles.iter().map(|t| MeetWindow { hwnd_id: 1, pid: 100, title: t.to_string() }).collect()
+        })
+    }
+
+    // (b) notify_exit resets turn_established so the next UDP call is detectable.
+    #[test]
+    fn notify_exit_resets_turn_established_for_next_udp_detection() {
+        let probes = DetectorProbes {
+            has_turn:    Box::new(|| false),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        };
+        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
+        det.turn_established = true;
+
+        // Before notify_exit: TURN gone, turn_established=true → has_conn=false
+        let obs = det.current_state();
+        assert!(!obs.has_meet_connection,
+            "turn_established=true with TURN gone must yield has_conn=false");
+
+        det.notify_exit();
+
+        // After notify_exit: turn_established=false, UDP probes both true → has_conn=true
+        let obs = det.current_state();
+        assert!(obs.has_meet_connection,
+            "after notify_exit(), UDP call should be detectable again");
+    }
+
+    // (b2) is_turn_exit computation: after TURN goes away on a call where it was
+    // established, current_state() must return is_turn_exit=true so the state
+    // machine can use the fast 4s debounce. This is the adapter-level twin of
+    // the state machine tests 2.10 / 2.10b — it tests the computation, not the
+    // state machine's response to it.
+    #[test]
+    fn turn_exit_flag_set_when_turn_drops_after_being_established() {
+        let probes_turn_active = DetectorProbes {
+            has_turn:    Box::new(|| true),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        };
+        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_turn_active);
+
+        // Poll 1: TURN active — turn_established becomes true, is_turn_exit must be false.
+        let obs1 = det.current_state();
+        assert!(!obs1.is_turn_exit, "is_turn_exit must be false while TURN is active");
+        assert!(det.turn_established, "turn_established must be set after first TURN-active poll");
+
+        // Poll 2: TURN drops — is_turn_exit must now be true.
+        det.probes = Some(DetectorProbes {
+            has_turn:    Box::new(|| false),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        });
+        let obs2 = det.current_state();
+        assert!(obs2.is_turn_exit,
+            "is_turn_exit must be true when TURN drops after being established (turn_established=true && !turn)");
+
+        // Poll 3 (after notify_exit): turn_established is reset — is_turn_exit must be false again.
+        det.notify_exit();
+        let obs3 = det.current_state();
+        assert!(!obs3.is_turn_exit,
+            "is_turn_exit must be false after notify_exit() resets turn_established");
+    }
+
+    // (d) D15 / C-NEW-2: Meet window minimized at startup — first poll sees empty
+    //     window list while a Google TCP connection already exists. The first-poll
+    //     branch must stamp C_FSA = detector_start unconditionally (no window gate).
+    //     Without the fix, C_FSA would stay None on poll 1, then be set to
+    //     Instant::now() on poll 2 when the window reappears — which is > detector_start,
+    //     making not_preexisting=true and falsely firing meeting-detected.
+    #[test]
+    fn d15_minimized_window_at_startup_does_not_bypass_preexisting_check() {
+        let probes_poll1 = DetectorProbes {
+            has_turn:    Box::new(|| false),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            meet_windows: Box::new(|| vec![]),  // minimized at startup — empty
+        };
+        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_poll1);
+
+        // Poll 1: connection active, window not visible (minimized)
+        let obs1 = det.current_state();
+        assert!(
+            obs1.connection_first_seen_at.is_some(),
+            "first poll must stamp C_FSA even when Meet window is not visible",
+        );
+        let c_fsa_poll1 = obs1.connection_first_seen_at.unwrap();
+
+        // Poll 2: window now visible (user un-minimized / switched back to Meet tab)
+        det.probes = Some(DetectorProbes {
+            has_turn:    Box::new(|| false),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        });
+        let obs2 = det.current_state();
+
+        // C_FSA must not have been updated to Instant::now() — it was already stamped.
+        // If it were updated, it would be > detector_start → not_preexisting=true →
+        // step_detector would fire meeting-detected for a pre-existing call.
+        assert_eq!(
+            obs2.connection_first_seen_at,
+            Some(c_fsa_poll1),
+            "C_FSA must remain at detector_start after poll 2, not be updated to Instant::now()",
+        );
+
+        // Verify step_detector sees the connection as pre-existing and stays Idle.
+        use crate::use_cases::meeting_detection::{
+            step_detector, DetectorSettings, DetectorState,
+        };
+        use std::sync::atomic::AtomicBool;
+        let (state, events) = step_detector(
+            DetectorState::Idle,
+            &obs2,
+            det.detector_start,
+            std::time::Instant::now(),
+            &AtomicBool::new(false),
+            &DetectorSettings::default(),
+        );
+        assert!(
+            matches!(state, DetectorState::Idle),
+            "minimized-at-startup pre-existing connection must not transition to InCall",
+        );
+        assert!(
+            events.is_empty(),
+            "D15: must not emit meeting-detected for a connection present before detector started",
+        );
+    }
+
+    // (c) Otter.ai scenario: persistent browser mic keeps WASAPI active across calls.
+    //     turn_established=true must block detection for all polls until notify_exit.
+    #[test]
+    fn otter_ai_persistent_mic_blocked_until_notify_exit() {
+        let probes = DetectorProbes {
+            has_turn:    Box::new(|| false),  // TURN gone after TCP exit
+            has_conn:    Box::new(|| true),   // lobby HTTPS still active
+            has_capture: Box::new(|| true),  // Otter.ai keeps WASAPI open
+            meet_windows: probe_windows(&["Meet - standup"]),
+        };
+        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
+        det.turn_established = true;
+
+        // Multiple polls: turn_established=true, TURN=false → has_conn=false every time
+        for i in 0..3 {
+            let obs = det.current_state();
+            assert!(!obs.has_meet_connection,
+                "poll {i}: turn_established=true must block UDP detection regardless of WASAPI");
+        }
+
+        det.notify_exit();
+
+        // After notify_exit: WASAPI still active → next UDP call is detectable
+        let obs = det.current_state();
+        assert!(obs.has_meet_connection,
+            "after notify_exit(), persistent Otter.ai WASAPI does not block next call");
     }
 }

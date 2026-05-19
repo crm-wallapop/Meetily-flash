@@ -27,6 +27,9 @@ In the `ProfessionalAudioMixer`, system audio (WASAPI loopback) SHALL be scaled 
 
 > **Status: implementation flag `RNNOISE_APPLY_ENABLED` is currently `false` in
 > `ffmpeg_mixer.rs`. This requirement documents the intended behaviour when enabled.**
+>
+> **Forward reference:** This flag will be flipped to `true` with calibrated Silero VAD
+> threshold tuning in the `tune-vad-rnnoise` in-flight change.
 
 When enabled, the mic channel SHALL pass through RNNoise before being mixed, reducing
 steady-state background noise (fan, HVAC) in recordings.
@@ -121,21 +124,12 @@ on `stop_recording()`; no events are emitted outside of an active recording.
 
 ## Requirement: GPU backends use flash attention; CPU and OpenCL do not
 
-> **Status: RESOLVED 2026-05-13** — Vulkan flash attention re-enabled after diagnosis confirmed
-> the 2026-05-12 regression was a VAD mis-fire, not a flash_attn kernel issue.
->
-> **Root cause diagnosis (2026-05-13):** `test_flash_attn_noise_inputs` ran three audio inputs
-> (digital silence, -40 dBFS noise floor, -6 dBFS loud white noise — louder than speech) against
-> both flash_attn=false and flash_attn=true on Intel Arc Vulkan. Results:
->
-> - All three inputs: **both settings produce identical hallucinated output** (e.g., -6 dBFS →
->   `"(water splashing)"` with flash_attn=false AND flash_attn=true).
-> - 2 s JFK speech clip: both settings produce identical coherent output.
-> - 11 s JFK full segment: both settings produce the correct transcript.
->
-> Hypothesis 1 confirmed: the garbled live transcription was Whisper hallucinating on loud
-> environmental noise forwarded by VAD — not a Vulkan-specific flash_attn regression. The VAD
-> noise threshold needs a separate fix to avoid forwarding near-full-scale noise chunks.
+> **Status: RESOLVED 2026-05-13.** Vulkan flash attention re-enabled after diagnosis confirmed
+> the 2026-05-12 regression was a hallucination artefact (Whisper receiving isolated noise bursts
+> with no surrounding context), not a flash_attn kernel issue. The live-transcription VAD path
+> that produced those noise bursts was subsequently removed by `post-meeting-transcription`.
+> This requirement now governs the **post-meeting retranscription path** exclusively — VAD runs
+> in `retranscription.rs`, not during recording capture.
 
 Flash attention is enabled for Metal, CUDA, and Vulkan. It is disabled for CPU and OpenCL,
 which lack the fp16 shader infrastructure required.

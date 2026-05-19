@@ -142,6 +142,11 @@ pub struct Job {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueSnapshot {
     pub jobs: Vec<Job>,
+    /// Manual-pause-all flag from the scheduler. Exposed on every snapshot so the
+    /// frontend toggle can render Pause vs Resume without inferring from per-job
+    /// statuses (which is unreliable: an in-flight job stays InProgress until it
+    /// yields at the next chunk boundary, masking the user's intent).
+    pub manual_pause_all: bool,
 }
 
 /// Called after each job status transition; receives a full snapshot.
@@ -206,21 +211,37 @@ impl TranscriptionQueue {
     }
 
     /// Pause all pending/in-progress jobs (manual override).
+    ///
+    /// Sets `scheduler.manual_pause_all` so the worker's `can_run()` blocks new
+    /// pickups, and asserts `SHOULD_YIELD` so any in-flight retranscription
+    /// chunk exits at its next boundary (per spec post-meeting-pipeline.md:105).
     pub async fn pause_all(&self) {
-        let mut jobs = self.jobs.lock().await;
-        for job in jobs.iter_mut() {
-            if job.status == JobStatus::Pending || job.status == JobStatus::InProgress {
-                job.status = JobStatus::Paused;
+        self.scheduler.manual_pause_all.store(true, Ordering::Relaxed);
+        {
+            let mut jobs = self.jobs.lock().await;
+            for job in jobs.iter_mut() {
+                if job.status == JobStatus::Pending || job.status == JobStatus::InProgress {
+                    job.status = JobStatus::Paused;
+                }
             }
         }
+        SHOULD_YIELD.store(true, Ordering::SeqCst);
     }
 
     /// Resume all paused jobs and wake the worker.
+    ///
+    /// Clears `SHOULD_YIELD` (set by `pause_all`) and `scheduler.manual_pause_all`
+    /// before flipping paused jobs back to pending, so the worker's next tick
+    /// sees a clean state and can pick them up.
     pub async fn resume_all(&self) {
-        let mut jobs = self.jobs.lock().await;
-        for job in jobs.iter_mut() {
-            if job.status == JobStatus::Paused {
-                job.status = JobStatus::Pending;
+        SHOULD_YIELD.store(false, Ordering::SeqCst);
+        self.scheduler.manual_pause_all.store(false, Ordering::Relaxed);
+        {
+            let mut jobs = self.jobs.lock().await;
+            for job in jobs.iter_mut() {
+                if job.status == JobStatus::Paused {
+                    job.status = JobStatus::Pending;
+                }
             }
         }
         self.notify.notify_one();
@@ -228,7 +249,10 @@ impl TranscriptionQueue {
 
     pub async fn get_state(&self) -> QueueSnapshot {
         let jobs = self.jobs.lock().await;
-        QueueSnapshot { jobs: jobs.clone() }
+        QueueSnapshot {
+            jobs: jobs.clone(),
+            manual_pause_all: self.scheduler.manual_pause_all.load(Ordering::Relaxed),
+        }
     }
 
     /// Spawn the background worker task.  Call once from app setup (lib.rs).
@@ -277,34 +301,66 @@ async fn worker_loop(
                 break;
             }
 
-            // Find the next pending job.
-            let job_info = {
-                let jobs = jobs.lock().await;
-                jobs.iter()
-                    .find(|j| j.status == JobStatus::Pending)
-                    .map(|j| (j.meeting_id.clone(), j.audio_path.clone(), j.phase.clone()))
+            // Pickup + InProgress transition in a single critical section.
+            //
+            // Two races are closed here:
+            //
+            // Race 1 (pre-lock): pause_all() could fire between can_run() and the
+            // lock acquisition.  Without re-checking manual_pause_all inside the
+            // lock, the worker would flip Pending → InProgress and then reset
+            // SHOULD_YIELD, clobbering pause_all's assertion.
+            //
+            // Race 2 (last-chunk): even with Race 1 closed, pause_all can fire
+            // while the processor is on its final chunk.  The processor checks
+            // SHOULD_YIELD before each chunk, not after; if the last chunk began
+            // before the flag was set, the processor returns Completed and the
+            // match arm below must not overwrite a Paused status → Done.
+            //
+            // Part A (this section): reset SHOULD_YIELD inside the lock, in the
+            // same critical section as the InProgress flip, so pause_all's
+            // subsequent SeqCst store always lands after ours.
+            // Part B: the match arm checks j.status == InProgress before writing
+            // terminal states, so a Paused job set by pause_all is never clobbered.
+            let job_info: Option<(String, PathBuf, JobPhase)> = {
+                let mut jobs_guard = jobs.lock().await;
+                let manual_paused = scheduler.manual_pause_all.load(Ordering::Relaxed);
+                let found = jobs_guard
+                    .iter_mut()
+                    .find(|j| j.status == JobStatus::Pending);
+                let pending_exists = found.is_some();
+                let info = if let Some(j) = found {
+                    if manual_paused {
+                        j.status = JobStatus::Paused;
+                        None
+                    } else {
+                        let info = (j.meeting_id.clone(), j.audio_path.clone(), j.phase.clone());
+                        j.status = JobStatus::InProgress;
+                        // Reset inside the lock so any subsequent pause_all SeqCst
+                        // store is guaranteed to land after this one (Part A fix).
+                        SHOULD_YIELD.store(false, Ordering::SeqCst);
+                        Some(info)
+                    }
+                } else {
+                    None
+                };
+                let snapshot = QueueSnapshot {
+                    jobs: jobs_guard.clone(),
+                    manual_pause_all: manual_paused,
+                };
+                drop(jobs_guard);
+                if let Some(n) = &notifier { n(snapshot); }
+                // If there was a pending job but we paused it instead of dispatching,
+                // continue the inner loop so can_run() at the top breaks us out.
+                // If there was no pending job at all, break (no more work).
+                if info.is_none() && !pending_exists {
+                    break;
+                }
+                info
             };
 
             let Some((meeting_id, audio_path, phase)) = job_info else {
-                break;
+                continue;
             };
-
-            // Transition to InProgress.
-            let snapshot = {
-                let mut jobs = jobs.lock().await;
-                if let Some(j) = jobs
-                    .iter_mut()
-                    .find(|j| j.meeting_id == meeting_id && j.status == JobStatus::Pending)
-                {
-                    j.status = JobStatus::InProgress;
-                }
-                QueueSnapshot { jobs: jobs.clone() }
-            };
-            if let Some(n) = &notifier { n(snapshot); }
-
-            // Reset yield signal before each processor invocation so a stale true
-            // from a previous recording does not cause an immediate re-yield.
-            SHOULD_YIELD.store(false, Ordering::SeqCst);
 
             // Dispatch to the right processor for this phase.
             let result = match phase {
@@ -324,25 +380,45 @@ async fn worker_loop(
                 let mut jobs = jobs.lock().await;
                 if let Some(j) = jobs.iter_mut().find(|j| j.meeting_id == meeting_id) {
                     match result {
+                        // Part B: only write Done/Failed if the job is still InProgress.
+                        // If pause_all landed while the processor ran its last chunk,
+                        // the job is already Paused and must not be overwritten.
                         JobResult::Completed => {
-                            j.status = JobStatus::Done;
-                        }
-                        JobResult::CompletedChain => {
-                            if j.phase == JobPhase::Transcribing
-                                && summary_processor.is_some()
-                            {
-                                // Transcription done and provider configured; queue the summary phase.
-                                j.phase = JobPhase::Summarising;
-                                j.status = JobStatus::Pending;
-                            } else {
+                            if j.status == JobStatus::InProgress {
                                 j.status = JobStatus::Done;
                             }
                         }
-                        JobResult::Yielded => j.status = JobStatus::Paused,
-                        JobResult::Failed(_) => j.status = JobStatus::Failed,
+                        JobResult::CompletedChain => {
+                            if j.status == JobStatus::InProgress {
+                                if j.phase == JobPhase::Transcribing
+                                    && summary_processor.is_some()
+                                {
+                                    // Transcription done and provider configured; queue the summary phase.
+                                    j.phase = JobPhase::Summarising;
+                                    j.status = JobStatus::Pending;
+                                } else {
+                                    j.status = JobStatus::Done;
+                                }
+                            }
+                        }
+                        JobResult::Yielded => {
+                            // Guard matches Part B: a stale Yielded arriving after resume_all
+                            // already flipped the job to Pending must not re-pause it.
+                            if j.status == JobStatus::InProgress {
+                                j.status = JobStatus::Paused;
+                            }
+                        }
+                        JobResult::Failed(_) => {
+                            if j.status == JobStatus::InProgress {
+                                j.status = JobStatus::Failed;
+                            }
+                        }
                     }
                 }
-                QueueSnapshot { jobs: jobs.clone() }
+                QueueSnapshot {
+                    jobs: jobs.clone(),
+                    manual_pause_all: scheduler.manual_pause_all.load(Ordering::Relaxed),
+                }
             };
             if let Some(n) = &notifier { n(snapshot); }
         }
@@ -354,6 +430,7 @@ async fn worker_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::time::Duration;
 
     // ── Queue tests (task 4.1) ────────────────────────────────────────────────
@@ -494,6 +571,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn worker_yields_at_chunk_boundary_when_scheduler_says_pause() {
         // Processor returns Yielded immediately, simulating a chunk-boundary yield.
         let should_yield = Arc::new(AtomicBool::new(true));
@@ -526,6 +604,7 @@ mod tests {
     // implemented — the worker polls on a 5 s fallback interval.  The gate-clear
     // → automatic notify path is deferred until the scheduler holds an Arc<Notify>.
     #[tokio::test]
+    #[serial]
     async fn worker_resumes_paused_job_after_resume_all() {
         // First run: processor yields; second run: processor completes.
         let yielded_once = Arc::new(AtomicBool::new(false));
@@ -562,6 +641,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn worker_processes_jobs_in_fifo_order() {
         let order: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let order_clone = order.clone();
@@ -605,6 +685,7 @@ mod tests {
     // ── Summary chain tests (tasks 7.1–7.2) ──────────────────────────────────
 
     #[tokio::test]
+    #[serial]
     async fn summary_chain_routing() {
         // With provider: transcription → summary → Done.
         let summary_called = Arc::new(AtomicBool::new(false));
@@ -652,6 +733,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn summary_obeys_scheduler_gates() {
         let summary_called = Arc::new(AtomicBool::new(false));
         let flag = summary_called.clone();
@@ -687,4 +769,170 @@ mod tests {
         wait_for_status(&queue, "s7-gates", JobStatus::Done).await;
         assert!(summary_called.load(Ordering::SeqCst), "summary must run after scheduler gates clear");
     }
+
+    // ── Manual pause / resume regression (smoke test 12.5 follow-up) ─────────
+    //
+    // Spec post-meeting-pipeline.md:105 — manual pause must yield in-flight jobs
+    // at the next chunk boundary AND prevent new jobs from being picked up.
+    // Previous bug: pause_all() flipped statuses but did NOT assert SHOULD_YIELD,
+    // so the currently-running retranscription chunk drove to completion and the
+    // job ended up Done instead of Paused.
+
+    #[tokio::test]
+    #[serial]
+    async fn pause_all_asserts_should_yield_for_in_flight_chunk() {
+        // Reset before the test — other tests in this file leave SHOULD_YIELD
+        // in arbitrary state, and this assertion is order-sensitive.
+        SHOULD_YIELD.store(false, Ordering::SeqCst);
+        let queue = TranscriptionQueue::new();
+        assert!(!SHOULD_YIELD.load(Ordering::SeqCst), "pre-condition: SHOULD_YIELD must start cleared");
+        queue.pause_all().await;
+        assert!(
+            SHOULD_YIELD.load(Ordering::SeqCst),
+            "pause_all must assert SHOULD_YIELD so any in-flight retranscription yields at the next chunk boundary"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn resume_all_clears_should_yield() {
+        SHOULD_YIELD.store(true, Ordering::SeqCst);
+        let queue = TranscriptionQueue::new();
+        queue.resume_all().await;
+        assert!(
+            !SHOULD_YIELD.load(Ordering::SeqCst),
+            "resume_all must clear SHOULD_YIELD so the next worker tick is not seen as a yield request"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pause_all_sets_manual_pause_all_flag() {
+        let queue = TranscriptionQueue::new();
+        assert!(!queue.scheduler.manual_pause_all.load(Ordering::SeqCst));
+        queue.pause_all().await;
+        assert!(
+            queue.scheduler.manual_pause_all.load(Ordering::SeqCst),
+            "pause_all must set scheduler.manual_pause_all so can_run() blocks subsequent pickups"
+        );
+        queue.resume_all().await;
+        assert!(
+            !queue.scheduler.manual_pause_all.load(Ordering::SeqCst),
+            "resume_all must clear scheduler.manual_pause_all"
+        );
+    }
+
+    /// Regression: meeting-end should not lift a deliberate manual pause.
+    /// The fix in lib.rs guards the resume_all() call with
+    /// `!manual_pause_all`; this test verifies the invariant holds at the
+    /// queue level — clearing meeting_busy alone leaves manual_pause_all set.
+    #[tokio::test]
+    #[serial]
+    async fn meeting_end_preserves_manual_pause_when_active() {
+        SHOULD_YIELD.store(false, Ordering::SeqCst);
+        let queue = TranscriptionQueue::new();
+
+        // User deliberately pauses all background work.
+        queue.pause_all().await;
+        assert!(queue.scheduler.manual_pause_all.load(Ordering::SeqCst));
+
+        // A meeting is detected (sets meeting_busy).
+        queue.scheduler.meeting_busy.store(true, Ordering::SeqCst);
+        assert!(!queue.scheduler.can_run(), "must be blocked by both gates");
+
+        // Meeting ends: lib.rs clears meeting_busy but skips resume_all()
+        // because manual_pause_all is set.
+        queue.scheduler.meeting_busy.store(false, Ordering::SeqCst);
+        // (resume_all() is NOT called here — that's the fix being tested)
+
+        assert!(
+            queue.scheduler.manual_pause_all.load(Ordering::SeqCst),
+            "manual_pause_all must survive meeting-end when user deliberately paused"
+        );
+        assert!(
+            !queue.scheduler.can_run(),
+            "can_run() must remain false — manual pause is still active"
+        );
+
+        // Cleanup.
+        queue.resume_all().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn snapshot_exposes_manual_pause_all_flag() {
+        let queue = TranscriptionQueue::new();
+        let snap = queue.get_state().await;
+        assert!(!snap.manual_pause_all, "fresh snapshot must report manual_pause_all=false");
+        queue.pause_all().await;
+        let snap = queue.get_state().await;
+        assert!(snap.manual_pause_all, "snapshot after pause_all must report manual_pause_all=true so the UI can render Resume");
+        queue.resume_all().await;
+        let snap = queue.get_state().await;
+        assert!(!snap.manual_pause_all, "snapshot after resume_all must report manual_pause_all=false");
+    }
+
+    // Regression for the pickup-window race surfaced in code review.
+    //
+    // This test covers the deterministic pre-pause path: manual_pause_all is set
+    // before the worker spawns, so can_run() returns false and the worker never
+    // reaches the critical section. It verifies the processor is not dispatched
+    // and the job stays Pending (not InProgress / Done).
+    //
+    // Note: the narrower race where pause_all() fires after can_run() returns true
+    // but before the lock is acquired is not deterministically exercisable without
+    // test hooks. That path is closed by Part A (SHOULD_YIELD reset inside lock)
+    // and Part B (match-arm InProgress guard). See the comment above worker_loop.
+    #[tokio::test]
+    #[serial]
+    async fn worker_marks_pending_job_paused_under_manual_pause_without_dispatching() {
+        SHOULD_YIELD.store(false, Ordering::SeqCst);
+
+        let processor_called = Arc::new(AtomicBool::new(false));
+        let pc = processor_called.clone();
+        let processor: ProcessorFn = Arc::new(move |_id, _path| {
+            let pc = pc.clone();
+            Box::pin(async move {
+                pc.store(true, Ordering::SeqCst);
+                JobResult::Completed
+            })
+        });
+
+        let queue = Arc::new(TranscriptionQueue::with_processor(processor));
+        // Set manual_pause_all=true BEFORE the worker can run can_run().
+        queue.pause_all().await;
+        let _handle = queue.spawn_worker();
+        // Enqueue while paused. The worker's outer loop will tick on notify_one
+        // (from enqueue) and enter the inner loop; can_run() will return false
+        // and break before reaching pickup. After can_run() blocks, the only
+        // way for the job to ever transition out of Pending is via resume_all.
+        queue
+            .enqueue("paused-pickup".to_string(), PathBuf::from("/audio.mp4"))
+            .await;
+
+        // Give the worker plenty of opportunity to (incorrectly) dispatch.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            !processor_called.load(Ordering::SeqCst),
+            "processor must not run while manual_pause_all is set"
+        );
+        let state = queue.get_state().await;
+        let job = state.jobs.iter().find(|j| j.meeting_id == "paused-pickup").unwrap();
+        assert_eq!(
+            job.status,
+            JobStatus::Pending,
+            "job enqueued while paused must remain Pending until resume_all clears the gate"
+        );
+        assert!(state.manual_pause_all, "snapshot must still report manual_pause_all=true");
+    }
+
+    // Coverage note: the stale-Yielded race (resume_all promotes a job to Pending
+    // while the worker's match arm holds a JobResult::Yielded for that same job)
+    // is not deterministically exercisable without test hooks that interpose between
+    // the processor return and the match-arm lock acquisition.  The guard on
+    // `j.status == InProgress` in the Yielded arm (same as Completed/Failed) is
+    // correct by inspection — if the job was already flipped to Pending by
+    // resume_all, the guard discards the stale Yielded result and the job stays
+    // Pending.  Same rationale applies to Completed/CompletedChain/Failed arms.
 }

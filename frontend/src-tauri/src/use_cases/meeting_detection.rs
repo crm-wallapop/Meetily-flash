@@ -8,14 +8,21 @@ use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
 pub struct DetectorSettings {
-    /// How long the connection must be absent before a meeting-ended event fires.
+    /// Debounce for UDP calls: how long `has_browser_capture_session` must be absent
+    /// before a meeting-ended event fires. 15 s absorbs the empirical ~10 s WASAPI
+    /// Inactive transients (Chrome mic re-acquisition) with 5 s margin.
     pub debounce_duration: Duration,
+    /// Debounce for TCP TURN calls (`is_turn_exit = true`): shorter because TURN is a
+    /// reliable signal (drops within ~1 s of leaving) and transient TURN blips recover
+    /// within 1–2 polls. 4 s is the original debounce value and is sufficient.
+    pub turn_debounce_duration: Duration,
 }
 
 impl Default for DetectorSettings {
     fn default() -> Self {
         Self {
-            debounce_duration: Duration::from_secs(10),
+            debounce_duration: Duration::from_secs(15),
+            turn_debounce_duration: Duration::from_secs(4),
         }
     }
 }
@@ -34,7 +41,8 @@ pub enum DetectorEvent {
 pub enum DetectorState {
     Idle,
     InCall {
-        /// When the connection was first observed as absent (for 10s debounce).
+        /// When the connection was first observed as absent. Used to measure elapsed
+        /// time against the path-specific debounce window (15 s UDP / 4 s TURN).
         connection_lost_at: Option<Instant>,
     },
 }
@@ -99,21 +107,31 @@ pub fn step_detector(
             // consume the cancel signal so the spawner knows the frontend acknowledged it
             suppress_signal.compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire).ok();
 
-            if observation.has_meet_connection {
+            // For UDP calls: WASAPI active (bc=true) means call is live — clear timer.
+            // For TURN calls: once TURN drops (is_turn_exit=true), start the fast TURN
+            // debounce immediately even if bc is still true (WASAPI lags ~2s behind TURN).
+            // A returning TURN signal flips is_turn_exit back to false, clearing the timer.
+            if !observation.is_turn_exit && observation.has_browser_capture_session {
                 connection_lost_at = None;
                 (
                     DetectorState::InCall { connection_lost_at },
                     vec![],
                 )
             } else {
+                let debounce = if observation.is_turn_exit {
+                    settings.turn_debounce_duration
+                } else {
+                    settings.debounce_duration
+                };
                 let lost_at = connection_lost_at.unwrap_or(now);
                 let elapsed = now.duration_since(lost_at);
                 log::debug!(
-                    "InCall: no connection — debounce {:.1}s / {:.1}s",
+                    "InCall: no connection — debounce {:.1}s / {:.1}s (turn_exit={})",
                     elapsed.as_secs_f32(),
-                    settings.debounce_duration.as_secs_f32(),
+                    debounce.as_secs_f32(),
+                    observation.is_turn_exit,
                 );
-                if elapsed >= settings.debounce_duration {
+                if elapsed >= debounce {
                     (DetectorState::Idle, vec![DetectorEvent::MeetingEnded])
                 } else {
                     (
@@ -179,7 +197,13 @@ where
                         default_title,
                         candidate_titles,
                     } => emitter.emit_detected(default_title, candidate_titles),
-                    DetectorEvent::MeetingEnded => emitter.emit_ended(),
+                    DetectorEvent::MeetingEnded => {
+                        // notify_exit() before emit_ended(): adapter state is consistent
+                        // if emit_ended() errors, and turn_established cannot be left true
+                        // if this task is aborted between the two calls.
+                        port.notify_exit();
+                        emitter.emit_ended();
+                    }
                 }
             }
 
@@ -204,6 +228,9 @@ pub mod tests {
     pub struct MockMeetingDetector {
         observations: Mutex<VecDeque<DetectorObservation>>,
         fallback: DetectorObservation,
+        /// Shared counter incremented each time `notify_exit()` is called.
+        /// Tests that need to verify the use case calls the callback hold an `Arc` clone.
+        pub notify_exit_calls: Arc<Mutex<u32>>,
     }
 
     impl MockMeetingDetector {
@@ -213,6 +240,7 @@ pub mod tests {
             Self {
                 observations: Mutex::new(q),
                 fallback,
+                notify_exit_calls: Arc::new(Mutex::new(0)),
             }
         }
     }
@@ -221,6 +249,10 @@ pub mod tests {
         fn current_state(&mut self) -> DetectorObservation {
             let mut q = self.observations.lock().unwrap();
             q.pop_front().unwrap_or_else(|| self.fallback.clone())
+        }
+
+        fn notify_exit(&mut self) {
+            *self.notify_exit_calls.lock().unwrap() += 1;
         }
     }
 
@@ -289,8 +321,10 @@ pub mod tests {
         DetectorObservation {
             meet_windows: vec![],
             has_meet_connection: false,
+            has_browser_capture_session: false,
             connection_first_seen_at: None,
             default_title: String::new(),
+            is_turn_exit: false,
         }
     }
 
@@ -300,14 +334,17 @@ pub mod tests {
         DetectorObservation {
             meet_windows: vec![meet_window(title)],
             has_meet_connection: true,
+            has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
             default_title: title.to_string(),
+            is_turn_exit: false,
         }
     }
 
     fn default_settings() -> DetectorSettings {
         DetectorSettings {
-            debounce_duration: Duration::from_secs(10),
+            debounce_duration: Duration::from_secs(15),
+            turn_debounce_duration: Duration::from_secs(4),
         }
     }
 
@@ -323,10 +360,12 @@ pub mod tests {
         let conn_seen = start + Duration::from_millis(500);
 
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("Weekly sync - Google Meet")],
+            meet_windows: vec![meet_window("Meet - Weekly sync")],
             has_meet_connection: true,
+            has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
-            default_title: "Weekly sync - Google Meet".to_string(),
+            default_title: "Meet - Weekly sync".to_string(),
+            is_turn_exit: false,
         };
 
         let (state, events) = step_detector(
@@ -341,7 +380,7 @@ pub mod tests {
         assert!(matches!(state, DetectorState::InCall { .. }));
         assert_eq!(events.len(), 1);
         assert!(
-            matches!(&events[0], DetectorEvent::MeetingDetected { default_title, .. } if default_title == "Weekly sync - Google Meet")
+            matches!(&events[0], DetectorEvent::MeetingDetected { default_title, .. } if default_title == "Meet - Weekly sync")
         );
     }
 
@@ -352,10 +391,12 @@ pub mod tests {
         let start = Instant::now();
         // connection_first_seen_at == detector_start_time → pre-existing
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("All-hands - Google Meet")],
+            meet_windows: vec![meet_window("Meet - All-hands")],
             has_meet_connection: true,
+            has_browser_capture_session: true,
             connection_first_seen_at: Some(start),
             default_title: String::new(),
+            is_turn_exit: false,
         };
 
         let (state, events) = step_detector(
@@ -376,14 +417,16 @@ pub mod tests {
     #[test]
     fn test_2_3_transient_drop_within_debounce_no_ended_event() {
         let now = Instant::now();
-        // connection lost 5 seconds ago (< 10s debounce)
+        // connection lost 5 seconds ago (< 15s UDP debounce)
         let lost_5s_ago = now - Duration::from_secs(5);
 
         let obs = DetectorObservation {
             meet_windows: vec![],
             has_meet_connection: false,
+            has_browser_capture_session: false,
             connection_first_seen_at: None,
             default_title: String::new(),
+            is_turn_exit: false,
         };
 
         let state = DetectorState::InCall {
@@ -408,14 +451,16 @@ pub mod tests {
     #[test]
     fn test_2_4_connection_absent_beyond_debounce_fires_ended() {
         let now = Instant::now();
-        // connection lost 11 seconds ago (> 10s debounce)
-        let lost_11s_ago = now - Duration::from_secs(11);
+        // connection lost 16 seconds ago (> 15s UDP debounce)
+        let lost_11s_ago = now - Duration::from_secs(16);
 
         let obs = DetectorObservation {
             meet_windows: vec![],
             has_meet_connection: false,
+            has_browser_capture_session: false,
             connection_first_seen_at: None,
             default_title: String::new(),
+            is_turn_exit: false,
         };
 
         let state = DetectorState::InCall {
@@ -449,8 +494,10 @@ pub mod tests {
         let obs_lost = DetectorObservation {
             meet_windows: vec![],
             has_meet_connection: false,
+            has_browser_capture_session: false,
             connection_first_seen_at: None,
             default_title: String::new(),
+            is_turn_exit: false,
         };
 
         // Step 1: cancel signal consumed, connection just lost.
@@ -465,26 +512,30 @@ pub mod tests {
 
         // Step 2: connection returns (< 10s) → still InCall, no re-emit.
         let obs_back = DetectorObservation {
-            meet_windows: vec![meet_window("Sync - Google Meet")],
+            meet_windows: vec![meet_window("Meet - Sync")],
             has_meet_connection: true,
+            has_browser_capture_session: true,
             connection_first_seen_at: Some(start + Duration::from_millis(500)),
             default_title: String::new(),
+            is_turn_exit: false,
         };
         let (state, events) = step_detector(state, &obs_back, start, Instant::now(), &AtomicBool::new(false), &default_settings());
         assert!(events.is_empty(), "no re-emit after transient drop+return");
         assert!(matches!(state, DetectorState::InCall { .. }));
 
-        // Step 3: connection drops for > 10s → transition to Idle.
+        // Step 3: connection drops for > 15s → transition to Idle.
         let now = Instant::now();
-        let lost_11s_ago = now - Duration::from_secs(11);
+        let lost_11s_ago = now - Duration::from_secs(16);
         let state = DetectorState::InCall {
             connection_lost_at: Some(lost_11s_ago),
         };
         let obs_gone = DetectorObservation {
             meet_windows: vec![],
             has_meet_connection: false,
+            has_browser_capture_session: false,
             connection_first_seen_at: None,
             default_title: String::new(),
+            is_turn_exit: false,
         };
         let (state, events) = step_detector(state, &obs_gone, start, now, &AtomicBool::new(false), &default_settings());
         assert!(matches!(state, DetectorState::Idle));
@@ -493,14 +544,16 @@ pub mod tests {
         // Step 4: new connection → must re-emit.
         let conn_seen = now + Duration::from_millis(500);
         let obs_new = DetectorObservation {
-            meet_windows: vec![meet_window("New call - Google Meet")],
+            meet_windows: vec![meet_window("Meet - New call")],
             has_meet_connection: true,
+            has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
-            default_title: "New call - Google Meet".to_string(),
+            default_title: "Meet - New call".to_string(),
+            is_turn_exit: false,
         };
         let (_, events) = step_detector(state, &obs_new, start, conn_seen, &AtomicBool::new(false), &default_settings());
         assert_eq!(events.len(), 1, "new call after Idle reset must re-emit");
-        assert!(matches!(&events[0], DetectorEvent::MeetingDetected { default_title, .. } if default_title == "New call - Google Meet"));
+        assert!(matches!(&events[0], DetectorEvent::MeetingDetected { default_title, .. } if default_title == "Meet - New call"));
     }
 
     // ── 2.6 ───────────────────────────────────────────────────────────────
@@ -518,14 +571,18 @@ pub mod tests {
         let obs_false = DetectorObservation {
             meet_windows: vec![],
             has_meet_connection: false,
+            has_browser_capture_session: false,
             connection_first_seen_at: None,
             default_title: String::new(),
+            is_turn_exit: false,
         };
         let obs_true = DetectorObservation {
-            meet_windows: vec![meet_window("Sprint - Google Meet")],
+            meet_windows: vec![meet_window("Meet - Sprint")],
             has_meet_connection: true,
+            has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
             default_title: String::new(),
+            is_turn_exit: false,
         };
 
         // true → false → true → false, each step < 2s apart
@@ -543,7 +600,7 @@ pub mod tests {
 
         let now4 = now3 + Duration::from_secs(1);
         let (_, e) = step_detector(s, &obs_false, start, now4, &no_suppress(), &default_settings());
-        assert!(e.is_empty(), "total 3s < 10s debounce → no ended");
+        assert!(e.is_empty(), "total 3s < 15s UDP debounce → no ended");
     }
 
     // ── 2.7 ───────────────────────────────────────────────────────────────
@@ -552,10 +609,12 @@ pub mod tests {
     fn test_2_7_title_without_connection_stays_idle() {
         let start = Instant::now();
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("Sync - Google Meet")],
+            meet_windows: vec![meet_window("Meet - Sync")],
             has_meet_connection: false,
+            has_browser_capture_session: false,
             connection_first_seen_at: None,
             default_title: String::new(),
+            is_turn_exit: false,
         };
 
         let (state, events) = step_detector(
@@ -580,8 +639,10 @@ pub mod tests {
         let obs = DetectorObservation {
             meet_windows: vec![],
             has_meet_connection: true,
+            has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
             default_title: String::new(),
+            is_turn_exit: false,
         };
 
         let (state, events) = step_detector(
@@ -597,6 +658,165 @@ pub mod tests {
         assert!(events.is_empty());
     }
 
+    // ── 2.9 ───────────────────────────────────────────────────────────────
+    // Asymmetric exit signal: TCP drops (has_meet_connection=false) during an
+    // active UDP call, but WASAPI capture is still Active (has_browser_capture_session=true).
+    // → InCall must stay InCall with connection_lost_at cleared.
+    //
+    // This is the primary regression guard for the fix-meeting-ended-udp-calls change.
+    // The exit signal is WASAPI (bc), not the TCP conjunction. A 90s+ TCP drop that
+    // occurs during an active UDP call must not trigger meeting-ended. If this test
+    // is deleted and the InCall branch reverted to `has_meet_connection`, all other
+    // InCall tests would still pass while this bug silently regresses.
+    #[test]
+    fn test_2_9_tcp_drop_during_active_wasapi_stays_incall() {
+        let now = Instant::now();
+        // Debounce timer was already started by a prior poll (bc was false).
+        // Even 14 s in — one second short of the 15 s threshold — a bc=true
+        // observation must clear the timer and keep us InCall.
+        let lost_14s_ago = now - Duration::from_secs(14);
+
+        let obs = DetectorObservation {
+            meet_windows: vec![meet_window("Meet - Standup")],
+            has_meet_connection: false,         // TCP dropped (90s+ UDP call)
+            has_browser_capture_session: true,  // WASAPI capture still Active
+            connection_first_seen_at: None,
+            default_title: String::new(),
+            is_turn_exit: false,
+        };
+
+        let state = DetectorState::InCall {
+            connection_lost_at: Some(lost_14s_ago), // debounce was one second from expiry
+        };
+
+        let (new_state, events) = step_detector(
+            state,
+            &obs,
+            now - Duration::from_secs(120),
+            now,
+            &no_suppress(),
+            &default_settings(),
+        );
+
+        // bc=true must clear the debounce timer and keep us InCall with no events.
+        assert!(
+            matches!(new_state, DetectorState::InCall { connection_lost_at: None }),
+            "bc=true must clear connection_lost_at even when mc=false (TCP drop during UDP call)"
+        );
+        assert!(
+            events.is_empty(),
+            "WASAPI active during TCP drop must not emit meeting-ended"
+        );
+    }
+
+    // ── 2.10 ──────────────────────────────────────────────────────────────
+    // TURN exit uses the fast 4 s debounce, not the 15 s UDP debounce.
+    // is_turn_exit=true means TURN was established for this call and has just
+    // dropped. The event must fire after 4 s, not 15 s.
+    #[test]
+    fn test_2_10_turn_exit_fires_fast_4s_debounce() {
+        let now = Instant::now();
+        let obs = DetectorObservation {
+            meet_windows: vec![],
+            has_meet_connection: false,
+            has_browser_capture_session: false,
+            connection_first_seen_at: None,
+            default_title: String::new(),
+            is_turn_exit: true,
+        };
+
+        // 3 s elapsed — still under the 4 s TURN debounce.
+        let state = DetectorState::InCall { connection_lost_at: Some(now - Duration::from_secs(3)) };
+        let (new_state, events) = step_detector(
+            state, &obs, now - Duration::from_secs(60), now,
+            &no_suppress(), &default_settings(),
+        );
+        assert!(matches!(new_state, DetectorState::InCall { .. }), "3s < 4s TURN debounce → stay InCall");
+        assert!(events.is_empty(), "no event before 4s TURN debounce");
+
+        // 5 s elapsed — past the 4 s TURN debounce, must fire.
+        let state = DetectorState::InCall { connection_lost_at: Some(now - Duration::from_secs(5)) };
+        let (new_state, events) = step_detector(
+            state, &obs, now - Duration::from_secs(60), now,
+            &no_suppress(), &default_settings(),
+        );
+        assert!(matches!(new_state, DetectorState::Idle), "5s > 4s TURN debounce → Idle");
+        assert_eq!(events, vec![DetectorEvent::MeetingEnded], "TURN exit fires after 4s debounce");
+    }
+
+    // ── 2.10b ─────────────────────────────────────────────────────────────
+    // TURN drops but WASAPI is still active (the typical Chrome exit path: TURN
+    // drops within ~1 s of leave, WASAPI holds for another ~1–2 s).
+    // is_turn_exit=true, bc=true → the TURN debounce must START (not be cleared).
+    // This covers the quadrant that is most likely to regress if someone reads
+    // "bc=true → clear timer" from the UDP path and applies it uniformly.
+    #[test]
+    fn test_2_10b_turn_exit_bc_still_active_starts_debounce_not_clears_it() {
+        let now = Instant::now();
+
+        // TURN just dropped; WASAPI still streaming.
+        let obs = DetectorObservation {
+            meet_windows: vec![meet_window("Meet - Standup")],
+            has_meet_connection: false,
+            has_browser_capture_session: true,
+            connection_first_seen_at: None,
+            default_title: String::new(),
+            is_turn_exit: true,
+        };
+
+        // Step 1: timer not yet started (connection_lost_at=None) — first poll after TURN drop.
+        let state = DetectorState::InCall { connection_lost_at: None };
+        let (new_state, events) = step_detector(
+            state, &obs, now - Duration::from_secs(60), now,
+            &no_suppress(), &default_settings(),
+        );
+        // Timer must have been STARTED (Some), not cleared.
+        assert!(
+            matches!(new_state, DetectorState::InCall { connection_lost_at: Some(_) }),
+            "is_turn_exit=true must start the debounce timer even when bc=true (WASAPI lags)"
+        );
+        assert!(events.is_empty(), "no event on first poll after TURN drop");
+
+        // Step 2: 5 s elapsed — past the 4 s TURN debounce, must fire meeting-ended.
+        let state = DetectorState::InCall { connection_lost_at: Some(now - Duration::from_secs(5)) };
+        let (new_state, events) = step_detector(
+            state, &obs, now - Duration::from_secs(60), now,
+            &no_suppress(), &default_settings(),
+        );
+        assert!(matches!(new_state, DetectorState::Idle), "5s > 4s TURN debounce → Idle");
+        assert_eq!(events, vec![DetectorEvent::MeetingEnded], "meeting-ended fires after 4s TURN debounce");
+    }
+
+    // ── 2.11 ──────────────────────────────────────────────────────────────
+    // TURN transient blip: TURN drops briefly (is_turn_exit=true) then returns.
+    // When TURN returns, is_turn_exit flips to false and the timer must clear.
+    #[test]
+    fn test_2_11_turn_transient_blip_clears_debounce_timer() {
+        let now = Instant::now();
+
+        // TURN debounce was started 3 s ago but TURN has now returned.
+        let state = DetectorState::InCall { connection_lost_at: Some(now - Duration::from_secs(3)) };
+        let obs_turn_back = DetectorObservation {
+            meet_windows: vec![meet_window("Meet - Standup")],
+            has_meet_connection: true,
+            has_browser_capture_session: true,
+            connection_first_seen_at: Some(now - Duration::from_secs(60)),
+            default_title: String::new(),
+            is_turn_exit: false,
+        };
+
+        let (new_state, events) = step_detector(
+            state, &obs_turn_back, now - Duration::from_secs(60), now,
+            &no_suppress(), &default_settings(),
+        );
+
+        assert!(
+            matches!(new_state, DetectorState::InCall { connection_lost_at: None }),
+            "TURN return must clear connection_lost_at"
+        );
+        assert!(events.is_empty(), "TURN blip return must not emit meeting-ended");
+    }
+
     // ── 4.4 ───────────────────────────────────────────────────────────────
     // D17: the Rust state machine always emits meeting-detected from Idle when
     // conditions are met. It has no knowledge of the frontend recording state.
@@ -607,10 +827,12 @@ pub mod tests {
         let conn_seen = start + Duration::from_millis(500);
 
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("Standup - Google Meet")],
+            meet_windows: vec![meet_window("Meet - Standup")],
             has_meet_connection: true,
+            has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
             default_title: String::new(),
+            is_turn_exit: false,
         };
 
         // Even if frontend is "recording" (not tracked in the state machine), Rust emits.
@@ -630,6 +852,49 @@ pub mod tests {
         // is responsible for ignoring it when a recording is already in progress (D17).
     }
 
+    // ── 5.1a ──────────────────────────────────────────────────────────────
+    // spawn_detector emits meeting-ended after has_meet_connection stays false
+    // for > debounce duration, and calls port.notify_exit() exactly once.
+    #[tokio::test]
+    async fn test_5_1a_udp_exit_emits_meeting_ended_and_calls_notify_exit() {
+        let start = Instant::now();
+        let conn_seen = start + Duration::from_millis(5);
+        let in_call = DetectorObservation {
+            meet_windows: vec![meet_window("Meet - Standup")],
+            has_meet_connection: true,
+            has_browser_capture_session: true,
+            connection_first_seen_at: Some(conn_seen),
+            default_title: "Meet - Standup".to_string(),
+            is_turn_exit: false,
+        };
+        // 3 polls "in call", then idle. MockMeetingDetector repeats the last item as
+        // fallback, so a single idle_obs() at the end provides idle state indefinitely.
+        let port = MockMeetingDetector::new(
+            std::iter::repeat(in_call).take(3).chain(std::iter::once(idle_obs())),
+        );
+        let notify_calls = Arc::clone(&port.notify_exit_calls);
+
+        let emitter = Arc::new(MockEmitter::default());
+        let emitter_clone = Arc::clone(&emitter);
+        let suppress = Arc::new(AtomicBool::new(false));
+
+        let handle = spawn_detector(
+            port,
+            emitter_clone,
+            Duration::from_millis(5),
+            DetectorSettings { debounce_duration: Duration::from_millis(50), turn_debounce_duration: Duration::from_millis(50) },
+            suppress,
+        );
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        handle.abort();
+
+        assert!(*emitter.ended_count.lock().unwrap() >= 1,
+            "meeting-ended must fire after UDP connection absent > debounce");
+        assert_eq!(*notify_calls.lock().unwrap(), 1,
+            "spawn_detector must call port.notify_exit() exactly once per meeting-ended");
+    }
+
     // ── 4.5 ───────────────────────────────────────────────────────────────
     // A panicking port must not crash the spawner loop. After the panic is caught
     // the loop must continue polling, eventually emitting when the port recovers.
@@ -638,10 +903,12 @@ pub mod tests {
         let start = Instant::now();
         let conn_seen = start + Duration::from_millis(100);
         let success_obs = DetectorObservation {
-            meet_windows: vec![meet_window("Resilience - Google Meet")],
+            meet_windows: vec![meet_window("Meet - Resilience")],
             has_meet_connection: true,
+            has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
             default_title: String::new(),
+            is_turn_exit: false,
         };
 
         // Panics on first 2 calls, then succeeds.
@@ -659,7 +926,7 @@ pub mod tests {
             port,
             emitter_for_spawn,
             Duration::from_millis(5),
-            DetectorSettings { debounce_duration: Duration::from_secs(10) },
+            DetectorSettings { debounce_duration: Duration::from_secs(10), turn_debounce_duration: Duration::from_secs(10) },
             suppress,
         );
 
@@ -682,10 +949,12 @@ pub mod tests {
     fn test_4_6_spotify_fp_title_match_no_connection_stays_idle() {
         let start = Instant::now();
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("All-hands - Google Meet")],
+            meet_windows: vec![meet_window("Meet - All-hands")],
             has_meet_connection: false, // Spotify: no Google-IP connection
+            has_browser_capture_session: false,
             connection_first_seen_at: None,
             default_title: String::new(),
+            is_turn_exit: false,
         };
 
         let (state, events) = step_detector(
@@ -708,10 +977,12 @@ pub mod tests {
     fn test_4_7_discord_pwa_fp_title_match_no_connection_stays_idle() {
         let start = Instant::now();
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("Team call - Google Meet")],
+            meet_windows: vec![meet_window("Meet - Team call")],
             has_meet_connection: false, // Discord: connection is not to Google IPs
+            has_browser_capture_session: false,
             connection_first_seen_at: None,
             default_title: String::new(),
+            is_turn_exit: false,
         };
 
         let (state, events) = step_detector(
@@ -737,11 +1008,13 @@ pub mod tests {
         let detector_start = Instant::now();
 
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("Q4 review - Google Meet")],
+            meet_windows: vec![meet_window("Meet - Q4 review")],
             has_meet_connection: true,
+            has_browser_capture_session: true,
             // connection_first_seen_at == detector_start → pre-existing (D15)
             connection_first_seen_at: Some(detector_start),
             default_title: String::new(),
+            is_turn_exit: false,
         };
 
         let (state, events) = step_detector(
@@ -761,9 +1034,9 @@ pub mod tests {
     // Full cancel-suppression scripted sequence (D16):
     // 1. meeting-detected fires
     // 2. frontend signals cancel (suppress=true)
-    // 3. connection drops 8s (< 10s debounce) → no ended, no re-detect
+    // 3. connection drops 8s (< 15s debounce) → no ended, no re-detect
     // 4. connection returns → stays InCall, no re-detect (cancel-suppressed)
-    // 5. connection drops 12s (> 10s debounce) → meeting-ended, transition to Idle (flag reset)
+    // 5. connection drops 12s (< 15s debounce) then 16s total (> 15s) → meeting-ended, Idle
     // 6. new connection → meeting-detected fires again (flag was reset)
     #[test]
     fn test_4_9_cancel_suppression_full_scripted_sequence() {
@@ -772,10 +1045,12 @@ pub mod tests {
 
         // ── Step 1: Idle → InCall, meeting-detected fires ──────────────────
         let obs_detected = DetectorObservation {
-            meet_windows: vec![meet_window("Sprint planning - Google Meet")],
+            meet_windows: vec![meet_window("Meet - Sprint planning")],
             has_meet_connection: true,
+            has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
             default_title: String::new(),
+            is_turn_exit: false,
         };
         let (state, events) = step_detector(
             DetectorState::Idle,
@@ -795,8 +1070,10 @@ pub mod tests {
         let obs_dropped = DetectorObservation {
             meet_windows: vec![],
             has_meet_connection: false,
+            has_browser_capture_session: false,
             connection_first_seen_at: None,
             default_title: String::new(),
+            is_turn_exit: false,
         };
         // The signal is consumed on this step (compare_exchange true→false)
         let (state, events) = step_detector(state, &obs_dropped, start, now_8s, &suppress, &default_settings());
@@ -807,10 +1084,12 @@ pub mod tests {
         // ── Step 3: Connection returns → stays InCall, no re-detect ────────
         let now_9s = now_8s + Duration::from_secs(1);
         let obs_returned = DetectorObservation {
-            meet_windows: vec![meet_window("Sprint planning - Google Meet")],
+            meet_windows: vec![meet_window("Meet - Sprint planning")],
             has_meet_connection: true,
+            has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen + Duration::from_millis(500)),
             default_title: String::new(),
+            is_turn_exit: false,
         };
         let (state, events) = step_detector(state, &obs_returned, start, now_9s, &AtomicBool::new(false), &default_settings());
         assert!(events.is_empty(), "step 3: InCall with connection → no re-emit");
@@ -828,8 +1107,8 @@ pub mod tests {
         );
         assert!(events.is_empty(), "step 3.5: 0s elapsed < debounce → no ended event yet");
 
-        // ── Step 4: Still dropped 12s later → meeting-ended, Idle ─────────────
-        let now_22s = now_10s + Duration::from_secs(12);
+        // ── Step 4: Still dropped 16s later → meeting-ended, Idle ─────────────
+        let now_22s = now_10s + Duration::from_secs(16);
         let (state, events) = step_detector(
             state,
             &obs_dropped,
@@ -838,17 +1117,19 @@ pub mod tests {
             &AtomicBool::new(false),
             &default_settings(),
         );
-        assert_eq!(events, vec![DetectorEvent::MeetingEnded], "step 4: 12s > debounce → meeting-ended");
+        assert_eq!(events, vec![DetectorEvent::MeetingEnded], "step 4: 16s > 15s debounce → meeting-ended");
         assert!(matches!(state, DetectorState::Idle), "step 4: must return to Idle");
 
         // ── Step 5: New connection after Idle reset → must re-emit ─────────
         let now_rejoin = now_22s + Duration::from_secs(5);
         let conn_seen_new = now_rejoin;
         let obs_new_call = DetectorObservation {
-            meet_windows: vec![meet_window("Sprint planning - Google Meet")],
+            meet_windows: vec![meet_window("Meet - Sprint planning")],
             has_meet_connection: true,
+            has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen_new),
-            default_title: "Sprint planning - Google Meet".to_string(),
+            default_title: "Meet - Sprint planning".to_string(),
+            is_turn_exit: false,
         };
         let (_, events) = step_detector(
             state,
@@ -859,6 +1140,6 @@ pub mod tests {
             &default_settings(),
         );
         assert_eq!(events.len(), 1, "step 5: cancel flag reset on Idle → new call must re-emit");
-        assert!(matches!(&events[0], DetectorEvent::MeetingDetected { default_title, .. } if default_title == "Sprint planning - Google Meet"));
+        assert!(matches!(&events[0], DetectorEvent::MeetingDetected { default_title, .. } if default_title == "Meet - Sprint planning"));
     }
 }
