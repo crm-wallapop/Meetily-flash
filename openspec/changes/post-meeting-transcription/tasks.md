@@ -93,9 +93,9 @@
 - [x] 12.1 Run full suite: `cargo test`, `pytest backend/`, `pnpm test`, `pnpm lint` — all green
 - [x] 12.2 Manual smoke: start recording, stop normally → confirm MP4 saved, queue picks up the job, transcript appears, summary fires if provider configured
 - [~] 12.3 Manual smoke: start recording, cancel → confirm no MP4 on disk, no job enqueued, no transcription runs *(deferred — no UI cancel button exists; cancel path covered by unit tests in `recording_commands.rs`)*
-- [ ] 12.4 Manual smoke: back-to-back recordings → confirm M2 starts immediately after M1's stop, M1's transcription job pauses while M2 is recording, resumes when M2 stops, both eventually complete in order
-- [ ] 12.5 Manual smoke: long meeting → confirm progress percentage advances, cancel button works, Pause All button stops all work, Resume restarts cleanly
-- [ ] 12.6 Manual smoke: kill app mid-transcription → relaunch → confirm recovery modal lists the in-flight meeting and accepting it re-runs the job
+- [x] 12.4 Manual smoke: back-to-back recordings → confirm M2 starts immediately after M1's stop, M1's transcription job pauses while M2 is recording, resumes when M2 stops, both eventually complete in order
+- [x] 12.5 Manual smoke: long meeting → confirm progress percentage advances, cancel button works, Pause All button stops all work, Resume restarts cleanly
+- [x] 12.6 Manual smoke: kill app mid-transcription → relaunch → confirm recovery modal lists the in-flight meeting and accepting it re-runs the job
 
 ## 13. Spec drift and archive prep
 
@@ -117,4 +117,4 @@ Found by manual smoke test 12.5: Pause All was unresponsive, Resume button never
 - [x] 14.9 Amend `specs/post-meeting-pipeline/spec.md`: scope `progress %` and `manual_pause_all` into this change; capture the synchronous-emit scenario for manual pause/resume
 - [x] 14.10 Code review pass 1 — fixed worker pickup-window race: `worker_loop` now folds the pickup, InProgress flip, AND manual_pause_all re-check into a single critical section, so a concurrent `pause_all` between `can_run()` and the InProgress flip flips the job to Paused without dispatching (regression test `worker_marks_pending_job_paused_under_manual_pause_without_dispatching`)
 - [x] 14.11 Code review pass 1 — added `serial_test` dev-dep; annotated every test that touches the global `SHOULD_YIELD` static (or `spawn_worker` which writes it) with `#[serial]` so default-parallel `cargo test` runs are deterministic
-- [ ] 14.12 Smoke test 12.5 again after Rust rebuild: Pause All flips toggle to Resume immediately, in-flight job ends up Paused (not Done), Resume picks it up, progress % advances during transcription, Cancel shows toast
+- [x] 14.12 Smoke test 12.5 again after Rust rebuild: Pause All flips toggle to Resume immediately, in-flight job ends up Paused (not Done), Resume picks it up, progress % advances during transcription, Cancel shows toast

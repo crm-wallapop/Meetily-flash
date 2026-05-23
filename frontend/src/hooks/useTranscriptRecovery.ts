@@ -27,6 +27,12 @@ export interface UseTranscriptRecoveryReturn {
 /** Jobs enqueued more than this many ms ago are considered "previous session". */
 const STARTUP_GRACE_MS = 15_000;
 
+/** Guard: checkForRecoverableTranscripts runs at most once per JS module lifetime
+ *  (i.e., per app session). Without this, navigating away from home and back
+ *  remounts page.tsx, re-triggers the check, and flags active current-session
+ *  jobs as recoverable once they exceed the 15 s grace window. */
+let startupCheckDone = false;
+
 /**
  * Key persisted in localStorage once the v1→v2 IndexedDB migration has been
  * offered to the user.  After this key is set the legacy recovery path is
@@ -68,6 +74,8 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
    *    pending or in_progress before the current session started.
    */
   const checkForRecoverableTranscripts = useCallback(async () => {
+    if (startupCheckDone) return;
+    startupCheckDone = true;
     setIsLoading(true);
     try {
       // ── Legacy one-shot path (task 11.2) ──────────────────────────────────
