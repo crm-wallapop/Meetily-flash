@@ -21,7 +21,7 @@ import { TranscriptRecovery } from '@/components/TranscriptRecovery';
 import { AutoDetectBanner } from '@/components/AutoDetectBanner';
 import { useAutoDetect } from '@/hooks/useAutoDetect';
 import { indexedDBService } from '@/services/indexedDBService';
-import { onQueueChanged } from '@/services/queueService';
+import { onQueueChanged, toQueueJobStatus } from '@/services/queueService';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
 
@@ -84,19 +84,13 @@ export default function Home() {
     Analytics.trackPageView('home');
   }, []);
 
-  // Startup recovery check
+  // Startup recovery check — runs once on mount only.
+  // Re-running on recordingState.isRecording changes caused false-positive
+  // recovery prompts: when recording stops, the just-enqueued job (still
+  // in_progress in IndexedDB) would be flagged as "recoverable".
   useEffect(() => {
     const performStartupChecks = async () => {
       try {
-        // Skip recovery check if currently recording or processing stop
-        // This prevents the recovery dialog from showing when:
-        if (recordingState.isRecording ||
-          status === RecordingStatus.STOPPING ||
-          status === RecordingStatus.SAVING) {
-          console.log('Skipping recovery check - recording in progress or processing');
-          return;
-        }
-
         // 1. Clean up old meetings (7+ days)
         try {
           await indexedDBService.deleteOldMeetings(7);
@@ -111,8 +105,7 @@ export default function Home() {
           console.warn('⚠️ Failed to clean up saved meetings:', error);
         }
 
-        // 3. Always check for recoverable meetings on startup
-        // Don't skip based on sessionStorage - we need to check every time
+        // 3. Check for recoverable meetings
         await checkForRecoverableTranscripts();
       } catch (error) {
         console.error('Failed to perform startup checks:', error);
@@ -120,7 +113,7 @@ export default function Home() {
     };
 
     performStartupChecks();
-  }, [checkForRecoverableTranscripts, recordingState.isRecording, status]);
+  }, [checkForRecoverableTranscripts]);
 
   // Sync transcription-queue-changed events to IndexedDB so the recovery modal
   // can detect incomplete jobs on the next launch after a crash or forced quit.
@@ -141,7 +134,7 @@ export default function Home() {
           // already exists so the original enqueue timestamp is never overwritten.
           indexedDBService.upsertQueueJob({
             meetingId: job.meeting_id,
-            status: job.status.toLowerCase() as import('@/services/indexedDBService').QueueJobStatus,
+            status: toQueueJobStatus(job.status),
             queuePosition: 0,
             enqueuedAt: now,
             audioPath: job.audio_path,

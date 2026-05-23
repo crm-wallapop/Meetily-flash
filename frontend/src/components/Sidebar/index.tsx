@@ -7,7 +7,6 @@ import { useSidebar } from './SidebarProvider';
 import type { CurrentMeeting } from '@/components/Sidebar/SidebarProvider';
 import { ConfirmationModal } from '../ConfirmationModel/confirmation-modal';
 import { ModelConfig } from '@/components/ModelSettingsModal';
-import { SettingTabs } from '../SettingTabs';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
@@ -31,7 +30,7 @@ import Info from '../Info';
 import { ComplianceNotification } from '../ComplianceNotification';
 import { Input } from '../ui/input';
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '../ui/input-group';
-import { useQueueSnapshot } from '@/hooks/useQueueJobStatus';
+import { useQueueSnapshot, useRetranscriptionProgress } from '@/hooks/useQueueJobStatus';
 import { QueueStatusBadge } from '@/components/QueueStatusBadge/QueueStatusBadge';
 import { GlobalQueueIndicator } from '@/components/GlobalQueueIndicator/GlobalQueueIndicator';
 
@@ -63,6 +62,7 @@ const Sidebar: React.FC = () => {
   // Get recording state from RecordingStateContext (single source of truth)
   const { isRecording } = useRecordingState();
   const queueSnapshot = useQueueSnapshot();
+  const queueProgress = useRetranscriptionProgress();
   const { openImportDialog } = useImportDialog();
   const { betaFeatures } = useConfig();
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(['meetings']));
@@ -649,7 +649,17 @@ const Sidebar: React.FC = () => {
 
               {isMeetingItem && (
                 <QueueStatusBadge
-                  job={queueSnapshot.jobs.find(j => j.meeting_id === item.id)}
+                  job={(() => {
+                    const raw = queueSnapshot.jobs.find(j => j.meeting_id === item.id);
+                    if (!raw) return undefined;
+                    const p = queueProgress[item.id];
+                    // Summarising-phase guard must match useQueueJob — retranscription-progress
+                    // events don't cover the summary phase so any progress_percent would be stale.
+                    if (p !== undefined && raw.phase !== 'Summarising') {
+                      return { ...raw, progress_percent: p };
+                    }
+                    return raw;
+                  })()}
                   showCancel={true}
                   className="mt-0.5 ml-8 self-start"
                 />

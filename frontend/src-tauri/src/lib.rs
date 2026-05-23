@@ -63,8 +63,10 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::RwLock;
 use use_cases::transcription_queue::TranscriptionQueue;
+use use_cases::scheduler_settings::SchedulerLiveConfig;
 
 pub type TranscriptionQueueState = Arc<TranscriptionQueue>;
+pub type SchedulerConfigState = Arc<SchedulerLiveConfig>;
 
 static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
 
@@ -465,16 +467,38 @@ async fn cancel_queued_job<R: tauri::Runtime>(
 /// background_shutdown after save completes) prevents the worker from starting until the
 /// file is on disk.
 #[tauri::command]
-async fn enqueue_transcription_job(
+async fn enqueue_transcription_job<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, TranscriptionQueueState>,
     meeting_id: String,
     audio_path: String,
 ) -> Result<(), String> {
+    use tauri::Emitter;
     log::info!("enqueue_transcription_job: meeting_id={} audio_path={}", meeting_id, audio_path);
     let path = std::path::PathBuf::from(&audio_path);
     state.enqueue(meeting_id, path).await;
+    let snapshot = state.get_state().await;
+    let _ = app.emit("transcription-queue-changed", &snapshot);
     log::info!("enqueue_transcription_job: job enqueued successfully");
     Ok(())
+}
+
+/// Force-start a specific transcription job, bypassing the manual-mode
+/// auto-resume gate.  The job still respects recording_active,
+/// meeting_detected, and manual_pause gates.
+#[tauri::command]
+async fn run_transcription_job_now<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, TranscriptionQueueState>,
+    meeting_id: String,
+) -> Result<bool, String> {
+    use tauri::Emitter;
+    let started = state.run_job_now(&meeting_id).await;
+    if started {
+        let snapshot = state.get_state().await;
+        let _ = app.emit("transcription-queue-changed", &snapshot);
+    }
+    Ok(started)
 }
 
 pub fn run() {
@@ -498,7 +522,16 @@ pub fn run() {
             // Wire the transcription queue with production processors.
             {
                 use audio::retranscription::YIELD_SENTINEL;
+                use use_cases::scheduler_settings::{SchedulerLiveConfig, load_scheduler_settings};
                 use use_cases::transcription_queue::{JobResult, ProcessorFn, StateChangeNotifier, TranscriptionQueue};
+
+                // Load scheduler settings from store (async, so block_on).
+                let app_handle = _app.handle().clone();
+                let settings = tauri::async_runtime::block_on(async {
+                    load_scheduler_settings(&app_handle).await
+                });
+                let live_config = Arc::new(SchedulerLiveConfig::from_settings(&settings));
+                _app.manage(live_config.clone() as SchedulerConfigState);
 
                 let retranscription_processor: ProcessorFn = {
                     let app = _app.handle().clone();
@@ -547,6 +580,14 @@ pub fn run() {
                         let app = app.clone();
                         Box::pin(async move {
                             use crate::database::repositories::setting::SettingsRepository;
+                            use tauri::Emitter;
+
+                            let _ = app.emit("retranscription-progress", serde_json::json!({
+                                "meeting_id": meeting_id,
+                                "stage": "summarising",
+                                "progress_percentage": 0,
+                                "message": "Generating summary…"
+                            }));
 
                             let (pool, config) = {
                                 let app_state = match app.try_state::<state::AppState>() {
@@ -587,9 +628,10 @@ pub fn run() {
                     })
                 };
 
-                let queue = Arc::new(TranscriptionQueue::with_processors(
+                let queue = Arc::new(TranscriptionQueue::with_processors_and_config(
                     retranscription_processor,
                     Some(summary_processor),
+                    live_config,
                 ));
                 _app.manage(queue.clone() as TranscriptionQueueState);
 
@@ -1063,6 +1105,10 @@ pub fn run() {
             get_queue_state,
             cancel_queued_job,
             enqueue_transcription_job,
+            run_transcription_job_now,
+            // Scheduler settings commands
+            use_cases::scheduler_settings::get_scheduler_settings,
+            use_cases::scheduler_settings::save_scheduler_settings_cmd,
             // Retranscription commands
             audio::retranscription::start_retranscription_command,
             audio::retranscription::cancel_retranscription_command,

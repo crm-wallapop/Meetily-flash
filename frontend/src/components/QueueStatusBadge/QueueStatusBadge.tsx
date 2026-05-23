@@ -4,13 +4,14 @@
  * Per-meeting status pill driven by transcription-queue-changed events.
  * Render states: Transcribing | Summarising | Queued | Paused | Done | Failed | (hidden)
  */
-import React from 'react';
+import React, { useState } from 'react';
 import { toast } from 'sonner';
 import { QueueJob } from '@/services/queueService';
-import { queueJobLabel } from '@/hooks/useQueueJobStatus';
+import { queueJobLabel, shouldShowRunNow, useSchedulerSettings } from '@/hooks/useQueueJobStatus';
 import { cn } from '@/lib/utils';
 import { cancelQueuedJob } from '@/services/queueService';
-import { X } from 'lucide-react';
+import { runTranscriptionJobNow } from '@/services/schedulerSettingsService';
+import { Play, X } from 'lucide-react';
 
 interface QueueStatusBadgeProps {
   job: QueueJob | undefined;
@@ -32,20 +33,35 @@ function badgeVariant(job: QueueJob): string {
 }
 
 export function QueueStatusBadge({ job, showCancel = false, onCancelled, className }: QueueStatusBadgeProps) {
+  const settings = useSchedulerSettings();
+  const [isStarting, setIsStarting] = useState(false);
+
   if (!job || job.status === 'Done') return null;
 
   const handleCancel = async (e: React.MouseEvent) => {
     e.stopPropagation();
     try {
       await cancelQueuedJob(job.meeting_id);
-      // Cancellation removes the queue row entirely (per spec post-meeting-pipeline.md:142).
-      // Without a toast the user sees the badge silently disappear and can't tell
-      // whether the click landed or simply dismissed the badge.
       toast.success('Transcription cancelled');
       onCancelled?.();
     } catch (err) {
       console.error('Failed to cancel queue job:', err);
       toast.error('Failed to cancel transcription');
+    }
+  };
+
+  const handleRunNow = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsStarting(true);
+    try {
+      const started = await runTranscriptionJobNow(job.meeting_id);
+      if (!started) {
+        toast.error('Cannot start — system is busy');
+      }
+    } catch (err) {
+      toast.error('Failed to start transcription');
+    } finally {
+      setIsStarting(false);
     }
   };
 
@@ -60,7 +76,7 @@ export function QueueStatusBadge({ job, showCancel = false, onCancelled, classNa
       {job.status === 'InProgress' && (
         <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse flex-shrink-0" />
       )}
-      {queueJobLabel(job)}
+      {queueJobLabel(job, settings)}
       {showCancel && job.status !== 'Failed' && (
         <button
           onClick={handleCancel}
@@ -69,6 +85,17 @@ export function QueueStatusBadge({ job, showCancel = false, onCancelled, classNa
           aria-label="Cancel transcription"
         >
           <X className="w-3 h-3" />
+        </button>
+      )}
+      {shouldShowRunNow(job, settings) && (
+        <button
+          onClick={handleRunNow}
+          disabled={isStarting}
+          className="ml-1 rounded-full hover:bg-black/10 p-1 flex-shrink-0 disabled:opacity-50"
+          title="Start transcription now"
+          aria-label="Run now"
+        >
+          <Play className="w-3 h-3" />
         </button>
       )}
     </span>

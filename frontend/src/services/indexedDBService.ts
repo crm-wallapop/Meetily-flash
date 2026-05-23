@@ -9,6 +9,7 @@
  *     launch (see useTranscriptRecovery.ts / task 11.2).
  */
 import { TranscriptUpdate } from '@/types';
+import type { QueueJobStatus } from '@/services/queueService';
 
 // ── v1 schema interfaces (kept for the migration read path) ──────────────────
 
@@ -37,8 +38,6 @@ export interface StoredTranscript {
 }
 
 // ── v2 schema: transcription queue ──────────────────────────────────────────
-
-export type QueueJobStatus = 'pending' | 'in_progress' | 'paused' | 'done' | 'failed';
 
 export const VALID_QUEUE_STATUSES: readonly QueueJobStatus[] = [
   'pending',

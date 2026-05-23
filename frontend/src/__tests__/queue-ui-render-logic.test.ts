@@ -6,7 +6,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { QueueJob } from '@/services/queueService';
-import { queueJobLabel } from '@/hooks/useQueueJobStatus';
+import { queueJobLabel, formatPauseReason, shouldShowRunNow } from '@/hooks/useQueueJobStatus';
+import { defaultSchedulerSettings } from '@/services/schedulerSettingsService';
 
 function makeJob(
   status: QueueJob['status'],
@@ -43,6 +44,16 @@ describe('queueJobLabel', () => {
 
   it('running (Summarising phase) renders "Summarising…"', () => {
     expect(queueJobLabel(makeJob('InProgress', 'Summarising'))).toBe('Summarising…');
+  });
+
+  it('Summarising phase ignores stale progress_percent from transcription', () => {
+    expect(queueJobLabel(makeJob('InProgress', 'Summarising', 85))).toBe('Summarising…');
+    expect(queueJobLabel(makeJob('InProgress', 'Summarising', 100))).toBe('Summarising…');
+    expect(queueJobLabel(makeJob('InProgress', 'Summarising', 0))).toBe('Summarising…');
+  });
+
+  it('Paused Summarising job renders pause reason, not "Summarising"', () => {
+    expect(queueJobLabel(makeJob('Paused', 'Summarising'))).toBe('Paused');
   });
 
   it('queued renders "Queued"', () => {
@@ -115,5 +126,96 @@ describe('GlobalQueueIndicator derived state', () => {
   it('shows queued (no running) when only pending', () => {
     const state = deriveIndicatorState([{ status: 'Pending' }], false);
     expect(state?.statusLabel).toBe('1 queued');
+  });
+});
+
+// ── Pause reason formatting (§5) ────────────────────────────────────────────
+
+describe('formatPauseReason', () => {
+  const defaults = defaultSchedulerSettings();
+
+  it('recording_active → "Paused — you\'re recording"', () => {
+    expect(formatPauseReason('recording_active', defaults)).toBe("Paused — you're recording");
+  });
+
+  it('meeting_detected → "Paused — you\'re in a meeting"', () => {
+    expect(formatPauseReason('meeting_detected', defaults)).toBe("Paused — you're in a meeting");
+  });
+
+  it('cpu_high includes thresholds from settings', () => {
+    expect(formatPauseReason('cpu_high', defaults)).toBe('Paused — CPU above 70 % for 30 s');
+    const custom = { ...defaults, cpu_pause_threshold_pct: 40, cpu_pause_duration_secs: 15 };
+    expect(formatPauseReason('cpu_high', custom)).toBe('Paused — CPU above 40 % for 15 s');
+  });
+
+  it('ram_high includes thresholds from settings', () => {
+    expect(formatPauseReason('ram_high', defaults)).toBe('Paused — RAM above 80 % for 30 s');
+    const custom = { ...defaults, ram_pause_threshold_pct: 50, ram_pause_duration_secs: 20 };
+    expect(formatPauseReason('ram_high', custom)).toBe('Paused — RAM above 50 % for 20 s');
+  });
+
+  it('manual → "Paused — manually"', () => {
+    expect(formatPauseReason('manual', defaults)).toBe('Paused — manually');
+  });
+
+  it('null/undefined → "Paused"', () => {
+    expect(formatPauseReason(null, defaults)).toBe('Paused');
+    expect(formatPauseReason(undefined, defaults)).toBe('Paused');
+  });
+});
+
+describe('queueJobLabel with pause_reason', () => {
+  const settings = defaultSchedulerSettings();
+
+  function makePausedJob(reason: string | null): QueueJob {
+    return {
+      meeting_id: 'test',
+      audio_path: '/audio.mp4',
+      status: 'Paused',
+      phase: 'Transcribing',
+      pause_reason: reason,
+    };
+  }
+
+  it('renders detailed pause reason when settings provided', () => {
+    expect(queueJobLabel(makePausedJob('cpu_high'), settings)).toBe('Paused — CPU above 70 % for 30 s');
+    expect(queueJobLabel(makePausedJob('recording_active'), settings)).toBe("Paused — you're recording");
+    expect(queueJobLabel(makePausedJob('manual'), settings)).toBe('Paused — manually');
+  });
+
+  it('falls back to "Paused" when no settings provided', () => {
+    expect(queueJobLabel(makePausedJob('cpu_high'))).toBe('Paused');
+  });
+});
+
+// ── "Run now" visibility logic ──────────────────────────────────────────────
+
+describe('shouldShowRunNow', () => {
+  const manualSettings = { ...defaultSchedulerSettings(), scheduling_mode: 'manual' as const };
+  const politeSettings = defaultSchedulerSettings();
+
+  it('shows Run now for Pending job in manual mode', () => {
+    expect(shouldShowRunNow(makeJob('Pending'), manualSettings)).toBe(true);
+  });
+
+  it('shows Run now for Paused job in manual mode', () => {
+    expect(shouldShowRunNow(makeJob('Paused'), manualSettings)).toBe(true);
+  });
+
+  it('hides Run now for InProgress job in manual mode', () => {
+    expect(shouldShowRunNow(makeJob('InProgress'), manualSettings)).toBe(false);
+  });
+
+  it('hides Run now for Failed job in manual mode', () => {
+    expect(shouldShowRunNow(makeJob('Failed'), manualSettings)).toBe(false);
+  });
+
+  it('hides Run now for Pending job in polite mode', () => {
+    expect(shouldShowRunNow(makeJob('Pending'), politeSettings)).toBe(false);
+  });
+
+  it('hides Run now for Pending job in aggressive mode', () => {
+    const aggressive = { ...defaultSchedulerSettings(), scheduling_mode: 'aggressive' as const };
+    expect(shouldShowRunNow(makeJob('Pending'), aggressive)).toBe(false);
   });
 });

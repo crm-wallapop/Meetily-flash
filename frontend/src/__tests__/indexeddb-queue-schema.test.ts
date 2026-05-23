@@ -11,9 +11,9 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   indexedDBService,
   TranscriptionQueueJob,
-  QueueJobStatus,
   VALID_QUEUE_STATUSES,
 } from '@/services/indexedDBService';
+import type { QueueJobStatus } from '@/services/queueService';
 
 describe('indexeddb_queue_schema_v2_supports_status_transitions', () => {
   beforeEach(async () => {

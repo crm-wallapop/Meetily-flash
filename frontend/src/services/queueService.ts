@@ -4,11 +4,27 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 export type JobStatus = "Pending" | "InProgress" | "Paused" | "Done" | "Failed";
 export type JobPhase = "Transcribing" | "Summarising";
 
+/** IndexedDB-normalised snake_case status — single source of truth for persistence. */
+export type QueueJobStatus = "pending" | "in_progress" | "paused" | "done" | "failed";
+
+const JOB_STATUS_MAP: Record<JobStatus, QueueJobStatus> = {
+  Pending: "pending",
+  InProgress: "in_progress",
+  Paused: "paused",
+  Done: "done",
+  Failed: "failed",
+};
+
+export function toQueueJobStatus(status: JobStatus): QueueJobStatus {
+  return JOB_STATUS_MAP[status];
+}
+
 export interface QueueJob {
   meeting_id: string;
   audio_path: string;
   status: JobStatus;
   phase: JobPhase;
+  pause_reason?: string | null;
   /** Decorated client-side from retranscription-progress events; not sent by Rust. */
   progress_percent?: number;
 }

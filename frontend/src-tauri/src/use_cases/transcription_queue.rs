@@ -2,6 +2,7 @@
 //
 // Transcription queue, scheduler, and worker loop.
 
+use crate::use_cases::scheduler_settings::{SchedulerLiveConfig, SchedulingMode};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::future::Future;
@@ -11,12 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{Mutex, Notify};
 
-// ── Scheduler constants ──────────────────────────────────────────────────────
-
-const CPU_THRESHOLD: f64 = 70.0;
-const RAM_THRESHOLD: f64 = 80.0;
-/// Consecutive 5-second samples required to flip a hysteresis gate.
-const HYSTERESIS_WINDOW: usize = 6; // 30 s / 5 s
+/// Consecutive 5-second samples required to flip a hysteresis gate (default: 30 s / 5 s = 6).
+const DEFAULT_HYSTERESIS_WINDOW: usize = 6;
 
 // ── Yield signal shared with retranscription.rs (task 6.4) ──────────────────
 
@@ -33,6 +30,10 @@ pub struct Scheduler {
     pub ram_busy: Arc<AtomicBool>,
     pub manual_pause_all: Arc<AtomicBool>,
 
+    /// When Some, the scheduler reads thresholds/mode from live config.
+    /// When None, falls back to hardcoded defaults (backward compat for tests).
+    config: Option<Arc<SchedulerLiveConfig>>,
+
     cpu_window: Arc<StdMutex<VecDeque<f64>>>,
     ram_window: Arc<StdMutex<VecDeque<f64>>>,
 }
@@ -45,25 +46,110 @@ impl Scheduler {
             cpu_busy: Arc::new(AtomicBool::new(false)),
             ram_busy: Arc::new(AtomicBool::new(false)),
             manual_pause_all: Arc::new(AtomicBool::new(false)),
+            config: None,
+            cpu_window: Arc::new(StdMutex::new(VecDeque::new())),
+            ram_window: Arc::new(StdMutex::new(VecDeque::new())),
+        }
+    }
+
+    pub fn with_config(config: Arc<SchedulerLiveConfig>) -> Self {
+        Self {
+            recording_busy: Arc::new(AtomicBool::new(false)),
+            meeting_busy: Arc::new(AtomicBool::new(false)),
+            cpu_busy: Arc::new(AtomicBool::new(false)),
+            ram_busy: Arc::new(AtomicBool::new(false)),
+            manual_pause_all: Arc::new(AtomicBool::new(false)),
+            config: Some(config),
             cpu_window: Arc::new(StdMutex::new(VecDeque::new())),
             ram_window: Arc::new(StdMutex::new(VecDeque::new())),
         }
     }
 
     pub fn can_run(&self) -> bool {
-        !self.manual_pause_all.load(Ordering::Relaxed)
-            && !self.recording_busy.load(Ordering::Relaxed)
-            && !self.meeting_busy.load(Ordering::Relaxed)
-            && !self.cpu_busy.load(Ordering::Relaxed)
-            && !self.ram_busy.load(Ordering::Relaxed)
+        if self.manual_pause_all.load(Ordering::Relaxed)
+            || self.recording_busy.load(Ordering::Relaxed)
+            || self.meeting_busy.load(Ordering::Relaxed)
+        {
+            return false;
+        }
+
+        let mode = self
+            .config
+            .as_ref()
+            .map(|c| c.get_mode())
+            .unwrap_or(SchedulingMode::Polite);
+
+        match mode {
+            SchedulingMode::Aggressive => true,
+            SchedulingMode::Polite => {
+                !self.cpu_busy.load(Ordering::Relaxed)
+                    && !self.ram_busy.load(Ordering::Relaxed)
+            }
+            SchedulingMode::Manual => false, // auto-resume disabled; only run_transcription_job_now
+        }
+    }
+
+    /// True when a forced (user-initiated) run is allowed.
+    /// Hard gates (recording, meeting, manual_pause) still apply, but CPU/RAM
+    /// and the manual auto-resume gate are skipped.
+    pub fn can_run_forced(&self) -> bool {
+        if self.manual_pause_all.load(Ordering::Relaxed)
+            || self.recording_busy.load(Ordering::Relaxed)
+            || self.meeting_busy.load(Ordering::Relaxed)
+        {
+            return false;
+        }
+        let mode = self
+            .config
+            .as_ref()
+            .map(|c| c.get_mode())
+            .unwrap_or(SchedulingMode::Polite);
+        match mode {
+            SchedulingMode::Aggressive => true,
+            SchedulingMode::Manual => true,
+            SchedulingMode::Polite => !self.cpu_busy.load(Ordering::Relaxed)
+                && !self.ram_busy.load(Ordering::Relaxed),
+        }
     }
 
     pub fn feed_cpu_sample(&self, pct: f64) {
-        self.feed_sample(&self.cpu_window, &self.cpu_busy, pct, CPU_THRESHOLD);
+        let threshold = self
+            .config
+            .as_ref()
+            .map(|c| c.cpu_threshold_pct.load(std::sync::atomic::Ordering::Relaxed) as f64)
+            .unwrap_or(70.0);
+        let window_size = self.cpu_hysteresis_window();
+        self.feed_sample(&self.cpu_window, &self.cpu_busy, pct, threshold, window_size);
     }
 
     pub fn feed_ram_sample(&self, pct: f64) {
-        self.feed_sample(&self.ram_window, &self.ram_busy, pct, RAM_THRESHOLD);
+        let threshold = self
+            .config
+            .as_ref()
+            .map(|c| c.ram_threshold_pct.load(std::sync::atomic::Ordering::Relaxed) as f64)
+            .unwrap_or(80.0);
+        let window_size = self.ram_hysteresis_window();
+        self.feed_sample(&self.ram_window, &self.ram_busy, pct, threshold, window_size);
+    }
+
+    fn cpu_hysteresis_window(&self) -> usize {
+        self.config
+            .as_ref()
+            .map(|c| {
+                let secs = c.cpu_duration_secs.load(std::sync::atomic::Ordering::Relaxed);
+                (secs.max(5) / 5) as usize
+            })
+            .unwrap_or(DEFAULT_HYSTERESIS_WINDOW)
+    }
+
+    fn ram_hysteresis_window(&self) -> usize {
+        self.config
+            .as_ref()
+            .map(|c| {
+                let secs = c.ram_duration_secs.load(std::sync::atomic::Ordering::Relaxed);
+                (secs.max(5) / 5) as usize
+            })
+            .unwrap_or(DEFAULT_HYSTERESIS_WINDOW)
     }
 
     fn feed_sample(
@@ -72,13 +158,20 @@ impl Scheduler {
         busy: &Arc<AtomicBool>,
         pct: f64,
         threshold: f64,
+        window_size: usize,
     ) {
-        let mut w = window.lock().unwrap();
+        let mut w = match window.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                log::warn!("scheduler sample window mutex poisoned, skipping sample: {e}");
+                return;
+            }
+        };
         w.push_back(pct);
-        while w.len() > HYSTERESIS_WINDOW {
+        while w.len() > window_size {
             w.pop_front();
         }
-        if w.len() == HYSTERESIS_WINDOW {
+        if w.len() == window_size {
             if w.iter().all(|&s| s > threshold) {
                 busy.store(true, Ordering::Relaxed);
             } else if w.iter().all(|&s| s <= threshold) {
@@ -137,6 +230,8 @@ pub struct Job {
     pub audio_path: PathBuf,
     pub status: JobStatus,
     pub phase: JobPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +255,9 @@ pub struct TranscriptionQueue {
     processor: ProcessorFn,
     /// Set to `Some` when an LLM provider is configured.
     summary_processor: Option<ProcessorFn>,
+    /// Meeting IDs that have been force-started via run_job_now in manual mode.
+    /// The worker loop checks this to bypass the manual-mode gate for those jobs.
+    forced_meetings: Arc<Mutex<Vec<String>>>,
 }
 
 impl TranscriptionQueue {
@@ -178,6 +276,22 @@ impl TranscriptionQueue {
             scheduler: Arc::new(Scheduler::new()),
             processor,
             summary_processor,
+            forced_meetings: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn with_processors_and_config(
+        processor: ProcessorFn,
+        summary_processor: Option<ProcessorFn>,
+        config: Arc<SchedulerLiveConfig>,
+    ) -> Self {
+        Self {
+            jobs: Arc::new(Mutex::new(Vec::new())),
+            notify: Arc::new(Notify::new()),
+            scheduler: Arc::new(Scheduler::with_config(config)),
+            processor,
+            summary_processor,
+            forced_meetings: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -190,7 +304,13 @@ impl TranscriptionQueue {
             audio_path,
             status: JobStatus::Pending,
             phase: JobPhase::Transcribing,
+            pause_reason: None,
         });
+        self.notify.notify_one();
+    }
+
+    /// Wake the worker loop so it re-evaluates `can_run()` after a gate change.
+    pub fn wake_worker(&self) {
         self.notify.notify_one();
     }
 
@@ -204,10 +324,45 @@ impl TranscriptionQueue {
             jobs.retain(|j| j.meeting_id != meeting_id);
             in_progress
         };
-        // Signal the active processor to abort at the next chunk boundary.
+        {
+            let mut forced = self.forced_meetings.lock().await;
+            forced.retain(|id| id != meeting_id);
+        }
         if was_in_progress {
             crate::audio::retranscription::cancel_retranscription();
         }
+    }
+
+    /// Force-start a specific pending/paused job, bypassing the manual-mode
+    /// auto-resume gate.  The job still respects recording_active,
+    /// meeting_detected, and manual_pause at chunk boundaries.
+    pub async fn run_job_now(&self, meeting_id: &str) -> bool {
+        if !self.scheduler.can_run_forced() {
+            return false;
+        }
+        let found = {
+            let mut jobs = self.jobs.lock().await;
+            jobs.iter_mut().any(|j| {
+                if j.meeting_id == meeting_id
+                    && (j.status == JobStatus::Pending || j.status == JobStatus::Paused)
+                {
+                    j.status = JobStatus::Pending;
+                    true
+                } else {
+                    false
+                }
+            })
+        };
+        if found {
+            {
+                let mut forced = self.forced_meetings.lock().await;
+                if !forced.contains(&meeting_id.to_string()) {
+                    forced.push(meeting_id.to_string());
+                }
+            }
+            self.notify.notify_one();
+        }
+        found
     }
 
     /// Pause all pending/in-progress jobs (manual override).
@@ -222,6 +377,7 @@ impl TranscriptionQueue {
             for job in jobs.iter_mut() {
                 if job.status == JobStatus::Pending || job.status == JobStatus::InProgress {
                     job.status = JobStatus::Paused;
+                    job.pause_reason = Some("manual".to_string());
                 }
             }
         }
@@ -241,6 +397,7 @@ impl TranscriptionQueue {
             for job in jobs.iter_mut() {
                 if job.status == JobStatus::Paused {
                     job.status = JobStatus::Pending;
+                    job.pause_reason = None;
                 }
             }
         }
@@ -271,6 +428,7 @@ impl TranscriptionQueue {
         let scheduler = self.scheduler.clone();
         let processor = self.processor.clone();
         let summary_processor = self.summary_processor.clone();
+        let forced_meetings = self.forced_meetings.clone();
         tauri::async_runtime::spawn(worker_loop(
             jobs,
             notify,
@@ -278,6 +436,7 @@ impl TranscriptionQueue {
             processor,
             summary_processor,
             notifier,
+            forced_meetings,
         ))
     }
 }
@@ -289,6 +448,7 @@ async fn worker_loop(
     processor: ProcessorFn,
     summary_processor: Option<ProcessorFn>,
     notifier: Option<StateChangeNotifier>,
+    forced_meetings: Arc<Mutex<Vec<String>>>,
 ) {
     loop {
         tokio::select! {
@@ -297,7 +457,22 @@ async fn worker_loop(
         }
 
         loop {
-            if !scheduler.can_run() {
+            // Check if there are any forced meetings waiting to run.
+            // In manual mode, can_run() returns false, but forced jobs bypass that.
+            let has_forced = {
+                let forced = forced_meetings.lock().await;
+                !forced.is_empty()
+            };
+
+            if !scheduler.can_run() && !has_forced {
+                log::debug!(
+                    "worker: can_run=false (manual={} recording={} meeting={} cpu={} ram={})",
+                    scheduler.manual_pause_all.load(Ordering::Relaxed),
+                    scheduler.recording_busy.load(Ordering::Relaxed),
+                    scheduler.meeting_busy.load(Ordering::Relaxed),
+                    scheduler.cpu_busy.load(Ordering::Relaxed),
+                    scheduler.ram_busy.load(Ordering::Relaxed),
+                );
                 break;
             }
 
@@ -323,39 +498,75 @@ async fn worker_loop(
             // terminal states, so a Paused job set by pause_all is never clobbered.
             let job_info: Option<(String, PathBuf, JobPhase)> = {
                 let mut jobs_guard = jobs.lock().await;
+                let mut forced = forced_meetings.lock().await;
                 let manual_paused = scheduler.manual_pause_all.load(Ordering::Relaxed);
-                let found = jobs_guard
-                    .iter_mut()
-                    .find(|j| j.status == JobStatus::Pending);
-                let pending_exists = found.is_some();
-                let info = if let Some(j) = found {
-                    if manual_paused {
-                        j.status = JobStatus::Paused;
-                        None
-                    } else {
+
+                // In manual mode with forced meetings, pick up the forced job specifically.
+                let forced_pickup = if !forced.is_empty() {
+                    let forced_id = &forced[0];
+                    let found = jobs_guard.iter_mut().find(|j| {
+                        j.meeting_id == *forced_id
+                            && (j.status == JobStatus::Pending || j.status == JobStatus::Paused)
+                            && !manual_paused
+                    });
+                    if let Some(j) = found {
                         let info = (j.meeting_id.clone(), j.audio_path.clone(), j.phase.clone());
                         j.status = JobStatus::InProgress;
-                        // Reset inside the lock so any subsequent pause_all SeqCst
-                        // store is guaranteed to land after this one (Part A fix).
+                        j.pause_reason = None;
                         SHOULD_YIELD.store(false, Ordering::SeqCst);
+                        forced.remove(0);
                         Some(info)
+                    } else {
+                        // Forced job no longer eligible (e.g. cancelled or still paused)
+                        forced.remove(0);
+                        None
                     }
                 } else {
                     None
                 };
-                let snapshot = QueueSnapshot {
-                    jobs: jobs_guard.clone(),
-                    manual_pause_all: manual_paused,
-                };
-                drop(jobs_guard);
-                if let Some(n) = &notifier { n(snapshot); }
-                // If there was a pending job but we paused it instead of dispatching,
-                // continue the inner loop so can_run() at the top breaks us out.
-                // If there was no pending job at all, break (no more work).
-                if info.is_none() && !pending_exists {
-                    break;
+
+                if forced_pickup.is_some() {
+                    let snapshot = QueueSnapshot {
+                        jobs: jobs_guard.clone(),
+                        manual_pause_all: manual_paused,
+                    };
+                    drop(jobs_guard);
+                    drop(forced);
+                    if let Some(n) = &notifier { n(snapshot); }
+                    forced_pickup
+                } else {
+                    // Normal path (polite/aggressive modes, or manual with no forced jobs)
+                    let found = jobs_guard
+                        .iter_mut()
+                        .find(|j| j.status == JobStatus::Pending);
+                    let pending_exists = found.is_some();
+                    let info = if let Some(j) = found {
+                        if manual_paused {
+                            j.status = JobStatus::Paused;
+                            j.pause_reason = Some("manual".to_string());
+                            None
+                        } else {
+                            let info = (j.meeting_id.clone(), j.audio_path.clone(), j.phase.clone());
+                            j.status = JobStatus::InProgress;
+                            j.pause_reason = None;
+                            SHOULD_YIELD.store(false, Ordering::SeqCst);
+                            Some(info)
+                        }
+                    } else {
+                        None
+                    };
+                    let snapshot = QueueSnapshot {
+                        jobs: jobs_guard.clone(),
+                        manual_pause_all: manual_paused,
+                    };
+                    drop(jobs_guard);
+                    drop(forced);
+                    if let Some(n) = &notifier { n(snapshot); }
+                    if info.is_none() && !pending_exists {
+                        break;
+                    }
+                    info
                 }
-                info
             };
 
             let Some((meeting_id, audio_path, phase)) = job_info else {
@@ -378,6 +589,7 @@ async fn worker_loop(
             // Update status / phase based on result.
             let snapshot = {
                 let mut jobs = jobs.lock().await;
+                let mut forced = forced_meetings.lock().await;
                 if let Some(j) = jobs.iter_mut().find(|j| j.meeting_id == meeting_id) {
                     match result {
                         // Part B: only write Done/Failed if the job is still InProgress.
@@ -393,9 +605,14 @@ async fn worker_loop(
                                 if j.phase == JobPhase::Transcribing
                                     && summary_processor.is_some()
                                 {
-                                    // Transcription done and provider configured; queue the summary phase.
                                     j.phase = JobPhase::Summarising;
                                     j.status = JobStatus::Pending;
+                                    // In manual mode can_run() is false, so the worker
+                                    // won't auto-pick up the summary phase. Re-add to
+                                    // forced_meetings so the chain continues.
+                                    if !forced.contains(&meeting_id) {
+                                        forced.push(meeting_id.clone());
+                                    }
                                 } else {
                                     j.status = JobStatus::Done;
                                 }
@@ -406,6 +623,7 @@ async fn worker_loop(
                             // already flipped the job to Pending must not re-pause it.
                             if j.status == JobStatus::InProgress {
                                 j.status = JobStatus::Paused;
+                                j.pause_reason = Some(infer_pause_reason(scheduler.as_ref()));
                             }
                         }
                         JobResult::Failed(_) => {
@@ -425,11 +643,31 @@ async fn worker_loop(
     }
 }
 
+fn infer_pause_reason(scheduler: &Scheduler) -> String {
+    if scheduler.recording_busy.load(Ordering::Relaxed) {
+        return "recording_active".to_string();
+    }
+    if scheduler.meeting_busy.load(Ordering::Relaxed) {
+        return "meeting_detected".to_string();
+    }
+    if scheduler.cpu_busy.load(Ordering::Relaxed) {
+        return "cpu_high".to_string();
+    }
+    if scheduler.ram_busy.load(Ordering::Relaxed) {
+        return "ram_high".to_string();
+    }
+    if scheduler.manual_pause_all.load(Ordering::Relaxed) {
+        return "manual".to_string();
+    }
+    "unknown".to_string()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::use_cases::scheduler_settings::{SchedulerLiveConfig, SchedulerSettings};
     use serial_test::serial;
     use std::time::Duration;
 
@@ -519,11 +757,11 @@ mod tests {
     #[test]
     fn scheduler_pauses_on_sustained_cpu_load() {
         let sched = Scheduler::new();
-        for _ in 0..HYSTERESIS_WINDOW {
+        for _ in 0..DEFAULT_HYSTERESIS_WINDOW {
             sched.feed_cpu_sample(80.0);
         }
         assert!(!sched.can_run(), "scheduler must pause after sustained CPU > 70%");
-        for _ in 0..HYSTERESIS_WINDOW {
+        for _ in 0..DEFAULT_HYSTERESIS_WINDOW {
             sched.feed_cpu_sample(50.0);
         }
         assert!(sched.can_run(), "scheduler must resume after sustained CPU ≤ 70%");
@@ -532,11 +770,11 @@ mod tests {
     #[test]
     fn scheduler_pauses_on_sustained_ram_load() {
         let sched = Scheduler::new();
-        for _ in 0..HYSTERESIS_WINDOW {
+        for _ in 0..DEFAULT_HYSTERESIS_WINDOW {
             sched.feed_ram_sample(85.0);
         }
         assert!(!sched.can_run(), "scheduler must pause after sustained RAM > 80%");
-        for _ in 0..HYSTERESIS_WINDOW {
+        for _ in 0..DEFAULT_HYSTERESIS_WINDOW {
             sched.feed_ram_sample(70.0);
         }
         assert!(sched.can_run(), "scheduler must resume after sustained RAM ≤ 80%");
@@ -935,4 +1173,253 @@ mod tests {
     // correct by inspection — if the job was already flipped to Pending by
     // resume_all, the guard discards the stale Yielded result and the job stays
     // Pending.  Same rationale applies to Completed/CompletedChain/Failed arms.
+
+    // ── Task 2.1: scheduler reads thresholds from settings ────────────────────
+
+    #[test]
+    fn scheduler_reads_thresholds_from_settings() {
+        // CPU=40%/15s → window of 3 samples (15/5)
+        let settings = SchedulerSettings {
+            scheduling_mode: "polite".to_string(),
+            cpu_pause_threshold_pct: 40,
+            cpu_pause_duration_secs: 15,
+            ram_pause_threshold_pct: 80,
+            ram_pause_duration_secs: 30,
+        };
+        let config = Arc::new(SchedulerLiveConfig::from_settings(&settings));
+        let sched = Scheduler::with_config(config);
+
+        // With default thresholds (70%/30s), 45% would be fine.
+        // With custom CPU threshold of 40%, 45% should trigger busy after 3 samples.
+        for _ in 0..3 {
+            sched.feed_cpu_sample(45.0);
+        }
+        assert!(
+            sched.cpu_busy.load(Ordering::Relaxed),
+            "cpu_busy must be true after 3 samples at 45% with threshold 40%"
+        );
+    }
+
+    // ── Task 2.2: aggressive mode disables CPU and RAM gates ──────────────────
+
+    #[test]
+    fn scheduler_aggressive_mode_disables_cpu_and_ram_gates() {
+        let settings = SchedulerSettings {
+            scheduling_mode: "aggressive".to_string(),
+            cpu_pause_threshold_pct: 70,
+            cpu_pause_duration_secs: 30,
+            ram_pause_threshold_pct: 80,
+            ram_pause_duration_secs: 30,
+        };
+        let config = Arc::new(SchedulerLiveConfig::from_settings(&settings));
+        let sched = Scheduler::with_config(config);
+
+        // Even with CPU/RAM high, can_run() should return true in aggressive mode
+        sched.cpu_busy.store(true, Ordering::Relaxed);
+        sched.ram_busy.store(true, Ordering::Relaxed);
+        assert!(
+            sched.can_run(),
+            "aggressive mode must allow running despite CPU and RAM gates"
+        );
+    }
+
+    // ── Task 2.3: manual mode does not auto-resume ───────────────────────────
+
+    #[tokio::test]
+    #[serial]
+    async fn scheduler_manual_mode_does_not_auto_resume() {
+        let settings = SchedulerSettings {
+            scheduling_mode: "manual".to_string(),
+            cpu_pause_threshold_pct: 70,
+            cpu_pause_duration_secs: 30,
+            ram_pause_threshold_pct: 80,
+            ram_pause_duration_secs: 30,
+        };
+        let config = Arc::new(SchedulerLiveConfig::from_settings(&settings));
+        let sched = Scheduler::with_config(config);
+
+        // In manual mode, can_run() must return false even when all gates are clear
+        assert!(
+            !sched.can_run(),
+            "manual mode must block auto-resume regardless of gates"
+        );
+
+        // can_run_forced() must still return true (used by run_job_now)
+        assert!(
+            sched.can_run_forced(),
+            "manual mode must allow forced runs when gates are clear"
+        );
+
+        // Forced runs in manual mode must ignore CPU/RAM — the user explicitly chose to run.
+        sched.cpu_busy.store(true, Ordering::Relaxed);
+        sched.ram_busy.store(true, Ordering::Relaxed);
+        assert!(
+            sched.can_run_forced(),
+            "manual mode forced run must ignore CPU/RAM gates"
+        );
+    }
+
+    // ── Task 3.2: run_job_now triggers worker even in manual mode ─────────────
+
+    #[tokio::test]
+    #[serial]
+    async fn run_job_now_triggers_in_manual_mode() {
+        SHOULD_YIELD.store(false, Ordering::SeqCst);
+
+        let settings = SchedulerSettings {
+            scheduling_mode: "manual".to_string(),
+            cpu_pause_threshold_pct: 70,
+            cpu_pause_duration_secs: 30,
+            ram_pause_threshold_pct: 80,
+            ram_pause_duration_secs: 30,
+        };
+        let config = Arc::new(SchedulerLiveConfig::from_settings(&settings));
+
+        let processor_called = Arc::new(AtomicBool::new(false));
+        let pc = processor_called.clone();
+        let processor: ProcessorFn = Arc::new(move |_id, _path| {
+            let pc = pc.clone();
+            Box::pin(async move {
+                pc.store(true, Ordering::SeqCst);
+                JobResult::Completed
+            })
+        });
+
+        // Build queue with manual-mode scheduler
+        let queue = Arc::new(TranscriptionQueue {
+            jobs: Arc::new(Mutex::new(Vec::new())),
+            notify: Arc::new(Notify::new()),
+            scheduler: Arc::new(Scheduler::with_config(config)),
+            processor,
+            summary_processor: None,
+            forced_meetings: Arc::new(Mutex::new(Vec::new())),
+        });
+
+        queue.enqueue("manual-job".to_string(), PathBuf::from("/audio.mp4")).await;
+        let _handle = queue.spawn_worker();
+
+        // Give the worker time to (not) pick up the job
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !processor_called.load(Ordering::SeqCst),
+            "processor must not run in manual mode without run_job_now"
+        );
+
+        // Now force-run
+        let started = queue.run_job_now("manual-job").await;
+        assert!(started, "run_job_now must return true for a pending job");
+
+        wait_for_status(&queue, "manual-job", JobStatus::Done).await;
+        assert!(
+            processor_called.load(Ordering::SeqCst),
+            "processor must run after run_job_now in manual mode"
+        );
+    }
+
+    /// Regression: in manual mode, CompletedChain must auto-chain to the summary
+    /// phase without requiring another run_job_now click.
+    #[tokio::test]
+    #[serial]
+    async fn manual_mode_completed_chain_auto_chains_to_summary() {
+        SHOULD_YIELD.store(false, Ordering::SeqCst);
+
+        let settings = SchedulerSettings {
+            scheduling_mode: "manual".to_string(),
+            cpu_pause_threshold_pct: 70,
+            cpu_pause_duration_secs: 30,
+            ram_pause_threshold_pct: 80,
+            ram_pause_duration_secs: 30,
+        };
+        let config = Arc::new(SchedulerLiveConfig::from_settings(&settings));
+
+        let summary_called = Arc::new(AtomicBool::new(false));
+        let flag = summary_called.clone();
+
+        let queue = Arc::new(TranscriptionQueue {
+            jobs: Arc::new(Mutex::new(Vec::new())),
+            notify: Arc::new(Notify::new()),
+            scheduler: Arc::new(Scheduler::with_config(config)),
+            processor: Arc::new(|_id, _path| {
+                Box::pin(async { JobResult::CompletedChain })
+            }),
+            summary_processor: Some(Arc::new(move |_id, _path| {
+                let f = flag.clone();
+                Box::pin(async move {
+                    f.store(true, Ordering::SeqCst);
+                    JobResult::Completed
+                })
+            })),
+            forced_meetings: Arc::new(Mutex::new(Vec::new())),
+        });
+
+        queue.enqueue("chain-manual".to_string(), PathBuf::from("/audio.mp4")).await;
+        let _handle = queue.spawn_worker();
+
+        let started = queue.run_job_now("chain-manual").await;
+        assert!(started);
+
+        wait_for_status(&queue, "chain-manual", JobStatus::Done).await;
+        assert!(
+            summary_called.load(Ordering::SeqCst),
+            "summary must run automatically after transcription in manual mode"
+        );
+    }
+
+    // ── Task 3.2: run_job_now still pauses when recording is active ───────────
+
+    #[tokio::test]
+    #[serial]
+    async fn run_job_now_respects_recording_gate() {
+        SHOULD_YIELD.store(false, Ordering::SeqCst);
+
+        let settings = SchedulerSettings {
+            scheduling_mode: "manual".to_string(),
+            cpu_pause_threshold_pct: 70,
+            cpu_pause_duration_secs: 30,
+            ram_pause_threshold_pct: 80,
+            ram_pause_duration_secs: 30,
+        };
+        let config = Arc::new(SchedulerLiveConfig::from_settings(&settings));
+
+        let queue = Arc::new(TranscriptionQueue {
+            jobs: Arc::new(Mutex::new(Vec::new())),
+            notify: Arc::new(Notify::new()),
+            scheduler: Arc::new(Scheduler::with_config(config)),
+            processor: noop_processor(),
+            summary_processor: None,
+            forced_meetings: Arc::new(Mutex::new(Vec::new())),
+        });
+
+        queue.enqueue("manual-gated".to_string(), PathBuf::from("/audio.mp4")).await;
+
+        // Set recording_busy — should block run_job_now
+        queue.scheduler.recording_busy.store(true, Ordering::SeqCst);
+        let started = queue.run_job_now("manual-gated").await;
+        assert!(!started, "run_job_now must return false when recording is active");
+    }
+
+    /// Regression: cancel() must remove the meeting from forced_meetings so
+    /// the worker loop doesn't try to pick up a cancelled job on its next tick.
+    #[tokio::test]
+    #[serial]
+    async fn cancel_removes_from_forced_meetings() {
+        let queue = Arc::new(TranscriptionQueue::with_processors(
+            noop_processor(),
+            None,
+        ));
+        queue.enqueue("cancel-forced".to_string(), PathBuf::from("/audio.mp4")).await;
+        queue.run_job_now("cancel-forced").await;
+
+        // Verify it's in forced_meetings
+        {
+            let forced = queue.forced_meetings.lock().await;
+            assert!(forced.contains(&"cancel-forced".to_string()));
+        }
+
+        queue.cancel("cancel-forced").await;
+
+        let forced = queue.forced_meetings.lock().await;
+        assert!(!forced.contains(&"cancel-forced".to_string()),
+            "cancel must clean up forced_meetings entry");
+    }
 }

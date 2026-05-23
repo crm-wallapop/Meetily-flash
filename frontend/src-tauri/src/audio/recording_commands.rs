@@ -60,6 +60,7 @@ pub(crate) fn current_phase() -> RecordingPhase {
     RecordingPhase::from(RECORDING_PHASE.load(Ordering::SeqCst))
 }
 
+#[cfg(test)]
 pub(crate) fn set_phase(phase: RecordingPhase) {
     RECORDING_PHASE.store(phase as u8, Ordering::SeqCst);
 }
@@ -126,6 +127,12 @@ fn set_recording_gate<R: Runtime>(app: &AppHandle<R>, busy: bool) {
     queue.scheduler.recording_busy.store(busy, Ordering::SeqCst);
     if busy {
         crate::use_cases::transcription_queue::SHOULD_YIELD.store(true, Ordering::SeqCst);
+    } else {
+        // Wake the worker so it re-evaluates can_run() now that the recording
+        // gate has cleared. Without this the job sits Pending until the 5-second
+        // timer tick — which may not arrive if the tokio select! was already
+        // consumed by an earlier notify.
+        queue.wake_worker();
     }
 }
 

@@ -4,7 +4,7 @@ import { Transcript, TranscriptSegmentData } from '@/types';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { useMemo, useCallback, useState } from 'react';
-import { useQueueJob } from '@/hooks/useQueueJobStatus';
+import { useQueueJob, useQueueSnapshot } from '@/hooks/useQueueJobStatus';
 import { QueueJob, cancelQueuedJob, enqueueTranscriptionJob } from '@/services/queueService';
 
 interface TranscriptPanelProps {
@@ -33,10 +33,12 @@ interface TranscriptPanelProps {
 
 function TranscriptionStatusBanner({
   job,
+  manualPause,
   onRetry,
   isRetrying,
 }: {
   job: QueueJob;
+  manualPause: boolean;
   onRetry: () => void;
   isRetrying: boolean;
 }) {
@@ -72,7 +74,9 @@ function TranscriptionStatusBanner({
       ? 'The AI summary will appear here once complete.'
       : 'The transcript will appear here once Whisper finishes processing your audio.'
     : isPaused
-    ? 'Transcription is paused — it will resume automatically when the system is ready.'
+    ? manualPause
+      ? 'Transcription is paused. Click Resume in the queue indicator to continue.'
+      : 'Transcription is paused — it will resume automatically when the system is ready.'
     : isFailed
     ? 'Something went wrong. You can retry transcription below.'
     : isPending
@@ -104,7 +108,7 @@ function TranscriptionStatusBanner({
     : 'text-yellow-600';
 
   return (
-    <div className="flex flex-col items-center justify-center h-full px-6 text-center">
+    <div role="status" aria-live="polite" className="flex flex-col items-center justify-center h-full px-6 text-center">
       <div className={`w-full max-w-xs rounded-xl border p-5 flex flex-col items-center gap-3 ${containerColor}`}>
         <div className="flex items-center gap-2">
           {icon}
@@ -147,6 +151,8 @@ export function TranscriptPanel({
   onRefetchTranscripts,
 }: TranscriptPanelProps) {
   const queueJob = useQueueJob(meetingId);
+  const queueSnapshot = useQueueSnapshot();
+  const queueManualPause = queueSnapshot.manual_pause_all;
   const [isRetrying, setIsRetrying] = useState(false);
 
   const handleRetry = useCallback(async () => {
@@ -194,7 +200,7 @@ export function TranscriptPanel({
       {/* Transcript content */}
       <div className="flex-1 overflow-hidden pb-4">
         {isEmpty && !isRecording && queueJob && queueJob.status !== 'Done' ? (
-          <TranscriptionStatusBanner job={queueJob} onRetry={handleRetry} isRetrying={isRetrying} />
+          <TranscriptionStatusBanner job={queueJob} manualPause={queueManualPause} onRetry={handleRetry} isRetrying={isRetrying} />
         ) : (
           <VirtualizedTranscriptView
             segments={convertedSegments}
