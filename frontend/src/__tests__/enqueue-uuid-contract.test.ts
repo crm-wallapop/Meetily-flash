@@ -6,8 +6,9 @@
  * created with "meeting-{uuid}" by `transcript.rs`. Transcripts were saved under
  * the wrong ID; the meeting view found nothing.
  *
- * Fix: frontend calls `enqueue_transcription_job` AFTER `saveMeeting` returns
- * the UUID, so the queue and the DB row agree on the meeting_id.
+ * Fix: frontend calls `enqueue_transcription_job` with the meeting_id returned
+ * by stop_recording (which is the same id Rust generated at start and used for
+ * the SQLite row), so the queue and the DB row agree on the meeting_id.
  *
  * These tests pin the pure-logic contracts — meeting_id format and audio path
  * construction — without requiring Tauri invoke mocks.

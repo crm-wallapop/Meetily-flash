@@ -87,17 +87,19 @@ interface StopFlowStep {
 }
 
 // Captures the slow-tail boundary in useRecordingStop.ts::handleRecordingStop.
-// Not a complete trace — intermediate steps (sessionStorage cleanup,
-// setCurrentMeeting, toast) are omitted; they don't affect the isSlowTail
-// boundary. Relative order within the slow-tail group is not asserted.
-// Keep this in sync manually when isSlowTail boundaries change.
+// Not a complete trace — intermediate steps (toast, analytics) are omitted;
+// they don't affect the isSlowTail boundary. Relative order within the
+// slow-tail group is not asserted. Keep this in sync manually when
+// isSlowTail boundaries change.
+//
+// After decouple-meeting-id-from-save: saveMeeting is no longer on the hot
+// path — the SQLite row is written by Rust background_shutdown. The stop
+// handler enqueues transcription and shows a toast; sidebar refresh happens
+// when the recording-saved-to-db event fires.
 const STOP_FLOW_STEPS: StopFlowStep[] = [
-  { name: 'setIsRecordingDisabled(false)',   isSlowTail: false }, // ← re-enable before HTTP save
-  { name: 'saveMeeting',                    isSlowTail: true  },
+  { name: 'setIsRecordingDisabled(false)',   isSlowTail: false },
   { name: 'enqueueTranscriptionJob',        isSlowTail: true  },
-  { name: 'markMeetingAsSaved',             isSlowTail: true  },
-  { name: 'refetchMeetings',                isSlowTail: true  },
-  { name: 'getMeeting',                     isSlowTail: true  },
+  { name: 'toast',                          isSlowTail: true  },
   { name: 'analytics',                      isSlowTail: true  },
 ];
 
@@ -108,9 +110,9 @@ describe('useRecordingStop re-enable ordering — documented contract (not enfor
     expect(reEnableIdx).toBeGreaterThanOrEqual(0);
   });
 
-  it('setIsRecordingDisabled(false) fires before saveMeeting', () => {
-    const saveMeetingIdx = STOP_FLOW_STEPS.findIndex(s => s.name === 'saveMeeting');
-    expect(reEnableIdx).toBeLessThan(saveMeetingIdx);
+  it('setIsRecordingDisabled(false) fires before enqueueTranscriptionJob', () => {
+    const enqueueIdx = STOP_FLOW_STEPS.findIndex(s => s.name === 'enqueueTranscriptionJob');
+    expect(reEnableIdx).toBeLessThan(enqueueIdx);
   });
 
   it('setIsRecordingDisabled(false) fires before every slow-tail operation', () => {
