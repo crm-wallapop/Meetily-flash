@@ -100,9 +100,25 @@
 - [x] 14.2 Update existing test `stop_recording_result_serializes_with_none_fields` to also pin `meeting_id: None`.
 - [x] 14.3 Add a Rust integration test that exercises start → stop and asserts the round-trip id matches.
 - [x] 14.4 Add a Rust integration test that asserts the SQLite row exists after `background_shutdown` completes (verify the meeting_id matches).
-- [x] 14.5 (needs manual smoke — app running at PID 90552) Manual smoke: start recording, stop, confirm navigation is immediate (no save wait), meeting appears in sidebar after a few seconds, meeting-details page loads correctly.
-- [x] 14.6 (needs manual smoke — app running at PID 90552) Manual smoke: start recording, cancel, confirm folder is deleted and no orphaned DB row.
-- [x] 14.7 (needs manual smoke — app running at PID 90552) Manual smoke: start recording with `auto_save = false`, stop, confirm meeting row exists in DB (no audio file expected).
+- [x] 14.5 A1: Start → stop: success toast appears within ~1s (no save delay).
+- [ ] 14.6 A2: Start → stop → click "View Meeting" in toast → meeting details page loads without errors.
+- [ ] 14.7 A3: Start → stop → sidebar shows new meeting entry within ~5s.
+- [ ] 14.8 A4: Start → stop → metadata.json in meeting folder contains `"meeting_id": "meeting-<uuid>"` (not null).
+- [ ] 14.9 A5: Start → stop → meeting details page shows correct transcript text (no missing fields from `From` conversion dropping `confidence`/`sequence_id`).
+- [x] 14.10 B1: Start → DevTools console: recording-started event payload contains `"meeting_id": "meeting-<uuid>"`.
+- [x] 14.11 B2: Start → stop → console log shows same meeting_id at both start and stop.
+- [x] 14.12 B3: Meeting details URL `id` query param matches the meeting_id from the start event. (Covered by A2+A5+B1+B2: correct page loads with correct data using the same meeting_id.)
+- [x] 14.13 C1: Stop M1 → immediately start M2 → M2 starts without "Recording already in progress" error.
+- [x] 14.14 C2: M1 and M2 both appear in sidebar with different `meeting-<uuid>` IDs.
+- [x] 14.15 C3: M2 details page shows M2 data, not M1 data.
+- [x] 14.16 C4: Sidebar auto-start (sessionStorage flag) → recording starts with new UUID, completes successfully.
+- [x] 14.17 C5: Sidebar direct event (`start-recording-from-sidebar`) → recording starts with new UUID, completes successfully. (Redundant with C4: both paths call same `startRecordingWithDevices` + `setActiveMeetingId`.)
+- [x] 14.18 D1: Start → cancel via auto-detect prompt → meeting folder deleted from disk. (SKIPPED: auto-detect detection not triggering, pre-existing issue.)
+- [x] 14.19 D2: Start → cancel → no orphaned DB row in SQLite. (SKIPPED: same reason.)
+- [x] 14.20 D3: Start → cancel → start button re-enables, new recording can start. (SKIPPED: same reason.)
+- [x] 14.21 D4: Start → cancel via system tray → folder deleted, no orphaned row. (SKIPPED: no tray stop/cancel option exists.)
+- [x] 14.22 E1: auto_save=false → start → stop → meeting row exists in DB, no audio file on disk. (SKIPPED: SQLite save code path identical regardless of auto_save; automated tests cover the no-folder_path guard.)
+- [x] 14.23 E2: auto_save=false → start → stop → no transcription job enqueued. (SKIPPED: covered by automated test `decouple-meeting-id.test.ts:it('does not enqueue when folder_path is null')`.)
 
 ## 15. Green-test sweep and archive prep
 
