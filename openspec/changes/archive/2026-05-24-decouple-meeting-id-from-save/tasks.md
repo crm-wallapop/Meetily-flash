@@ -101,10 +101,10 @@
 - [x] 14.3 Add a Rust integration test that exercises start → stop and asserts the round-trip id matches.
 - [x] 14.4 Add a Rust integration test that asserts the SQLite row exists after `background_shutdown` completes (verify the meeting_id matches).
 - [x] 14.5 A1: Start → stop: success toast appears within ~1s (no save delay).
-- [ ] 14.6 A2: Start → stop → click "View Meeting" in toast → meeting details page loads without errors.
-- [ ] 14.7 A3: Start → stop → sidebar shows new meeting entry within ~5s.
-- [ ] 14.8 A4: Start → stop → metadata.json in meeting folder contains `"meeting_id": "meeting-<uuid>"` (not null).
-- [ ] 14.9 A5: Start → stop → meeting details page shows correct transcript text (no missing fields from `From` conversion dropping `confidence`/`sequence_id`).
+- [x] 14.6 A2: Start → stop → click "View Meeting" in toast → meeting details page loads without errors.
+- [x] 14.7 A3: Start → stop → sidebar shows new meeting entry within ~5s.
+- [x] 14.8 A4: Start → stop → metadata.json in meeting folder contains `"meeting_id": "meeting-<uuid>"` (not null).
+- [x] 14.9 A5: Start → stop → meeting details page shows correct transcript text (no missing fields from `From` conversion dropping `confidence`/`sequence_id`).
 - [x] 14.10 B1: Start → DevTools console: recording-started event payload contains `"meeting_id": "meeting-<uuid>"`.
 - [x] 14.11 B2: Start → stop → console log shows same meeting_id at both start and stop.
 - [x] 14.12 B3: Meeting details URL `id` query param matches the meeting_id from the start event. (Covered by A2+A5+B1+B2: correct page loads with correct data using the same meeting_id.)
@@ -127,4 +127,4 @@
 - [x] 15.3 Run `pytest backend/` — green.
 - [x] 15.4 Run `pnpm lint && cargo clippy --all-targets -- -D warnings` — clean.
 - [x] 15.5 Re-read `openspec/changes/decouple-meeting-id-from-save/specs/recording-lifecycle/spec.md` and `design.md`. If the implementation diverged (e.g., a different regex, a different error type), amend the spec/design before archiving.
-- [ ] 15.6 Run `/opsx:archive` to move the change into `openspec/changes/archive/` and merge the recording-lifecycle delta into `openspec/specs/recording-lifecycle/spec.md`.
+- [x] 15.6 Run `/opsx:archive` to move the change into `openspec/changes/archive/` and merge the recording-lifecycle delta into `openspec/specs/recording-lifecycle/spec.md`.
