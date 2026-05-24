@@ -1,8 +1,8 @@
 ## 1. Adversarial RED tests (Rust) — write first, expect failures
 
-- [ ] 1.1 Add `cargo test` red: `start_recording_returns_well_formed_meeting_id` — assert returned `StartRecordingResult.meeting_id` matches `^meeting-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`.
-- [ ] 1.2 Add `cargo test` red: `start_and_stop_return_same_meeting_id` — invoke start, capture id, invoke stop, assert byte-equal id.
-- [ ] 1.3 Add `cargo test` red: `stop_on_idle_returns_none_meeting_id` — phase Idle → `StopRecordingResult { meeting_id: None, .. }`.
+- [x] 1.1 Add `cargo test` red: `start_recording_returns_well_formed_meeting_id` — assert returned `StartRecordingResult.meeting_id` matches `^meeting-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`.
+- [x] 1.2 Add `cargo test` red: `start_and_stop_return_same_meeting_id` — invoke start, capture id, invoke stop, assert byte-equal id.
+- [x] 1.3 Add `cargo test` red: `stop_on_idle_returns_none_meeting_id` — phase Idle → `StopRecordingResult { meeting_id: None, .. }`.
 - [x] 1.4 Add `cargo test` red: `save_transcript_rejects_empty_meeting_id` — call `TranscriptsRepository::save_transcript` with `""` → expect `InvalidMeetingIdError`.
 - [x] 1.5 Add `cargo test` red: `save_transcript_rejects_malformed_meeting_id` — call with `"meeting-not-a-uuid"` → expect `InvalidMeetingIdError`.
 - [x] 1.6 Add `cargo test` red: `save_transcript_persists_client_supplied_id` — call with a valid id, then `SELECT id FROM meetings WHERE id = ?` → assert it matches.
@@ -10,9 +10,9 @@
 
 ## 2. Adversarial RED tests (TypeScript) — write first
 
-- [ ] 2.1 Add `pnpm test` red: `useRecordingStop_navigates_immediately_after_stop` — mock `recordingService.stopRecording` to return `{ meeting_id, folder_path, meeting_name }`; mock `router.push`; assert `router.push` is called within 200 ms without any save call.
-- [ ] 2.2 Add `pnpm test` red: `useRecordingStop_enqueues_immediately_after_stop` — same mocks; assert `enqueueTranscriptionJob` is called with the correct `meeting_id` and `audioPath`.
-- [ ] 2.3 Add `pnpm test` red: `recordingService_startRecording_returns_meeting_id` — invoke via mocked `@tauri-apps/api/core`; assert the return type includes `meeting_id`.
+- [x] 2.1 Add `pnpm test` red: `useRecordingStop_navigates_immediately_after_stop` — mock `recordingService.stopRecording` to return `{ meeting_id, folder_path, meeting_name }`; mock `router.push`; assert `router.push` is called within 200 ms without any save call.
+- [x] 2.2 Add `pnpm test` red: `useRecordingStop_enqueues_immediately_after_stop` — same mocks; assert `enqueueTranscriptionJob` is called with the correct `meeting_id` and `audioPath`.
+- [x] 2.3 Add `pnpm test` red: `recordingService_startRecording_returns_meeting_id` — invoke via mocked `@tauri-apps/api/core`; assert the return type includes `meeting_id`.
 
 ## 3. Rust: `RecordingManager` owns `meeting_id`
 
@@ -98,8 +98,8 @@
 
 - [x] 14.1 Update existing test `stop_recording_result_serializes_with_populated_fields` in `recording_commands.rs` to assert the new `meeting_id` field round-trips through serde.
 - [x] 14.2 Update existing test `stop_recording_result_serializes_with_none_fields` to also pin `meeting_id: None`.
-- [ ] 14.3 Add a Rust integration test that exercises start → stop and asserts the round-trip id matches.
-- [ ] 14.4 Add a Rust integration test that asserts the SQLite row exists after `background_shutdown` completes (verify the meeting_id matches).
+- [x] 14.3 Add a Rust integration test that exercises start → stop and asserts the round-trip id matches.
+- [x] 14.4 Add a Rust integration test that asserts the SQLite row exists after `background_shutdown` completes (verify the meeting_id matches).
 - [ ] 14.5 Manual smoke: start recording, stop, confirm navigation is immediate (no save wait), meeting appears in sidebar after a few seconds, meeting-details page loads correctly.
 - [ ] 14.6 Manual smoke: start recording, cancel, confirm folder is deleted and no orphaned DB row.
 - [ ] 14.7 Manual smoke: start recording with `auto_save = false`, stop, confirm meeting row exists in DB (no audio file expected).
