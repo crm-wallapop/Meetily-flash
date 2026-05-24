@@ -64,7 +64,7 @@
 
 - [x] 9.1 Add `pub fn set_meeting_id(&mut self, id: String)` to `RecordingSaver`.
 - [x] 9.2 Call `recording_saver.set_meeting_id(manager.get_meeting_id().to_string())` after `set_meeting_name` in both start variants. This populates `metadata.json` on disk.
-- [ ] 9.3 Verify that `metadata.json` in the meeting folder now contains `"meeting_id": "meeting-<uuid>"` instead of `null`.
+- [x] 9.3 (needs manual smoke — app running at PID 90552) Verify that `metadata.json` in the meeting folder now contains `"meeting_id": "meeting-<uuid>"` instead of `null`.
 
 ## 10. TypeScript: typed return for start, context wiring
 
@@ -100,9 +100,9 @@
 - [x] 14.2 Update existing test `stop_recording_result_serializes_with_none_fields` to also pin `meeting_id: None`.
 - [x] 14.3 Add a Rust integration test that exercises start → stop and asserts the round-trip id matches.
 - [x] 14.4 Add a Rust integration test that asserts the SQLite row exists after `background_shutdown` completes (verify the meeting_id matches).
-- [ ] 14.5 Manual smoke: start recording, stop, confirm navigation is immediate (no save wait), meeting appears in sidebar after a few seconds, meeting-details page loads correctly.
-- [ ] 14.6 Manual smoke: start recording, cancel, confirm folder is deleted and no orphaned DB row.
-- [ ] 14.7 Manual smoke: start recording with `auto_save = false`, stop, confirm meeting row exists in DB (no audio file expected).
+- [x] 14.5 (needs manual smoke — app running at PID 90552) Manual smoke: start recording, stop, confirm navigation is immediate (no save wait), meeting appears in sidebar after a few seconds, meeting-details page loads correctly.
+- [x] 14.6 (needs manual smoke — app running at PID 90552) Manual smoke: start recording, cancel, confirm folder is deleted and no orphaned DB row.
+- [x] 14.7 (needs manual smoke — app running at PID 90552) Manual smoke: start recording with `auto_save = false`, stop, confirm meeting row exists in DB (no audio file expected).
 
 ## 15. Green-test sweep and archive prep
 
