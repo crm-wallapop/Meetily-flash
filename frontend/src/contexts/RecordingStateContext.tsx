@@ -148,7 +148,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     const setupListeners = async () => {
       try {
         // Recording started
-        const unlistenStarted = await recordingService.onRecordingStarted(() => {
+        const unlistenStarted = await recordingService.onRecordingStarted((_event) => {
           console.log('[RecordingStateContext] Recording started event');
           setState(prev => ({
             ...prev,

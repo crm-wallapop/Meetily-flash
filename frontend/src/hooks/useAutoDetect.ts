@@ -37,7 +37,7 @@ export function useAutoDetect({
   setIsRecording,
 }: UseAutoDetectProps) {
   const { autoDetectMeetings } = useConfig();
-  const { setMeetingTitle } = useTranscripts();
+  const { setMeetingTitle, activeMeetingId } = useTranscripts();
 
   const [banner, setBanner] = useState<AutoDetectBannerState>({
     visible: false,
@@ -167,8 +167,7 @@ export function useAutoDetect({
         // best effort — even if this fails the recording is cancelled
       }
       try {
-        // Pass an empty meeting_id; cancel_recording_impl finds the folder from the manager
-        await invoke('cancel_recording', { meeting_id: '' });
+        await invoke('cancel_recording', { meeting_id: activeMeetingId || '' });
       } catch (err) {
         console.error('[useAutoDetect] cancel_recording failed:', err);
       }

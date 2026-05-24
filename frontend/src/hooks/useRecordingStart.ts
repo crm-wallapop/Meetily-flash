@@ -19,7 +19,7 @@ export function useRecordingStart(
 ): UseRecordingStartReturn {
   const [isAutoStarting, setIsAutoStarting] = useState(false);
 
-  const { clearTranscripts, setMeetingTitle } = useTranscripts();
+  const { clearTranscripts, setMeetingTitle, setActiveMeetingId } = useTranscripts();
   const { setIsMeetingActive } = useSidebar();
   const { selectedDevices } = useConfig();
   const { setStatus } = useRecordingState();
@@ -41,11 +41,12 @@ export function useRecordingStart(
       setMeetingTitle(title);
       setStatus(RecordingStatus.STARTING, 'Initializing recording...');
 
-      await recordingService.startRecordingWithDevices(
+      const result = await recordingService.startRecordingWithDevices(
         selectedDevices?.micDevice || null,
         selectedDevices?.systemDevice || null,
         title
       );
+      setActiveMeetingId(result.meeting_id);
 
       setIsRecording(true);
       clearTranscripts();
@@ -59,7 +60,7 @@ export function useRecordingStart(
       Analytics.trackButtonClick('start_recording_error', 'home_page');
       throw error;
     }
-  }, [generateMeetingTitle, setMeetingTitle, setIsRecording, clearTranscripts, setIsMeetingActive, selectedDevices, setStatus]);
+  }, [generateMeetingTitle, setMeetingTitle, setIsRecording, clearTranscripts, setIsMeetingActive, selectedDevices, setStatus, setActiveMeetingId]);
 
   // Auto-start from sidebar navigation (sessionStorage flag)
   useEffect(() => {
@@ -78,7 +79,7 @@ export function useRecordingStart(
           selectedDevices?.micDevice || null,
           selectedDevices?.systemDevice || null,
           title
-        );
+        ).then(r => { setActiveMeetingId(r.meeting_id); return r; });
         setMeetingTitle(title);
         setIsRecording(true);
         clearTranscripts();
@@ -95,7 +96,7 @@ export function useRecordingStart(
     };
 
     checkAutoStart();
-  }, [isRecording, isAutoStarting, selectedDevices, generateMeetingTitle, setMeetingTitle, setIsRecording, clearTranscripts, setIsMeetingActive, setStatus]);
+  }, [isRecording, isAutoStarting, selectedDevices, generateMeetingTitle, setMeetingTitle, setIsRecording, clearTranscripts, setIsMeetingActive, setStatus, setActiveMeetingId]);
 
   // Direct trigger from sidebar when already on the home page
   useEffect(() => {
@@ -110,7 +111,7 @@ export function useRecordingStart(
           selectedDevices?.micDevice || null,
           selectedDevices?.systemDevice || null,
           title
-        );
+        ).then(r => { setActiveMeetingId(r.meeting_id); return r; });
         setMeetingTitle(title);
         setIsRecording(true);
         clearTranscripts();
@@ -128,7 +129,7 @@ export function useRecordingStart(
 
     window.addEventListener('start-recording-from-sidebar', handleDirectStart);
     return () => window.removeEventListener('start-recording-from-sidebar', handleDirectStart);
-  }, [isRecording, isAutoStarting, selectedDevices, generateMeetingTitle, setMeetingTitle, setIsRecording, clearTranscripts, setIsMeetingActive, setStatus]);
+  }, [isRecording, isAutoStarting, selectedDevices, generateMeetingTitle, setMeetingTitle, setIsRecording, clearTranscripts, setIsMeetingActive, setStatus, setActiveMeetingId]);
 
   return { handleRecordingStart, isAutoStarting };
 }

@@ -24,6 +24,11 @@ export interface RecordingStoppedPayload {
   message: string;
   folder_path?: string;
   meeting_name?: string;
+  meeting_id?: string;
+}
+
+export interface StartRecordingResult {
+  meeting_id: string;
 }
 
 /**
@@ -35,6 +40,7 @@ export interface RecordingStoppedPayload {
 export interface StopRecordingResult {
   folder_path: string | null;
   meeting_name: string | null;
+  meeting_id: string | null;
 }
 
 /**
@@ -47,6 +53,11 @@ export interface RecordingSavedPayload {
   transcript_file?: string;
   meeting_name?: string;
   meeting_folder?: string;
+  meeting_id?: string;
+}
+
+export interface RecordingSavedToDbPayload {
+  meeting_id: string;
 }
 
 export interface RecordingStateChangedPayload {
@@ -84,10 +95,10 @@ export class RecordingService {
 
   /**
    * Start recording (no device configuration)
-   * @returns Promise<void>
+   * @returns Promise with meeting_id
    */
-  async startRecording(): Promise<void> {
-    return invoke('start_recording');
+  async startRecording(): Promise<StartRecordingResult> {
+    return invoke<StartRecordingResult>('start_recording');
   }
 
   /**
@@ -95,14 +106,14 @@ export class RecordingService {
    * @param micDeviceName - Microphone device name (null for default)
    * @param systemDeviceName - System audio device name (null for none)
    * @param meetingName - Meeting name/title
-   * @returns Promise<void>
+   * @returns Promise with meeting_id
    */
   async startRecordingWithDevices(
     micDeviceName: string | null,
     systemDeviceName: string | null,
     meetingName: string
-  ): Promise<void> {
-    return invoke('start_recording_with_devices_and_meeting', {
+  ): Promise<StartRecordingResult> {
+    return invoke<StartRecordingResult>('start_recording_with_devices_and_meeting', {
       mic_device_name: micDeviceName,
       system_device_name: systemDeviceName,
       meeting_name: meetingName
@@ -141,8 +152,10 @@ export class RecordingService {
    * @param callback - Function to call when recording starts
    * @returns Promise that resolves to unlisten function
    */
-  async onRecordingStarted(callback: () => void): Promise<UnlistenFn> {
-    return listen('recording-started', callback);
+  async onRecordingStarted(callback: (event: Record<string, unknown>) => void): Promise<UnlistenFn> {
+    return listen<Record<string, unknown>>('recording-started', (event) => {
+      callback(event.payload);
+    });
   }
 
   /**
@@ -206,6 +219,16 @@ export class RecordingService {
    */
   async onRecordingSaved(callback: (payload: RecordingSavedPayload) => void): Promise<UnlistenFn> {
     return listen<RecordingSavedPayload>('recording-saved', (event) => {
+      callback(event.payload);
+    });
+  }
+
+  /**
+   * Listen for recording-saved-to-db event (SQLite row committed by background_shutdown).
+   * Use this to trigger sidebar refresh and mark the meeting as saved.
+   */
+  async onRecordingSavedToDb(callback: (payload: RecordingSavedToDbPayload) => void): Promise<UnlistenFn> {
+    return listen<RecordingSavedToDbPayload>('recording-saved-to-db', (event) => {
       callback(event.payload);
     });
   }

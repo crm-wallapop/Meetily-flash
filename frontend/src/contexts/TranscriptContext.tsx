@@ -20,6 +20,8 @@ interface TranscriptContextType {
   clearTranscripts: () => void;
   currentMeetingId: string | null;
   markMeetingAsSaved: () => Promise<void>;
+  activeMeetingId: string | null;
+  setActiveMeetingId: (id: string | null) => void;
 }
 
 const TranscriptContext = createContext<TranscriptContextType | undefined>(undefined);
@@ -28,6 +30,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
   const [transcripts, setTranscripts] = useState<Transcript[]>([]);
   const [meetingTitle, setMeetingTitle] = useState('+ New Call');
   const [currentMeetingId, setCurrentMeetingId] = useState<string | null>(null);
+  const [activeMeetingId, setActiveMeetingId] = useState<string | null>(null);
 
   // Recording state context - provides backend-synced state
   const recordingState = useRecordingState();
@@ -91,11 +94,16 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
         await indexedDBService.init();
 
         // Listen for recording-started event
-        unlistenRecordingStarted = await recordingService.onRecordingStarted(async () => {
+        unlistenRecordingStarted = await recordingService.onRecordingStarted(async (event) => {
           try {
+            // Capture meeting_id from Rust if present in the event payload.
+            const payload = event.payload as Record<string, unknown> | undefined;
+            const rustMeetingId = payload?.meeting_id as string | undefined;
+
             // Track meeting ID for markMeetingAsSaved (used by useRecordingStop).
-            const meetingId = `meeting-${Date.now()}`;
+            const meetingId = rustMeetingId || `meeting-${Date.now()}`;
             setCurrentMeetingId(meetingId);
+            setActiveMeetingId(rustMeetingId || null);
             sessionStorage.setItem('indexeddb_current_meeting_id', meetingId);
 
             // Get meeting name and sync title to state (fixes tray stop title issue).
@@ -394,6 +402,8 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
     clearTranscripts,
     currentMeetingId,
     markMeetingAsSaved,
+    activeMeetingId,
+    setActiveMeetingId,
   };
 
   return (

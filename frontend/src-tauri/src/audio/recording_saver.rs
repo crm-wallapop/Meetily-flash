@@ -75,6 +75,18 @@ impl RecordingSaver {
         self.meeting_name = name;
     }
 
+    pub fn set_meeting_id(&mut self, id: String) {
+        if let Some(ref mut metadata) = self.metadata {
+            metadata.meeting_id = Some(id);
+            if let Some(folder) = &self.meeting_folder {
+                let metadata_clone = metadata.clone();
+                if let Err(e) = self.write_metadata(folder, &metadata_clone) {
+                    warn!("Failed to update metadata with meeting_id: {}", e);
+                }
+            }
+        }
+    }
+
     /// Set device information in metadata
     pub fn set_device_info(&mut self, mic_name: Option<String>, sys_name: Option<String>) {
         if let Some(ref mut metadata) = self.metadata {
@@ -407,7 +419,8 @@ impl RecordingSaver {
                 .map(|f| f.join("transcripts.json").to_string_lossy().to_string()),
             "meeting_name": self.meeting_name,
             "meeting_folder": self.meeting_folder.as_ref()
-                .map(|f| f.to_string_lossy().to_string())
+                .map(|f| f.to_string_lossy().to_string()),
+            "meeting_id": self.metadata.as_ref().and_then(|m| m.meeting_id.as_ref()),
         });
 
         if let Err(e) = app.emit("recording-saved", &save_event) {

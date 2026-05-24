@@ -94,12 +94,20 @@ static RECORDING_MANAGER: Mutex<Option<RecordingManager>> = Mutex::new(None);
 // PUBLIC TYPES
 // ============================================================================
 
+/// Result returned synchronously from `start_recording` so the frontend has the
+/// meeting_id before any event fires. The id is immutable for the recording's lifetime.
+#[derive(Debug, Serialize, Clone)]
+pub struct StartRecordingResult {
+    pub meeting_id: String,
+}
+
 /// Result returned synchronously from `stop_recording` so the frontend save flow
-/// has the meeting's folder/name without waiting for the background finalize.
+/// has the meeting's id/folder/name without waiting for the background finalize.
 /// The `recording-stopped` event still fires (at the same moment) for any listener
 /// that needs the side-channel; `recording-saved` fires later when audio.mp4 is on disk.
 #[derive(Debug, Serialize, Clone)]
 pub struct StopRecordingResult {
+    pub meeting_id: Option<String>,
     pub folder_path: Option<String>,
     pub meeting_name: Option<String>,
 }
@@ -116,7 +124,7 @@ pub struct TranscriptionStatus {
 // ============================================================================
 
 /// Start recording with default devices
-pub async fn start_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+pub async fn start_recording<R: Runtime>(app: AppHandle<R>) -> Result<StartRecordingResult, String> {
     start_recording_with_meeting_name(app, None).await
 }
 
@@ -149,7 +157,7 @@ pub(crate) fn can_start_recording(phase: RecordingPhase) -> Result<(), String> {
 pub async fn start_recording_with_meeting_name<R: Runtime>(
     app: AppHandle<R>,
     meeting_name: Option<String>,
-) -> Result<(), String> {
+) -> Result<StartRecordingResult, String> {
     info!(
         "Starting recording with default devices, meeting: {:?}",
         meeting_name
@@ -305,6 +313,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
 
+    // Capture meeting_id before the manager moves into the global mutex.
+    let meeting_id = manager.get_meeting_id().to_string();
+    manager.set_meeting_id(meeting_id.clone());
+
     // Store the manager globally, atomically claiming Recording phase.
     // fetch_update rejects only if another start_recording already won the race
     // (phase == Recording). It accepts Idle and Saving — the latter is the M2 back-to-back
@@ -340,6 +352,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Emit success event
     app.emit("recording-started", serde_json::json!({
         "message": "Recording started successfully",
+        "meeting_id": meeting_id,
         "devices": ["Default Microphone", "Default System Audio"],
     })).map_err(|e| e.to_string())?;
 
@@ -348,7 +361,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     info!("✅ Recording started successfully with async-first approach");
 
-    Ok(())
+    Ok(StartRecordingResult { meeting_id })
 }
 
 /// Start recording with specific devices
@@ -356,7 +369,7 @@ pub async fn start_recording_with_devices<R: Runtime>(
     app: AppHandle<R>,
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
-) -> Result<(), String> {
+) -> Result<StartRecordingResult, String> {
     start_recording_with_devices_and_meeting(app, mic_device_name, system_device_name, None).await
 }
 
@@ -366,7 +379,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
     meeting_name: Option<String>,
-) -> Result<(), String> {
+) -> Result<StartRecordingResult, String> {
     info!(
         "Starting recording with specific devices: mic={:?}, system={:?}, meeting={:?}",
         mic_device_name, system_device_name, meeting_name
@@ -445,6 +458,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
 
+    // Capture meeting_id before the manager moves into the global mutex.
+    let meeting_id = manager.get_meeting_id().to_string();
+    manager.set_meeting_id(meeting_id.clone());
+
     // Store the manager globally, atomically claiming Recording phase.
     // fetch_update rejects only if another start_recording already won the race
     // (phase == Recording). Accepts Idle and Saving (M2 back-to-back case). See the
@@ -477,6 +494,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Emit success event
     app.emit("recording-started", serde_json::json!({
         "message": "Recording started with custom devices",
+        "meeting_id": meeting_id,
         "devices": [
             mic_device_name.unwrap_or_else(|| "Default Microphone".to_string()),
             system_device_name.unwrap_or_else(|| "Default System Audio".to_string())
@@ -488,7 +506,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     info!("✅ Recording started with custom devices using async-first approach");
 
-    Ok(())
+    Ok(StartRecordingResult { meeting_id })
 }
 
 /// Stop recording: synchronous path releases streams and transitions to Saving;
@@ -505,11 +523,11 @@ where
     match current_phase() {
         RecordingPhase::Idle => {
             info!("Recording was not active");
-            return Ok(StopRecordingResult { folder_path: None, meeting_name: None });
+            return Ok(StopRecordingResult { meeting_id: None, folder_path: None, meeting_name: None });
         }
         RecordingPhase::Saving => {
             info!("Recording already in Saving phase — ignoring duplicate stop");
-            return Ok(StopRecordingResult { folder_path: None, meeting_name: None });
+            return Ok(StopRecordingResult { meeting_id: None, folder_path: None, meeting_name: None });
         }
         RecordingPhase::Recording => {}
     }
@@ -539,7 +557,7 @@ where
             .is_err()
         {
             // Another concurrent stop already won (phase ≠ Recording). Nothing to do.
-            return Ok(StopRecordingResult { folder_path: None, meeting_name: None });
+            return Ok(StopRecordingResult { meeting_id: None, folder_path: None, meeting_name: None });
         }
         global_manager.take()
     };
@@ -566,10 +584,13 @@ where
             )
         });
 
-    // Extract folder/name now (synchronously) so we can return them AND emit recording-stopped
-    // before the manager moves into the background task. The frontend save flow needs these
+    // Extract id/folder/name now (synchronously) so we can return them AND emit recording-stopped
+    // before the manager moves into the background task. The frontend needs these
     // values immediately — without them, meetings get saved with null folder_path and the
     // audio file (created later by background_shutdown) is never linked to the DB row.
+    let meeting_id: Option<String> = manager_for_background
+        .as_ref()
+        .map(|m| m.get_meeting_id().to_string());
     let folder_path: Option<String> = manager_for_background
         .as_ref()
         .and_then(|m| m.get_meeting_folder().map(|p| p.to_string_lossy().to_string()));
@@ -589,6 +610,7 @@ where
         "recording-stopped",
         serde_json::json!({
             "message": "Recording stopped - audio is being finalized in background",
+            "meeting_id": meeting_id,
             "folder_path": folder_path,
             "meeting_name": meeting_name,
         }),
@@ -671,7 +693,7 @@ where
     // populated. The audio file itself is finalized asynchronously and announced via
     // recording-saved later.
     info!("✅ stop_recording returned (background shutdown running)");
-    Ok(StopRecordingResult { folder_path, meeting_name })
+    Ok(StopRecordingResult { meeting_id, folder_path, meeting_name })
 }
 
 /// All shutdown work that does NOT need to block the frontend.
@@ -741,7 +763,6 @@ async fn background_shutdown<R: Runtime>(
             Ok(Ok(_)) => {
                 info!("✅ Recording saved");
                 save_attempted.store(true, Ordering::SeqCst);
-                clear_gate_and_resume!();
             }
             Ok(Err(e)) => {
                 warn!("⚠️ Save error (transcripts preserved): {}", e);
@@ -758,8 +779,40 @@ async fn background_shutdown<R: Runtime>(
         }
     } else {
         save_attempted.store(true, Ordering::SeqCst);
-        clear_gate_and_resume!();
     }
+
+    // SQLite save: persists meeting row + transcript segments so the queue worker
+    // can find the meeting when it dequeues the transcription job.
+    if let Some(ref mgr) = manager {
+        let mid = mgr.get_meeting_id().to_string();
+        let mname = mgr.get_meeting_name().unwrap_or_default();
+        let mfolder = mgr.get_meeting_folder().map(|p| p.to_string_lossy().to_string());
+        let segments: Vec<crate::api::api::TranscriptSegment> =
+            mgr.get_transcript_segments().into_iter().map(Into::into).collect();
+
+        match app.state::<crate::state::AppState>() {
+            state => {
+                let pool = state.db_manager.pool();
+                use crate::database::repositories::transcript::{TranscriptSaveError, TranscriptsRepository};
+                match TranscriptsRepository::save_transcript(pool, &mid, &mname, &segments, mfolder).await {
+                    Ok(()) => {
+                        info!("✅ SQLite row saved for meeting {}", mid);
+                        let _ = app.emit("recording-saved-to-db", serde_json::json!({ "meeting_id": mid }));
+                    }
+                    Err(TranscriptSaveError::MeetingAlreadyExists(_)) => {
+                        info!("ℹ️ SQLite row already exists for meeting {} (idempotent)", mid);
+                    }
+                    Err(e) => {
+                        error!("❌ SQLite save failed for meeting {}: {}", mid, e);
+                        let _ = app.emit("recording-save-failed", serde_json::json!({ "error": e.to_string() }));
+                    }
+                }
+            }
+        }
+    }
+
+    // Gate clears AFTER both audio file and SQLite row are in place.
+    clear_gate_and_resume!();
 
     // Analytics runs after phase=Idle so M2 can start recording while this completes.
     if let Some((total_dur, active_dur, pause_dur, segments, had_error, mic_name, sys_name, chunks)) = analytics_snapshot {
@@ -1064,6 +1117,10 @@ pub async fn cancel_recording_impl(
     use crate::database::manager::DatabaseManager;
 
     info!("🚫 cancel_recording called for meeting_id={}", meeting_id);
+
+    if meeting_id.is_empty() {
+        warn!("⚠️ cancel_recording called with empty meeting_id — folder deletion will proceed without DB cleanup");
+    }
 
     let folder = cancel_audio_capture_inner();
 
@@ -1594,11 +1651,13 @@ mod tests {
     #[test]
     fn stop_recording_result_serializes_with_none_fields() {
         let result = StopRecordingResult {
+            meeting_id: None,
             folder_path: None,
             meeting_name: None,
         };
         let json = serde_json::to_value(&result).expect("must serialize");
         assert!(json.is_object(), "StopRecordingResult must serialize as JSON object");
+        assert_eq!(json.get("meeting_id"), Some(&serde_json::Value::Null));
         assert_eq!(json.get("folder_path"), Some(&serde_json::Value::Null));
         assert_eq!(json.get("meeting_name"), Some(&serde_json::Value::Null));
     }
@@ -1606,10 +1665,16 @@ mod tests {
     #[test]
     fn stop_recording_result_serializes_with_populated_fields() {
         let result = StopRecordingResult {
+            meeting_id: Some("meeting-550e8400-e29b-41d4-a716-446655440000".to_string()),
             folder_path: Some("C:/recordings/Meeting 2026-01-01_00-00-04".to_string()),
             meeting_name: Some("Standup".to_string()),
         };
         let json = serde_json::to_value(&result).expect("must serialize");
+        assert_eq!(
+            json.get("meeting_id").and_then(|v| v.as_str()),
+            Some("meeting-550e8400-e29b-41d4-a716-446655440000"),
+            "meeting_id must round-trip through serde for frontend consumption"
+        );
         assert_eq!(
             json.get("folder_path").and_then(|v| v.as_str()),
             Some("C:/recordings/Meeting 2026-01-01_00-00-04"),

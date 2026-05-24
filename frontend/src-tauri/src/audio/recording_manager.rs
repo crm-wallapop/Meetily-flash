@@ -31,6 +31,7 @@ pub struct RecordingManager {
     device_event_receiver: Option<mpsc::UnboundedReceiver<DeviceEvent>>,
     /// Noise gate floor in dBFS stored at recording start; used on stream reconnect.
     gate_floor_dbfs: i32,
+    meeting_id: String,
 }
 
 // SAFETY: RecordingManager contains types that we've marked as Send
@@ -52,6 +53,7 @@ impl RecordingManager {
             device_monitor: Some(device_monitor),
             gate_floor_dbfs: -30,
             device_event_receiver: Some(device_event_receiver),
+            meeting_id: format!("meeting-{}", uuid::Uuid::new_v4()),
         }
     }
 
@@ -442,6 +444,10 @@ impl RecordingManager {
         self.recording_saver.set_meeting_name(name);
     }
 
+    pub fn set_meeting_id(&mut self, id: String) {
+        self.recording_saver.set_meeting_id(id);
+    }
+
     /// Add a structured transcript segment to be saved later
     pub fn add_transcript_segment(&self, segment: super::recording_saver::TranscriptSegment) {
         self.recording_saver.add_transcript_segment(segment);
@@ -462,6 +468,10 @@ impl RecordingManager {
     /// Used for syncing frontend state after page reload during active recording
     pub fn get_meeting_name(&self) -> Option<String> {
         self.recording_saver.get_meeting_name()
+    }
+
+    pub fn get_meeting_id(&self) -> &str {
+        &self.meeting_id
     }
 
     /// Cleanup all resources without saving
@@ -617,7 +627,21 @@ impl Default for RecordingManager {
 
 impl Drop for RecordingManager {
     fn drop(&mut self) {
-        // Note: Can't call async cleanup in Drop, but streams have their own Drop implementations
         self.state.cleanup();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Task 3.4: two RecordingManager::new() calls produce different ids
+    #[test]
+    fn two_managers_have_different_meeting_ids() {
+        let a = RecordingManager::new();
+        let b = RecordingManager::new();
+        assert_ne!(a.get_meeting_id(), b.get_meeting_id());
+        assert!(a.get_meeting_id().starts_with("meeting-"));
+        assert!(b.get_meeting_id().starts_with("meeting-"));
     }
 }

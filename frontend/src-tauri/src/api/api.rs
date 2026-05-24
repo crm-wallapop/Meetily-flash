@@ -190,6 +190,19 @@ pub struct TranscriptSegment {
     pub duration: Option<f64>,
 }
 
+impl From<crate::audio::recording_saver::TranscriptSegment> for TranscriptSegment {
+    fn from(s: crate::audio::recording_saver::TranscriptSegment) -> Self {
+        Self {
+            id: s.id,
+            text: s.text,
+            timestamp: s.display_time,
+            audio_start_time: Some(s.audio_start_time),
+            audio_end_time: Some(s.audio_end_time),
+            duration: Some(s.duration),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Profile {
     pub id: String,
@@ -934,13 +947,15 @@ pub async fn api_save_transcript<R: Runtime>(
     transcripts: Vec<serde_json::Value>,
     folder_path: Option<String>,
     auth_token: Option<String>,
+    meeting_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     log_info!(
-        "api_save_transcript called for meeting: {}, transcripts: {}, folder_path: {:?}, auth_token: {}",
+        "api_save_transcript called for meeting: {}, transcripts: {}, folder_path: {:?}, auth_token: {}, meeting_id: {:?}",
         meeting_title,
         transcripts.len(),
         folder_path,
-        auth_token.is_some()
+        auth_token.is_some(),
+        meeting_id
     );
 
     // Log first transcript for debugging
@@ -972,24 +987,27 @@ pub async fn api_save_transcript<R: Runtime>(
 
     let pool = state.db_manager.pool();
 
-    // Now, call the repository with the correctly typed data.
+    // Use client-supplied meeting_id when present; otherwise mint one for backward compat.
+    let id = meeting_id.unwrap_or_else(|| format!("meeting-{}", uuid::Uuid::new_v4()));
+
     match TranscriptsRepository::save_transcript(
         pool,
+        &id,
         &meeting_title,
         &transcripts_to_save,
         folder_path,
     )
     .await
     {
-        Ok(meeting_id) => {
+        Ok(()) => {
             log_info!(
                 "Successfully saved transcript and created meeting with id: {}",
-                meeting_id
+                id
             );
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Transcript saved successfully",
-                "meeting_id": meeting_id
+                "meeting_id": id
             }))
         }
         Err(e) => {
@@ -1379,5 +1397,34 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                 Err(format!("Connection failed: {}", e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Task 7.2: From conversion is lossless for all persisted fields
+    #[test]
+    fn from_recording_saver_segment_preserves_all_persisted_fields() {
+        let saver_seg = crate::audio::recording_saver::TranscriptSegment {
+            id: "seg-1".into(),
+            text: "hello world".into(),
+            audio_start_time: 1.5,
+            audio_end_time: 3.7,
+            duration: 2.2,
+            display_time: "[01:30]".into(),
+            confidence: 0.95,
+            sequence_id: 42,
+        };
+
+        let api_seg: TranscriptSegment = saver_seg.into();
+
+        assert_eq!(api_seg.id, "seg-1");
+        assert_eq!(api_seg.text, "hello world");
+        assert_eq!(api_seg.timestamp, "[01:30]");
+        assert_eq!(api_seg.audio_start_time, Some(1.5));
+        assert_eq!(api_seg.audio_end_time, Some(3.7));
+        assert_eq!(api_seg.duration, Some(2.2));
     }
 }

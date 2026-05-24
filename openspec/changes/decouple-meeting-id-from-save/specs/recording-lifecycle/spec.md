@@ -54,75 +54,109 @@ The recording lifecycle SHALL be the canonical source of the meeting identifier.
 
 ---
 
-### Requirement: Stop hook navigation and queue enqueue do not block on SQLite save
+### Requirement: SQLite save runs in `background_shutdown` before gate clears
 
-The frontend stop handler SHALL invoke `enqueueTranscriptionJob(meeting_id, audio_path)` and `router.push('/meeting-details?id=' + meeting_id)` WITHOUT awaiting the SQLite save. The save call (`storageService.saveMeeting`) SHALL run in the background; its rejection SHALL surface as a toast but SHALL NOT block navigation or enqueueing.
+The `background_shutdown` task SHALL call `TranscriptsRepository::save_transcript` with the start-time `meeting_id`, meeting name, transcript segments, and folder path AFTER `save_recording_only` (audio.mp4) completes, and BEFORE `clear_gate_and_resume!()`. This guarantees the SQLite row exists when the queue worker dequeues the transcription job.
 
-Concretely: the user-visible time from `stop_recording` resolving to navigation initiation SHALL NOT exceed **200 ms** under normal conditions, and SHALL NOT scale with the size of the transcript array.
+The save SHALL run regardless of whether `auto_save` is enabled — the meeting row and transcript rows are independent of audio file existence.
 
-#### Scenario: Navigation is initiated within 200 ms of stop_recording resolving
+On `MeetingAlreadyExistsError`, the save SHALL be treated as idempotent success (log and continue). On other errors, `background_shutdown` SHALL log the error, emit `recording-save-failed`, and still clear the gate.
 
-- **GIVEN** a recording with N transcript segments (any N from 1 to 10000)
-- **WHEN** `stop_recording` resolves at time T
-- **THEN** `router.push('/meeting-details?id=' + meeting_id)` is invoked no later than `T + 200ms`
-- **AND** the value of N has no measurable effect on this delay
+After successful save, `background_shutdown` SHALL emit `recording-saved-to-db { meeting_id }` so the frontend can update the sidebar and mark the meeting as saved.
 
-#### Scenario: Queue enqueue happens before SQLite save commits
+#### Scenario: SQLite row exists before queue worker runs
 
-- **GIVEN** a recording has just stopped
-- **WHEN** the frontend stop handler runs
-- **THEN** `enqueueTranscriptionJob(meeting_id, audio_path)` is invoked before `storageService.saveMeeting` resolves
-- **AND** the queue accepts the job (no existence check on the meeting row)
-- **AND** the worker remains gated on `recording_busy` until `background_shutdown` clears it after the save completes
+- **GIVEN** `stop_recording` returned `meeting_id = M` and the frontend enqueued a transcription job
+- **WHEN** `background_shutdown` completes and `clear_gate_and_resume!()` fires
+- **THEN** the `meetings` table has a row with `id = M`
+- **AND** the queue worker can dequeue the job and find the row
 
-#### Scenario: SQLite save failure does not block navigation
+#### Scenario: SQLite save with auto_save disabled
 
-- **GIVEN** the SQLite save will fail (e.g., disk full or `UNIQUE` violation)
-- **WHEN** the user stops a recording
-- **THEN** navigation to `/meeting-details?id=<meeting_id>` still happens within 200 ms
-- **AND** a toast surfaces the save error
-- **AND** the user can attempt re-save or re-enqueue from the meeting-details page
+- **GIVEN** `auto_save` is `false` (no audio file)
+- **WHEN** `background_shutdown` runs
+- **THEN** `save_recording_only` returns early (no audio)
+- **AND** the SQLite save still runs, creating the meeting row and transcript rows
+- **AND** no `recording-saved` event fires (no audio.mp4), but `recording-saved-to-db` fires
+
+#### Scenario: Duplicate save is idempotent
+
+- **GIVEN** a row with `id = M` already exists (e.g., from a stale retry)
+- **WHEN** `background_shutdown` calls `save_transcript` with `meeting_id = M`
+- **THEN** the call returns `MeetingAlreadyExistsError`
+- **AND** the error is treated as idempotent success
+- **AND** `clear_gate_and_resume!()` proceeds normally
 
 ---
 
-### Requirement: `api_save_transcript` accepts and validates a client-supplied meeting_id
+### Requirement: Frontend stop hook navigates and enqueues without IPC save
 
-`api_save_transcript` (Rust Tauri command) and `TranscriptsRepository::save_transcript` SHALL accept `meeting_id: String` as a required parameter and use it as the value of `INSERT INTO meetings (id, ...)`. The repository SHALL NOT mint a new UUID. The parameter SHALL be validated against `^meeting-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` before any DB interaction. A SQLite `UNIQUE` violation on the `meetings.id` column SHALL be surfaced as a distinguishable error (e.g., `MeetingAlreadyExistsError`) so the frontend can treat it as idempotent.
+The frontend stop handler SHALL invoke `enqueueTranscriptionJob(meeting_id, audio_path)` (when `folder_path` is non-null) and show a toast with a "View Meeting" action WITHOUT calling `storageService.saveMeeting()`. The SQLite save is handled by Rust's `background_shutdown`.
+
+The frontend SHALL listen for `recording-saved-to-db { meeting_id }` to trigger `refetchMeetings()` and `markMeetingAsSaved()`. The frontend SHALL listen for `recording-save-failed { error }` to show an error toast.
+
+Concretely: the user-visible time from `stop_recording` resolving to the toast appearing SHALL NOT exceed **200 ms** under normal conditions, and SHALL NOT scale with the size of the transcript array.
+
+#### Scenario: Toast appears within 200 ms of stop_recording resolving
+
+- **GIVEN** a recording with N transcript segments (any N from 1 to 10000)
+- **WHEN** `stop_recording` resolves at time T
+- **THEN** the success toast with "View Meeting" action is shown no later than `T + 200ms`
+- **AND** the value of N has no measurable effect on this delay
+
+#### Scenario: Queue enqueue happens immediately after stop
+
+- **GIVEN** a recording has just stopped with a non-null `folder_path`
+- **WHEN** the frontend stop handler runs
+- **THEN** `enqueueTranscriptionJob(meeting_id, audio_path)` is invoked
+- **AND** no `storageService.saveMeeting()` call is made
+
+#### Scenario: recording-save-failed surfaces as toast
+
+- **GIVEN** the SQLite save in `background_shutdown` fails
+- **WHEN** the frontend receives `recording-save-failed`
+- **THEN** an error toast is shown
+- **AND** the user can retry from the meeting-details page
+
+---
+
+### Requirement: `TranscriptsRepository::save_transcript` accepts and validates a client-supplied meeting_id
+
+`TranscriptsRepository::save_transcript` SHALL accept `meeting_id: &str` as the first parameter and use it as the value of `INSERT INTO meetings (id, ...)`. The repository SHALL NOT mint a new UUID. The parameter SHALL be validated against `^meeting-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` before any DB interaction. A SQLite `UNIQUE` violation on the `meetings.id` column SHALL be surfaced as `MeetingAlreadyExistsError`.
 
 #### Scenario: Valid meeting_id is persisted as the row primary key
 
 - **GIVEN** a valid `meeting_id = "meeting-<UUID v4>"`
-- **WHEN** the frontend invokes `api_save_transcript` with that id, a title, transcripts, and a folder path
+- **WHEN** `save_transcript` is called with that id, a title, transcripts, and a folder path
 - **THEN** the row in the `meetings` table has `id = meeting_id`
-- **AND** the command resolves with `{ status: "success", meeting_id }`
 
 #### Scenario: Empty meeting_id is rejected before DB write
 
 - **GIVEN** `meeting_id = ""`
-- **WHEN** the frontend invokes `api_save_transcript`
-- **THEN** the command rejects with an error referencing invalid format
+- **WHEN** `save_transcript` is called
+- **THEN** the call returns `InvalidMeetingIdError`
 - **AND** no row is inserted in the `meetings` table
 
 #### Scenario: Malformed meeting_id is rejected before DB write
 
 - **GIVEN** `meeting_id = "meeting-not-a-uuid"` or any string not matching the regex
-- **WHEN** the frontend invokes `api_save_transcript`
-- **THEN** the command rejects with an error referencing invalid format
+- **WHEN** `save_transcript` is called
+- **THEN** the call returns `InvalidMeetingIdError`
 - **AND** no row is inserted in the `meetings` table
 
 #### Scenario: Duplicate save with the same meeting_id is distinguishable
 
 - **GIVEN** a row with `id = meeting_id` already exists in the `meetings` table
-- **WHEN** the frontend invokes `api_save_transcript` with the same `meeting_id`
-- **THEN** the command rejects with a typed `MeetingAlreadyExistsError` (or equivalent shape including the conflicting `meeting_id`)
+- **WHEN** `save_transcript` is called with the same `meeting_id`
+- **THEN** the call returns `MeetingAlreadyExistsError`
 - **AND** the existing row is NOT modified
-- **AND** the frontend can treat this error as idempotent success
+- **AND** callers can treat this error as idempotent success
 
 ---
 
 ### Requirement: `cancel_recording` deletes the row identified by the start-time meeting_id
 
-When the frontend invokes `cancel_recording(meeting_id)`, the system SHALL use the start-time `meeting_id` from context. `delete_meeting_row_inner` SHALL be a no-op when no row exists (the recording was cancelled before save committed). The recording folder SHALL be deleted regardless of whether a row was written.
+When the frontend invokes `cancel_recording(meeting_id)`, the system SHALL use the start-time `meeting_id` from context. `delete_meeting_row_inner` SHALL be a no-op when no row exists (the recording was cancelled before save committed). The recording folder SHALL be deleted regardless of whether a row was written. The Rust side SHALL log a warning when `meeting_id` is empty.
 
 #### Scenario: Cancel after save deletes both row and folder
 
@@ -139,3 +173,10 @@ When the frontend invokes `cancel_recording(meeting_id)`, the system SHALL use t
 - **THEN** the meeting folder on disk is removed
 - **AND** the DB DELETE matches zero rows (no error)
 - **AND** the command resolves with `M`
+
+#### Scenario: Cancel with empty meeting_id logs warning
+
+- **GIVEN** `start_recording` returned `meeting_id = M`
+- **WHEN** the frontend invokes `cancel_recording("")`
+- **THEN** a warning is logged about empty meeting_id
+- **AND** the folder deletion proceeds (if the manager has it)
