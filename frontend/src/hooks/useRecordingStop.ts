@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { useTranscripts } from '@/contexts/TranscriptContext';
@@ -54,6 +54,13 @@ export function useRecordingStop(
 
   const router = useRouter();
   const stopInProgressRef = useRef(false);
+  const meetingTitleRef = useRef(meetingTitle);
+  const activeMeetingIdRef = useRef(activeMeetingId);
+
+  useEffect(() => {
+    meetingTitleRef.current = meetingTitle;
+    activeMeetingIdRef.current = activeMeetingId;
+  }, [meetingTitle, activeMeetingId]);
 
   // Listen for recording-saved-to-db (SQLite row committed by Rust background_shutdown)
   useEffect(() => {
@@ -62,9 +69,14 @@ export function useRecordingStop(
 
     const setup = async () => {
       unlistenDb = await recordingService.onRecordingSavedToDb(async ({ meeting_id }) => {
+        const expectedId = activeMeetingIdRef.current;
+        if (expectedId && expectedId !== meeting_id) {
+          console.log('Ignoring stale recording-saved-to-db for', meeting_id, '(expected', expectedId, ')');
+          return;
+        }
         console.log('✅ recording-saved-to-db:', meeting_id);
         await refetchMeetings();
-        setCurrentMeeting({ id: meeting_id, title: meetingTitle || 'New Meeting' });
+        setCurrentMeeting({ id: meeting_id, title: meetingTitleRef.current || 'New Meeting' });
         await markMeetingAsSaved();
         setActiveMeetingId(null);
       });
@@ -80,7 +92,7 @@ export function useRecordingStop(
       unlistenDb?.();
       unlistenFailed?.();
     };
-  }, [refetchMeetings, setCurrentMeeting, markMeetingAsSaved, meetingTitle, setActiveMeetingId]);
+  }, [refetchMeetings, setCurrentMeeting, markMeetingAsSaved, setActiveMeetingId]);
 
   // Main recording stop handler
   const handleRecordingStop = useCallback(async (isCallApi: boolean) => {
@@ -131,9 +143,6 @@ export function useRecordingStop(
 
       const meetingId = stopResult.meeting_id || activeMeetingId;
       const folderPath = stopResult.folder_path;
-      const savedMeetingName = stopResult.meeting_name || meetingTitle;
-
-      setIsRecordingDisabled(false);
 
       if (isCallApi) {
         // Enqueue transcription job — the SQLite save runs in Rust's background_shutdown
@@ -236,7 +245,6 @@ export function useRecordingStop(
     setStatus,
     transcriptsRef,
     clearTranscripts,
-    meetingTitle,
     markMeetingAsSaved,
     refetchMeetings,
     setCurrentMeeting,
