@@ -156,12 +156,16 @@ describe('handleRecordingStop dependency array has no ghost deps', () => {
     'setStatus',
     'transcriptsRef',
     'clearTranscripts',
-    'markMeetingAsSaved',
-    'refetchMeetings',
-    'setCurrentMeeting',
     'setIsMeetingActive',
     'router',
     'activeMeetingId',
+  ];
+
+  const GHOST_DEPS = [
+    'meetingTitle',
+    'markMeetingAsSaved',
+    'refetchMeetings',
+    'setCurrentMeeting',
     'setActiveMeetingId',
   ];
 
@@ -169,7 +173,29 @@ describe('handleRecordingStop dependency array has no ghost deps', () => {
     expect(DEPENDENCY_ARRAY).not.toContain('meetingTitle');
   });
 
+  it('markMeetingAsSaved is NOT in the dependency array (listener-only)', () => {
+    expect(DEPENDENCY_ARRAY).not.toContain('markMeetingAsSaved');
+  });
+
+  it('refetchMeetings is NOT in the dependency array (listener-only)', () => {
+    expect(DEPENDENCY_ARRAY).not.toContain('refetchMeetings');
+  });
+
+  it('setCurrentMeeting is NOT in the dependency array (listener-only)', () => {
+    expect(DEPENDENCY_ARRAY).not.toContain('setCurrentMeeting');
+  });
+
+  it('setActiveMeetingId is NOT in the dependency array (listener-only)', () => {
+    expect(DEPENDENCY_ARRAY).not.toContain('setActiveMeetingId');
+  });
+
+  it('all ghost deps are absent', () => {
+    for (const dep of GHOST_DEPS) {
+      expect(DEPENDENCY_ARRAY).not.toContain(dep);
+    }
+  });
+
   it('all expected dependencies are present', () => {
-    expect(DEPENDENCY_ARRAY).toHaveLength(12);
+    expect(DEPENDENCY_ARRAY).toHaveLength(8);
   });
 });

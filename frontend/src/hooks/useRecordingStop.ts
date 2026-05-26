@@ -245,13 +245,9 @@ export function useRecordingStop(
     setStatus,
     transcriptsRef,
     clearTranscripts,
-    markMeetingAsSaved,
-    refetchMeetings,
-    setCurrentMeeting,
     setIsMeetingActive,
     router,
     activeMeetingId,
-    setActiveMeetingId,
   ]);
 
   const handleRecordingStopRef = useRef(handleRecordingStop);
