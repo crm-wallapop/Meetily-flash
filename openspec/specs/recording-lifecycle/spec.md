@@ -262,9 +262,9 @@ When the frontend invokes `cancel_recording(meeting_id)`, the system SHALL use t
 
 ### Requirement: `delete_meeting` removes the on-disk folder after DB transaction commits
 
-When the frontend invokes `api_delete_meeting`, `MeetingsRepository::delete_meeting` SHALL read `folder_path` from the meetings row before the transaction begins. After the transaction commits successfully, the repository SHALL call `std::fs::remove_dir_all` on the folder. This ensures the filesystem is cleaned up alongside the DB rows.
+When the frontend invokes `api_delete_meeting`, `MeetingsRepository::delete_meeting` SHALL read `folder_path` from the meetings row before the transaction begins. After the transaction commits successfully, the repository SHALL validate that the path contains `meetily-recordings` (preventing path traversal), then call `std::fs::remove_dir_all` on the folder. This ensures the filesystem is cleaned up alongside the DB rows.
 
-If `folder_path` is `None` or the folder does not exist on disk, the deletion succeeds silently. If `remove_dir_all` fails (permission denied, file in use), the DB deletion still succeeds — the error is logged but not surfaced to the user.
+If `folder_path` is `None` or the folder does not exist on disk, the deletion succeeds silently. If the path fails the validation check, the folder deletion is skipped and an error is logged. If `remove_dir_all` fails (permission denied, file in use), the DB deletion still succeeds — the error is logged but not surfaced to the user.
 
 #### Scenario: Delete removes both DB rows and folder
 
@@ -294,3 +294,11 @@ If `folder_path` is `None` or the folder does not exist on disk, the deletion su
 - **THEN** the DB rows are deleted and the command returns success
 - **AND** the folder deletion error is logged
 - **AND** the user is NOT shown an error
+
+#### Scenario: Path traversal is rejected
+
+- **GIVEN** a meeting with `id = M` and `folder_path = "../../etc"` (or any path not containing `meetily-recordings`)
+- **WHEN** the frontend invokes `api_delete_meeting(M)`
+- **THEN** the DB rows are deleted
+- **AND** the folder deletion is skipped with a logged warning
+- **AND** no filesystem operation is performed outside the recordings root

@@ -44,7 +44,12 @@ impl MeetingsRepository {
 
                     if let Some(ref path) = folder_path {
                         let p = std::path::Path::new(path);
-                        if p.exists() {
+                        if !path.contains("meetily-recordings") {
+                            error!(
+                                "Skipping folder deletion for {}: path outside recordings root",
+                                path
+                            );
+                        } else if p.exists() {
                             match std::fs::remove_dir_all(p) {
                                 Ok(()) => info!("Deleted meeting folder {}", path),
                                 Err(e) => error!(
@@ -299,10 +304,18 @@ async fn delete_meeting_with_transaction(
 mod tests {
     use std::fs;
 
-    /// Mirrors the folder cleanup logic in delete_meeting:
-    ///   if let Some(ref path) = folder_path { if p.exists() { remove_dir_all } }
+    fn unique_dir(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("meetily_test_{}_{}", name, std::process::id()))
+    }
+
+    /// Mirrors the path validation + cleanup logic in delete_meeting:
+    ///   if !path.contains("meetily-recordings") { skip }
+    ///   else if p.exists() { remove_dir_all }
     fn cleanup_folder(folder_path: Option<&str>) -> Result<(), String> {
         let Some(path) = folder_path else { return Ok(()) };
+        if !path.contains("meetily-recordings") {
+            return Err("path outside recordings root".to_string());
+        }
         let p = std::path::Path::new(path);
         if p.exists() {
             std::fs::remove_dir_all(p).map_err(|e| format!("{}", e))?;
@@ -312,49 +325,68 @@ mod tests {
 
     #[test]
     fn cleanup_removes_existing_folder() {
-        let dir = std::env::temp_dir().join("meetily_test_cleanup_existing");
+        let dir = unique_dir("existing").join("meetily-recordings").join("meeting-1");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("audio.mp4"), b"fake audio").unwrap();
 
         let result = cleanup_folder(Some(dir.to_str().unwrap()));
         assert!(result.is_ok());
-        assert!(!dir.exists(), "folder should be removed after cleanup");
+        assert!(!dir.exists());
     }
 
     #[test]
     fn cleanup_succeeds_when_folder_missing() {
-        let dir = std::env::temp_dir().join("meetily_test_cleanup_nonexistent_abc123");
+        let dir = unique_dir("missing").join("meetily-recordings").join("meeting-ghost");
         let _ = fs::remove_dir_all(&dir);
 
         let result = cleanup_folder(Some(dir.to_str().unwrap()));
-        assert!(result.is_ok(), "missing folder should be silently ignored");
+        assert!(result.is_ok());
     }
 
     #[test]
     fn cleanup_is_noop_when_path_is_none() {
         let result = cleanup_folder(None);
-        assert!(result.is_ok(), "None folder_path should be a no-op");
+        assert!(result.is_ok());
     }
 
     #[test]
     fn cleanup_removes_folder_with_nested_contents() {
-        let dir = std::env::temp_dir().join("meetily_test_cleanup_nested");
+        let dir = unique_dir("nested").join("meetily-recordings").join("meeting-2");
         fs::create_dir_all(dir.join("subdir")).unwrap();
         fs::write(dir.join("subdir").join("metadata.json"), b"{}").unwrap();
         fs::write(dir.join("audio.mp4"), b"data").unwrap();
 
         let result = cleanup_folder(Some(dir.to_str().unwrap()));
         assert!(result.is_ok());
-        assert!(!dir.exists(), "nested folder should be fully removed");
+        assert!(!dir.exists());
     }
 
     #[test]
     fn cleanup_removes_empty_folder() {
-        let dir = std::env::temp_dir().join("meetily_test_cleanup_empty");
+        let dir = unique_dir("empty").join("meetily-recordings").join("meeting-3");
         fs::create_dir_all(&dir).unwrap();
 
         let result = cleanup_folder(Some(dir.to_str().unwrap()));
         assert!(result.is_ok());
-        assert!(!dir.exists(), "empty folder should be removed");
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn cleanup_rejects_path_outside_recordings_root() {
+        let dir = unique_dir("traversal");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("important.txt"), b"secret").unwrap();
+
+        let result = cleanup_folder(Some(dir.to_str().unwrap()));
+        assert!(result.is_err(), "path without meetily-recordings must be rejected");
+        assert!(dir.exists(), "folder must NOT be deleted");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_rejects_path_traversal_attack() {
+        let evil = "/etc/passwd";
+        let result = cleanup_folder(Some(evil));
+        assert!(result.is_err(), "path traversal must be rejected");
     }
 }
