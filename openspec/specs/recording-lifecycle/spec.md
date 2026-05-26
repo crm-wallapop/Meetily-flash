@@ -1,7 +1,8 @@
 # Recording Lifecycle — Capability Spec
 
-> Status: **updated 2026-05-24** — decouple-meeting-id-from-save: SQLite save moved into
-> `background_shutdown`; frontend stop hook no longer calls `saveMeeting()`.
+> Status: **updated 2026-05-26** — delete-meeting-folder-cleanup: `delete_meeting` removes
+> on-disk folder after DB transaction commits; decouple-meeting-id-from-save: SQLite save
+> moved into `background_shutdown`; frontend stop hook no longer calls `saveMeeting()`.
 
 ---
 
@@ -256,3 +257,40 @@ When the frontend invokes `cancel_recording(meeting_id)`, the system SHALL use t
 - **WHEN** the frontend invokes `cancel_recording("")`
 - **THEN** a warning is logged about empty meeting_id
 - **AND** the folder deletion proceeds (if the manager has it)
+
+---
+
+### Requirement: `delete_meeting` removes the on-disk folder after DB transaction commits
+
+When the frontend invokes `api_delete_meeting`, `MeetingsRepository::delete_meeting` SHALL read `folder_path` from the meetings row before the transaction begins. After the transaction commits successfully, the repository SHALL call `std::fs::remove_dir_all` on the folder. This ensures the filesystem is cleaned up alongside the DB rows.
+
+If `folder_path` is `None` or the folder does not exist on disk, the deletion succeeds silently. If `remove_dir_all` fails (permission denied, file in use), the DB deletion still succeeds — the error is logged but not surfaced to the user.
+
+#### Scenario: Delete removes both DB rows and folder
+
+- **GIVEN** a meeting with `id = M` and `folder_path = P` exists, and the folder at `P` contains `audio.mp4`
+- **WHEN** the frontend invokes `api_delete_meeting(M)`
+- **THEN** the meetings, transcripts, transcript_chunks, and summary_processes rows are deleted
+- **AND** the folder at `P` and all its contents are removed from disk
+
+#### Scenario: Delete with null folder_path succeeds without filesystem ops
+
+- **GIVEN** a meeting with `id = M` and `folder_path = NULL`
+- **WHEN** the frontend invokes `api_delete_meeting(M)`
+- **THEN** the DB rows are deleted
+- **AND** no filesystem operations are attempted
+
+#### Scenario: Delete with missing folder still succeeds
+
+- **GIVEN** a meeting with `id = M` and `folder_path = P`, but the folder at `P` was already manually deleted
+- **WHEN** the frontend invokes `api_delete_meeting(M)`
+- **THEN** the DB rows are deleted
+- **AND** no error is raised for the missing folder
+
+#### Scenario: Folder deletion failure does not block DB deletion
+
+- **GIVEN** a meeting with `id = M` and `folder_path = P`, and `remove_dir_all(P)` fails (e.g., file in use)
+- **WHEN** the frontend invokes `api_delete_meeting(M)`
+- **THEN** the DB rows are deleted and the command returns success
+- **AND** the folder deletion error is logged
+- **AND** the user is NOT shown an error

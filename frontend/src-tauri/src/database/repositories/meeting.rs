@@ -23,6 +23,14 @@ impl MeetingsRepository {
         }
 
         let mut conn = pool.acquire().await?;
+
+        let folder_path: Option<String> =
+            sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+                .bind(meeting_id)
+                .fetch_optional(&mut *conn)
+                .await?
+                .flatten();
+
         let mut transaction = conn.begin().await?;
 
         match delete_meeting_with_transaction(&mut transaction, meeting_id).await {
@@ -33,6 +41,20 @@ impl MeetingsRepository {
                         "Successfully deleted meeting {} and all associated data",
                         meeting_id
                     );
+
+                    if let Some(ref path) = folder_path {
+                        let p = std::path::Path::new(path);
+                        if p.exists() {
+                            match std::fs::remove_dir_all(p) {
+                                Ok(()) => info!("Deleted meeting folder {}", path),
+                                Err(e) => error!(
+                                    "Failed to delete meeting folder {}: {} — DB rows removed, folder orphaned",
+                                    path, e
+                                ),
+                            }
+                        }
+                    }
+
                     Ok(true)
                 } else {
                     transaction.rollback().await?;
@@ -271,4 +293,68 @@ async fn delete_meeting_with_transaction(
         .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    /// Mirrors the folder cleanup logic in delete_meeting:
+    ///   if let Some(ref path) = folder_path { if p.exists() { remove_dir_all } }
+    fn cleanup_folder(folder_path: Option<&str>) -> Result<(), String> {
+        let Some(path) = folder_path else { return Ok(()) };
+        let p = std::path::Path::new(path);
+        if p.exists() {
+            std::fs::remove_dir_all(p).map_err(|e| format!("{}", e))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_removes_existing_folder() {
+        let dir = std::env::temp_dir().join("meetily_test_cleanup_existing");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("audio.mp4"), b"fake audio").unwrap();
+
+        let result = cleanup_folder(Some(dir.to_str().unwrap()));
+        assert!(result.is_ok());
+        assert!(!dir.exists(), "folder should be removed after cleanup");
+    }
+
+    #[test]
+    fn cleanup_succeeds_when_folder_missing() {
+        let dir = std::env::temp_dir().join("meetily_test_cleanup_nonexistent_abc123");
+        let _ = fs::remove_dir_all(&dir);
+
+        let result = cleanup_folder(Some(dir.to_str().unwrap()));
+        assert!(result.is_ok(), "missing folder should be silently ignored");
+    }
+
+    #[test]
+    fn cleanup_is_noop_when_path_is_none() {
+        let result = cleanup_folder(None);
+        assert!(result.is_ok(), "None folder_path should be a no-op");
+    }
+
+    #[test]
+    fn cleanup_removes_folder_with_nested_contents() {
+        let dir = std::env::temp_dir().join("meetily_test_cleanup_nested");
+        fs::create_dir_all(dir.join("subdir")).unwrap();
+        fs::write(dir.join("subdir").join("metadata.json"), b"{}").unwrap();
+        fs::write(dir.join("audio.mp4"), b"data").unwrap();
+
+        let result = cleanup_folder(Some(dir.to_str().unwrap()));
+        assert!(result.is_ok());
+        assert!(!dir.exists(), "nested folder should be fully removed");
+    }
+
+    #[test]
+    fn cleanup_removes_empty_folder() {
+        let dir = std::env::temp_dir().join("meetily_test_cleanup_empty");
+        fs::create_dir_all(&dir).unwrap();
+
+        let result = cleanup_folder(Some(dir.to_str().unwrap()));
+        assert!(result.is_ok());
+        assert!(!dir.exists(), "empty folder should be removed");
+    }
 }
