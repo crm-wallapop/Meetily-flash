@@ -2,13 +2,6 @@ use crate::database::repositories::speaker::SpeakerRepository;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-const COLOR_PALETTE: &[&str] = &[
-    "#4A90D9", "#7B68EE", "#20B2AA", "#FF6B6B", "#FFA500",
-    "#9370DB", "#3CB371", "#FF69B4", "#6495ED", "#F08080",
-    "#8FBC8F", "#DDA0DD", "#87CEEB", "#F4A460", "#BA55D3",
-    "#66CDAA", "#FF7F50", "#6A5ACD", "#48D1CC", "#DB7093",
-];
-
 fn sanitize_speaker_name(name: &str) -> Result<String, String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -40,7 +33,9 @@ fn strip_html_tags(input: &str) -> String {
 }
 
 fn pick_color(index: usize) -> String {
-    COLOR_PALETTE[index % COLOR_PALETTE.len()].to_string()
+    // Golden angle spacing — maximizes hue separation between consecutive speakers.
+    let hue = (index as f64 * 137.508) % 360.0;
+    format!("hsl({}, 65%, 55%)", hue.round() as u16)
 }
 
 #[tauri::command]
@@ -224,8 +219,13 @@ mod tests {
 
     #[test]
     fn pick_color_is_deterministic() {
-        assert_eq!(pick_color(0), "#4A90D9");
-        assert_eq!(pick_color(0), pick_color(20)); // wraps around
-        assert_eq!(pick_color(1), "#7B68EE");
+        assert_eq!(pick_color(0), pick_color(0));
+        assert_ne!(pick_color(0), pick_color(1));
+        // Golden angle ensures consecutive indices are far apart in hue
+        let c0 = pick_color(0);
+        let c1 = pick_color(1);
+        assert!(c0.starts_with("hsl("));
+        assert!(c1.starts_with("hsl("));
+        assert_ne!(c0, c1);
     }
 }
