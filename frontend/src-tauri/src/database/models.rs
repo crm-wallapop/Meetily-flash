@@ -98,6 +98,9 @@ pub struct Setting {
     #[sqlx(rename = "customOpenAIConfig")]
     #[serde(rename = "customOpenAIConfig")]
     pub custom_openai_config: Option<String>,
+    #[sqlx(rename = "speakerMergeThreshold")]
+    #[serde(rename = "speakerMergeThreshold")]
+    pub speaker_merge_threshold: f64,
 }
 
 impl Setting {

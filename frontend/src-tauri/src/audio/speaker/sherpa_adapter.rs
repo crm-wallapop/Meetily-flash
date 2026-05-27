@@ -6,6 +6,8 @@ use sherpa_onnx::{
     SpeakerEmbeddingManager,
 };
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::diarization::DiarizationPort;
 use super::embedding::SpeakerEmbeddingPort;
@@ -79,10 +81,20 @@ pub struct SherpaOnnxDiarizationAdapter {
     segmentation_model_path: PathBuf,
     embedding_extractor: SpeakerEmbeddingExtractor,
     embedding_dim: usize,
+    // Shared with AppState — lock-free updates from the settings UI.
+    merge_threshold_fp: Arc<AtomicU32>,
 }
 
 impl SherpaOnnxDiarizationAdapter {
     pub fn new(model_path: &str, segmentation_model_path: &str) -> Result<Self> {
+        Self::with_shared_threshold(model_path, segmentation_model_path, Arc::new(AtomicU32::new(to_fp(MERGE_SIMILARITY_DEFAULT))))
+    }
+
+    pub fn with_shared_threshold(
+        model_path: &str,
+        segmentation_model_path: &str,
+        threshold_fp: Arc<AtomicU32>,
+    ) -> Result<Self> {
         let mp = PathBuf::from(model_path);
         let sp = PathBuf::from(segmentation_model_path);
         if !mp.exists() {
@@ -107,7 +119,12 @@ impl SherpaOnnxDiarizationAdapter {
             segmentation_model_path: sp,
             embedding_extractor: extractor,
             embedding_dim: dim,
+            merge_threshold_fp: threshold_fp,
         })
+    }
+
+    fn merge_threshold(&self) -> f32 {
+        from_fp(self.merge_threshold_fp.load(Ordering::Relaxed))
     }
 
     fn create_diarization(&self) -> Result<OfflineSpeakerDiarization> {
@@ -152,8 +169,17 @@ impl SherpaOnnxDiarizationAdapter {
 const MIN_SPEAKER_FRACTION: f64 = 0.03;
 
 /// Cosine similarity above which two speaker clusters are merged in the
-/// second-pass centroid clustering.  0.55 = fairly permissive merge.
-const MERGE_SIMILARITY: f32 = 0.50;
+/// second-pass centroid clustering.  This is the default; the user can
+/// override it via the settings slider.
+const MERGE_SIMILARITY_DEFAULT: f32 = 0.50;
+
+fn to_fp(v: f32) -> u32 {
+    (v * 65536.0) as u32
+}
+
+fn from_fp(v: u32) -> f32 {
+    v as f32 / 65536.0
+}
 
 impl DiarizationPort for SherpaOnnxDiarizationAdapter {
     fn process(&self, samples: &[f32], _sample_rate: u32) -> Result<Vec<SpeakerSegment>> {
@@ -198,7 +224,7 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
             segments,
             samples,
             16000,
-            MERGE_SIMILARITY,
+            self.merge_threshold(),
         );
 
         segments = renumber_speakers(segments);

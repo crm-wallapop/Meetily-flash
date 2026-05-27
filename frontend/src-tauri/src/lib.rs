@@ -1125,6 +1125,8 @@ pub fn run() {
             audio::speaker::commands::list_speakers_cmd,
             audio::speaker::commands::remove_speaker_cmd,
             audio::speaker::commands::rediarize_meeting,
+            audio::speaker::commands::get_speaker_merge_threshold,
+            audio::speaker::commands::set_speaker_merge_threshold,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

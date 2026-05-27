@@ -34,6 +34,14 @@ export async function rediarizeMeeting(meetingId: string): Promise<number> {
   return invoke<number>("rediarize_meeting", { meetingId });
 }
 
+export async function getSpeakerMergeThreshold(): Promise<number> {
+  return invoke<number>("get_speaker_merge_threshold");
+}
+
+export async function setSpeakerMergeThreshold(threshold: number): Promise<void> {
+  return invoke<void>("set_speaker_merge_threshold", { threshold });
+}
+
 export function getSpeakerColor(index: number): string {
   const hue = (index * 137.508) % 360;
   return `hsl(${hue}, 65%, 55%)`;
