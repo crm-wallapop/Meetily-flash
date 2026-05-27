@@ -44,7 +44,7 @@ impl SpeakerEmbeddingPort for MockEmbeddingPort {
         let energy: f32 = audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32;
         let base = (energy * 100.0).fract() as f32 * 0.5 + 0.1;
         let values = vec![base; self.dim];
-        EmbeddingVector::from_slice(&values, self.dim).map_err(|e| anyhow!(e.to_string()))
+        EmbeddingVector::from_slice(&values, self.dim).map_err(|e| anyhow::Error::from(e))
     }
 
     fn dim(&self) -> usize {

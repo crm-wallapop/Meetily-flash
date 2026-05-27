@@ -83,7 +83,6 @@ pub async fn label_speaker(
 
     // Create or find speaker
     let speaker_id = format!("speaker-{}", Uuid::new_v4());
-    let color = pick_color(0); // Will be refined with existing speaker lookup
 
     #[derive(sqlx::FromRow)]
     struct SpeakerIdColor {
@@ -103,6 +102,11 @@ pub async fn label_speaker(
     let (final_speaker_id, final_color) = match existing {
         Some(row) => (row.id, row.color),
         None => {
+            let speaker_count = SpeakerRepository::list_speakers(pool.inner())
+                .await
+                .map(|s| s.len())
+                .unwrap_or(0);
+            let color = pick_color(speaker_count);
             SpeakerRepository::create_speaker(pool.inner(), &speaker_id, &name, &color)
                 .await
                 .map_err(|e| e.to_string())?;

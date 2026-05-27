@@ -308,11 +308,4 @@ mod tests {
         registry.remove("Alice").unwrap();
         assert!(!registry.contains("Alice").unwrap());
     }
-
-    #[test]
-    fn diarization_process_empty_samples() {
-        // Can't test with real models, but the empty check is pure logic
-        // This validates the early return path without needing model files
-        assert!(true); // Empty check is trivially correct; full test needs models
-    }
 }

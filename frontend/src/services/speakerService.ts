@@ -37,6 +37,8 @@ export async function rediarizeMeeting(meetingId: string): Promise<number> {
 const COLOR_PALETTE = [
   "#4A90D9", "#7B68EE", "#20B2AA", "#FF6B6B", "#FFA500",
   "#9370DB", "#3CB371", "#FF69B4", "#6495ED", "#F08080",
+  "#8FBC8F", "#DDA0DD", "#87CEEB", "#F4A460", "#BA55D3",
+  "#66CDAA", "#FF7F50", "#6A5ACD", "#48D1CC", "#DB7093",
 ];
 
 export function getSpeakerColor(index: number): string {

@@ -31,7 +31,7 @@ impl std::error::Error for SpeakerLabelError {}
 impl SpeakerLabel {
     pub fn new(label: impl Into<String>) -> Result<Self, SpeakerLabelError> {
         let s = label.into();
-        if s.is_empty() {
+        if s.trim().is_empty() {
             return Err(SpeakerLabelError::Empty);
         }
         if s.len() > 200 {
@@ -196,8 +196,7 @@ mod tests {
     #[test]
     fn speaker_label_rejects_only_whitespace() {
         let result = SpeakerLabel::new("   ");
-        // whitespace-only is allowed (non-empty string) unless trimmed
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(SpeakerLabelError::Empty)));
     }
 
     #[test]

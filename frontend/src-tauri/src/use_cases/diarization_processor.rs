@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::audio::decoder::decode_audio_file;
 use crate::audio::speaker::alignment::{
-    align_transcripts_with_diarization, DiarizationSegment, SpeakerSource, TranscriptInput,
+    align_transcripts_with_diarization, DiarizationSegment, TranscriptInput,
 };
 use crate::audio::speaker::diarization::DiarizationPort;
 use crate::audio::speaker::embedding::SpeakerEmbeddingPort;
@@ -190,11 +190,7 @@ impl DiarizationProcessor {
         let mut segments_labeled = 0;
         for seg in &aligned {
             let label = resolve_label(&seg.speaker, &label_map);
-            let source = match seg.speaker_source {
-                SpeakerSource::Auto => "auto",
-                SpeakerSource::Fallback => "auto",
-                SpeakerSource::Unknown => "auto",
-            };
+            let source = "auto";
             SpeakerRepository::update_transcript_speaker(pool, &seg.original_id, &label, source)
                 .await?;
             segments_labeled += 1;
@@ -328,7 +324,6 @@ mod tests {
     use crate::audio::speaker::mocks::{
         MockDiarizationPort, MockEmbeddingPort, MockIdentificationPort,
     };
-    use crate::audio::speaker::types::SpeakerSegment;
     use std::collections::HashMap;
 
     fn make_processor(

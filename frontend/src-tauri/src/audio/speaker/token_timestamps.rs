@@ -64,7 +64,6 @@ pub fn extract_token_timestamps(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::audio::speaker::alignment::TokenWord;
 
     #[test]
