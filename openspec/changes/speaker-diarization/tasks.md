@@ -193,8 +193,8 @@
 
 - [ ] 11.1 RED: test speaker model dropdown renders both options
 - [ ] 11.2 GREEN: create speaker model selection component
-- [ ] 11.3 RED: test confidence threshold slider rejects values outside 0.5–0.8
-- [ ] 11.4 GREEN: implement threshold slider with bounds
+- [x] 11.3 RED: test confidence threshold slider rejects values outside 0.5–0.8
+- [x] 11.4 GREEN: implement threshold slider with bounds
 - [ ] 11.5 RED: test max speaker cap input rejects values outside 2–20
 - [ ] 11.6 GREEN: implement cap input with bounds
 - [x] 11.7 Add "Re-diarize" button in meeting details view

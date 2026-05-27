@@ -1,3 +1,5 @@
+use crate::audio::speaker::alignment::TranscriptInput;
+use crate::audio::speaker::diarization::DiarizationPort;
 use crate::database::repositories::speaker::SpeakerRepository;
 use crate::state::AppState;
 use sqlx::SqlitePool;
@@ -155,8 +157,10 @@ pub async fn remove_speaker_cmd(
 #[tauri::command]
 pub async fn rediarize_meeting(
     pool: tauri::State<'_, SqlitePool>,
+    app_state: tauri::State<'_, AppState>,
     meeting_id: String,
 ) -> Result<u64, String> {
+    // Clear existing auto labels
     let cleared = SpeakerRepository::clear_auto_speaker_labels(pool.inner(), &meeting_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -167,8 +171,114 @@ pub async fn rediarize_meeting(
         meeting_id
     );
 
-    // Re-enqueue would happen via the queue system — caller should enqueue after this
-    Ok(cleared)
+    // Look up meeting folder path
+    let row = sqlx::query("SELECT folder_path FROM meetings WHERE id = ?")
+        .bind(&meeting_id)
+        .fetch_optional(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let folder_path: Option<String> = row.and_then(|r| sqlx::Row::get(&r, "folder_path"));
+    let Some(folder) = folder_path else {
+        log::warn!("rediarize_meeting: no folder_path for meeting {}", meeting_id);
+        return Ok(cleared);
+    };
+
+    // Find audio file
+    let folder_path = std::path::Path::new(&folder);
+    let audio_path = folder_path.join("audio.mp4");
+    if !audio_path.exists() {
+        log::warn!(
+            "rediarize_meeting: no audio.mp4 in {}",
+            folder_path.display()
+        );
+        return Ok(cleared);
+    }
+
+    // Resolve model paths
+    let models_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".meetily-models");
+    let embedding_path = models_dir.join("3dspeaker-embedding.onnx");
+    let segmentation_path = models_dir.join("pyannote-segmentation.onnx");
+
+    if !embedding_path.exists() || !segmentation_path.exists() {
+        return Err(
+            "Speaker models not found. Download pyannote-segmentation.onnx and 3dspeaker-embedding.onnx to ~/.meetily-models/".to_string()
+        );
+    }
+
+    // Decode audio
+    let decoded = crate::audio::decoder::decode_audio_file(&audio_path)
+        .map_err(|e| format!("Audio decode failed: {}", e))?;
+    let mono = to_mono_f32(&decoded);
+
+    // Create adapter with shared threshold
+    let threshold_fp = app_state.speaker_merge_threshold_fp.load(Ordering::Relaxed);
+    let shared_fp = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(threshold_fp));
+    let adapter = super::sherpa_adapter::SherpaOnnxDiarizationAdapter::with_shared_threshold(
+        embedding_path.to_str().unwrap_or(""),
+        segmentation_path.to_str().unwrap_or(""),
+        shared_fp,
+    )
+    .map_err(|e| format!("Failed to create diarization adapter: {}", e))?;
+
+    // Run diarization
+    let segments = adapter.process(&mono, 16000)
+        .map_err(|e| format!("Diarization failed: {}", e))?;
+
+    if segments.is_empty() {
+        log::info!("rediarize_meeting: 0 speakers detected for meeting {}", meeting_id);
+        return Ok(cleared);
+    }
+
+    let num_speakers: std::collections::HashSet<u32> =
+        segments.iter().map(|s| s.speaker_id).collect();
+    log::info!(
+        "rediarize_meeting: detected {} speakers for meeting {}",
+        num_speakers.len(),
+        meeting_id
+    );
+
+    // Fetch transcripts and align
+    let transcripts = fetch_transcripts_for_alignment(pool.inner(), &meeting_id).await
+        .map_err(|e| format!("Failed to fetch transcripts: {}", e))?;
+
+    if transcripts.is_empty() {
+        return Ok(cleared);
+    }
+
+    use crate::audio::speaker::alignment::{
+        align_transcripts_with_diarization, DiarizationSegment,
+    };
+
+    let diarization_segs: Vec<DiarizationSegment> = segments
+        .iter()
+        .map(|s| DiarizationSegment {
+            start_ms: (s.start_seconds * 1000.0) as i64,
+            end_ms: (s.end_seconds * 1000.0) as i64,
+            speaker_id: s.speaker_id,
+        })
+        .collect();
+
+    let aligned = align_transcripts_with_diarization(transcripts, &diarization_segs);
+
+    let mut segments_labeled = 0u64;
+    for seg in &aligned {
+        let label = resolve_label(&seg.speaker);
+        SpeakerRepository::update_transcript_speaker(pool.inner(), &seg.original_id, &label, "auto")
+            .await
+            .map_err(|e| e.to_string())?;
+        segments_labeled += 1;
+    }
+
+    log::info!(
+        "rediarize_meeting: labeled {} segments for meeting {}",
+        segments_labeled,
+        meeting_id
+    );
+
+    Ok(segments_labeled)
 }
 
 #[tauri::command]
@@ -201,6 +311,59 @@ pub async fn set_speaker_merge_threshold(
     app_state.speaker_merge_threshold_fp.store(fp, Ordering::Relaxed);
     log::info!("set_speaker_merge_threshold: updated to {}", threshold);
     Ok(())
+}
+
+async fn fetch_transcripts_for_alignment(
+    pool: &SqlitePool,
+    meeting_id: &str,
+) -> Result<Vec<TranscriptInput>, String> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: String,
+        text: String,
+        start_time: f64,
+        end_time: f64,
+        token_timestamps: Option<String>,
+    }
+
+    let rows = sqlx::query_as::<_, Row>(
+        "SELECT id, transcript as text, audio_start_time as start_time, audio_end_time as end_time, token_timestamps FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time ASC",
+    )
+    .bind(meeting_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let token_words = r.token_timestamps.and_then(|json| {
+                serde_json::from_str::<Vec<crate::audio::speaker::alignment::TokenWord>>(&json).ok()
+            });
+            TranscriptInput {
+                id: r.id,
+                text: r.text,
+                audio_start_ms: (r.start_time * 1000.0) as i64,
+                audio_end_ms: (r.end_time * 1000.0) as i64,
+                token_words,
+            }
+        })
+        .collect())
+}
+
+fn resolve_label(speaker: &str) -> String {
+    speaker.to_string()
+}
+
+fn to_mono_f32(decoded: &crate::audio::decoder::DecodedAudio) -> Vec<f32> {
+    if decoded.channels == 1 {
+        return decoded.samples.clone();
+    }
+    decoded
+        .samples
+        .chunks_exact(decoded.channels as usize)
+        .map(|chunk| chunk.iter().sum::<f32>() / decoded.channels as f32)
+        .collect()
 }
 
 #[cfg(test)]
