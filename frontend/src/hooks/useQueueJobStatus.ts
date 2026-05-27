@@ -138,6 +138,9 @@ export function queueJobLabel(job: QueueJob, settings?: SchedulerSettings): stri
       if (job.phase === 'Summarising') {
         return 'Summarising…';
       }
+      if (job.phase === 'Diarizing') {
+        return 'Detecting speakers…';
+      }
       return job.progress_percent !== undefined
         ? `Transcribing ${job.progress_percent}%`
         : 'Transcribing…';

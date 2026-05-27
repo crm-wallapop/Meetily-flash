@@ -3,10 +3,11 @@
 import { useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, FolderOpen, RefreshCw } from 'lucide-react';
+import { Copy, FolderOpen, RefreshCw, Users } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
+import { rediarizeMeeting } from '@/services/speakerService';
 
 
 interface TranscriptButtonGroupProps {
@@ -29,6 +30,20 @@ export function TranscriptButtonGroup({
 }: TranscriptButtonGroupProps) {
   const { betaFeatures } = useConfig();
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
+  const [isRediarizing, setIsRediarizing] = useState(false);
+
+  const handleRediarize = useCallback(async () => {
+    if (!meetingId) return;
+    setIsRediarizing(true);
+    try {
+      await rediarizeMeeting(meetingId);
+      if (onRefetchTranscripts) await onRefetchTranscripts();
+    } catch (e) {
+      console.error('Re-diarization failed:', e);
+    } finally {
+      setIsRediarizing(false);
+    }
+  }, [meetingId, onRefetchTranscripts]);
 
   const handleRetranscribeComplete = useCallback(async () => {
     // Refetch transcripts to show the updated data
@@ -81,6 +96,20 @@ export function TranscriptButtonGroup({
           >
             <RefreshCw className="xl:mr-2" size={18} />
             <span className="hidden lg:inline">Enhance</span>
+          </Button>
+        )}
+
+        {meetingId && transcriptCount > 0 && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="xl:px-4"
+            onClick={handleRediarize}
+            disabled={isRediarizing}
+            title="Re-run speaker detection on this meeting"
+          >
+            <Users className="xl:mr-2" size={18} />
+            <span className="hidden lg:inline">{isRediarizing ? 'Analyzing…' : 'Speakers'}</span>
           </Button>
         )}
       </ButtonGroup>

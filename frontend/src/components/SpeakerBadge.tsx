@@ -1,5 +1,5 @@
 import React from "react";
-import { getSpeakerColor } from "../../services/speakerService";
+import { getSpeakerColor } from "@/services/speakerService";
 
 interface SpeakerBadgeProps {
   name: string | null | undefined;

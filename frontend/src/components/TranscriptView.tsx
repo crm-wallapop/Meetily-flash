@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ConfidenceIndicator } from './ConfidenceIndicator';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { RecordingStatusBar } from './RecordingStatusBar';
+import { SpeakerBadge } from './SpeakerBadge';
 import { motion, AnimatePresence } from 'framer-motion';
 
 interface TranscriptViewProps {
@@ -305,6 +306,11 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({ transcripts, isR
                 </TooltipContent>
               </Tooltip>
               <div className="flex-1">
+                {transcript.speaker && (
+                  <div className="mb-1">
+                    <SpeakerBadge name={transcript.speaker} colorIndex={index} />
+                  </div>
+                )}
                 {isStreaming ? (
                   // Streaming transcript - show in bubble (full width)
                   <div className="bg-gray-100 border border-gray-200 rounded-lg px-3 py-2">

@@ -185,7 +185,7 @@
 - [x] 10.14 GREEN: implement suggestions dropdown with name filtering
 - [x] 10.15 RED: test "Unknown Speaker (possibly Alice)" renders with suggestion styling (italic, muted)
 - [x] 10.16 GREEN: implement suggestion badge variant
-- [ ] 10.17 Integrate `SpeakerBadge` into transcript segment rendering — needs integration into TranscriptView
+- [x] 10.17 Integrate `SpeakerBadge` into transcript segment rendering
 - [ ] 10.18 RED: test `diarization-complete` event with malformed payload (missing fields) → no crash
 - [ ] 10.19 GREEN: validate event payload before updating state
 
@@ -197,9 +197,9 @@
 - [ ] 11.4 GREEN: implement threshold slider with bounds
 - [ ] 11.5 RED: test max speaker cap input rejects values outside 2–20
 - [ ] 11.6 GREEN: implement cap input with bounds
-- [ ] 11.7 Add "Re-diarize" button in meeting details view — needs MeetingDetails integration
-- [ ] 11.8 RED: test queue UI shows "Diarizing" phase correctly
-- [ ] 11.9 GREEN: extend queue UI to handle Diarizing phase — type updated in queueService.ts
+- [x] 11.7 Add "Re-diarize" button in meeting details view
+- [x] 11.8 RED: test queue UI shows "Diarizing" phase correctly
+- [x] 11.9 GREEN: extend queue UI to handle Diarizing phase — type updated in queueService.ts
 - [ ] 11.10 Listen for `diarization-complete` event and update transcript view state
 
 ## 12. Re-transcription & Import Integration

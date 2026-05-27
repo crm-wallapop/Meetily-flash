@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use sherpa_onnx::{
-    OfflineSpeakerDiarization, OfflineSpeakerDiarizationConfig,
+    FastClusteringConfig, OfflineSpeakerDiarization, OfflineSpeakerDiarizationConfig,
     OfflineSpeakerSegmentationModelConfig, OfflineSpeakerSegmentationPyannoteModelConfig,
     SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig,
     SpeakerEmbeddingManager,
@@ -96,6 +96,9 @@ impl SherpaOnnxDiarizationAdapter {
     }
 
     fn create_diarization(&self) -> Result<OfflineSpeakerDiarization> {
+        // threshold = cosine-dissimilarity cut height on complete-linkage dendrogram.
+        // Higher → more merges → fewer speakers.  3dspeaker embeddings on noisy
+        // meeting audio need an aggressive threshold to avoid over-segmentation.
         let config = OfflineSpeakerDiarizationConfig {
             segmentation: OfflineSpeakerSegmentationModelConfig {
                 pyannote: OfflineSpeakerSegmentationPyannoteModelConfig {
@@ -110,6 +113,10 @@ impl SherpaOnnxDiarizationAdapter {
                 debug: false,
                 provider: Some("cpu".to_string()),
             },
+            clustering: FastClusteringConfig {
+                num_clusters: -1,
+                threshold: 0.80,
+            },
             ..Default::default()
         };
 
@@ -117,6 +124,10 @@ impl SherpaOnnxDiarizationAdapter {
             .ok_or_else(|| anyhow!("failed to create diarization"))
     }
 }
+
+/// Speakers whose total airtime is below this fraction of the audio duration
+/// are considered noise and merged into the temporally nearest dominant speaker.
+const MIN_SPEAKER_FRACTION: f64 = 0.03;
 
 impl DiarizationPort for SherpaOnnxDiarizationAdapter {
     fn process(&self, samples: &[f32], _sample_rate: u32) -> Result<Vec<SpeakerSegment>> {
@@ -126,21 +137,108 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
 
         let sd = self.create_diarization()?;
 
-        match sd.process(samples) {
-            Some(result) => {
-                let mapped = result.sort_by_start_time()
-                    .into_iter()
-                    .map(|s| SpeakerSegment {
-                        start_seconds: s.start as f64,
-                        end_seconds: s.end as f64,
-                        speaker_id: s.speaker as u32,
-                    })
-                    .collect();
-                Ok(mapped)
-            }
-            None => Ok(Vec::new()),
+        let mut segments: Vec<SpeakerSegment> = match sd.process(samples) {
+            Some(result) => result
+                .sort_by_start_time()
+                .into_iter()
+                .map(|s| SpeakerSegment {
+                    start_seconds: s.start as f64,
+                    end_seconds: s.end as f64,
+                    speaker_id: s.speaker as u32,
+                })
+                .collect(),
+            None => return Ok(Vec::new()),
+        };
+
+        if segments.is_empty() {
+            return Ok(Vec::new());
         }
+
+        let audio_duration = segments
+            .iter()
+            .map(|s| s.end_seconds - s.start_seconds)
+            .sum::<f64>();
+        let min_speaker_duration = audio_duration * MIN_SPEAKER_FRACTION;
+
+        segments = merge_small_speakers(segments, min_speaker_duration);
+        segments = renumber_speakers(segments);
+
+        Ok(segments)
     }
+}
+
+/// Reassign segments from speakers with total duration < `min_duration`
+/// to the temporally nearest dominant speaker.
+fn merge_small_speakers(
+    segments: Vec<SpeakerSegment>,
+    min_duration: f64,
+) -> Vec<SpeakerSegment> {
+    use std::collections::HashMap;
+
+    let mut duration_per_speaker: HashMap<u32, f64> = HashMap::new();
+    for s in &segments {
+        *duration_per_speaker
+            .entry(s.speaker_id)
+            .or_insert(0.0) += s.end_seconds - s.start_seconds;
+    }
+
+    let dominant: std::collections::HashSet<u32> = duration_per_speaker
+        .iter()
+        .filter(|(_, &dur)| dur >= min_duration)
+        .map(|(&id, _)| id)
+        .collect();
+
+    if dominant.is_empty() || dominant.len() == duration_per_speaker.len() {
+        return segments;
+    }
+
+    // Pre-compute dominant midpoints for nearest-neighbor lookup.
+    let dominant_midpoints: Vec<(u32, f64)> = segments
+        .iter()
+        .filter(|s| dominant.contains(&s.speaker_id))
+        .map(|s| (s.speaker_id, (s.start_seconds + s.end_seconds) / 2.0))
+        .collect();
+
+    segments
+        .into_iter()
+        .map(|mut s| {
+            if dominant.contains(&s.speaker_id) {
+                return s;
+            }
+            let mid = (s.start_seconds + s.end_seconds) / 2.0;
+            let mut best_id = s.speaker_id;
+            let mut best_dist = f64::MAX;
+            for &(id, o_mid) in &dominant_midpoints {
+                let dist = (mid - o_mid).abs();
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_id = id;
+                }
+            }
+            s.speaker_id = best_id;
+            s
+        })
+        .collect()
+}
+
+/// Renumber speaker IDs contiguously from 0, preserving order of first appearance.
+fn renumber_speakers(segments: Vec<SpeakerSegment>) -> Vec<SpeakerSegment> {
+    use std::collections::HashMap;
+
+    let mut mapping: HashMap<u32, u32> = HashMap::new();
+    let mut next_id: u32 = 0;
+    segments
+        .into_iter()
+        .map(|mut s| {
+            let assigned = *mapping.entry(s.speaker_id).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id
+            });
+            s.speaker_id = assigned;
+            s
+        })
+        .collect()
 }
 
 pub struct SherpaOnnxRegistryAdapter {
@@ -307,5 +405,42 @@ mod tests {
         assert!(registry.contains("Alice").unwrap());
         registry.remove("Alice").unwrap();
         assert!(!registry.contains("Alice").unwrap());
+    }
+
+    #[test]
+    fn merge_small_speakers_absorbs_noise() {
+        // Speaker 0: 60s total (dominant).  Speaker 1: 0.5s (noise).
+        let segments = vec![
+            SpeakerSegment { start_seconds: 0.0, end_seconds: 60.0, speaker_id: 0 },
+            SpeakerSegment { start_seconds: 30.0, end_seconds: 30.5, speaker_id: 1 },
+        ];
+        // min_duration = 2.0s → speaker 1 is noise, gets merged to speaker 0.
+        let merged = merge_small_speakers(segments, 2.0);
+        assert!(merged.iter().all(|s| s.speaker_id == 0));
+    }
+
+    #[test]
+    fn merge_small_speakers_keeps_dominant() {
+        // Both speakers above threshold → no change.
+        let segments = vec![
+            SpeakerSegment { start_seconds: 0.0, end_seconds: 10.0, speaker_id: 0 },
+            SpeakerSegment { start_seconds: 10.0, end_seconds: 20.0, speaker_id: 1 },
+        ];
+        let merged = merge_small_speakers(segments, 1.0);
+        assert_eq!(merged[0].speaker_id, 0);
+        assert_eq!(merged[1].speaker_id, 1);
+    }
+
+    #[test]
+    fn renumber_speakers_contiguous() {
+        let segments = vec![
+            SpeakerSegment { start_seconds: 0.0, end_seconds: 1.0, speaker_id: 42 },
+            SpeakerSegment { start_seconds: 1.0, end_seconds: 2.0, speaker_id: 7 },
+            SpeakerSegment { start_seconds: 2.0, end_seconds: 3.0, speaker_id: 42 },
+        ];
+        let renumbered = renumber_speakers(segments);
+        assert_eq!(renumbered[0].speaker_id, 0); // 42 → 0
+        assert_eq!(renumbered[1].speaker_id, 1); // 7 → 1
+        assert_eq!(renumbered[2].speaker_id, 0); // 42 → 0
     }
 }

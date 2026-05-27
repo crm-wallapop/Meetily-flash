@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef, useReducer, startTransition, useEffect, useState, memo } from "react";
+import { useCallback, useRef, useReducer, startTransition, useEffect, useState, useMemo, memo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAutoScroll } from "@/hooks/useAutoScroll";
 import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
@@ -9,6 +9,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
+import { SpeakerBadge } from "./SpeakerBadge";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -69,6 +70,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     timestamp,
     text,
     confidence,
+    speaker,
+    speakerIndex,
     isStreaming,
     showConfidence,
 }: {
@@ -76,6 +79,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     timestamp: number;
     text: string;
     confidence?: number;
+    speaker?: string;
+    speakerIndex?: number;
     isStreaming: boolean;
     showConfidence: boolean;
 }) {
@@ -97,6 +102,11 @@ const TranscriptSegment = memo(function TranscriptSegment({
                     </TooltipContent>
                 </Tooltip>
                 <div className="flex-1">
+                    {speaker && (
+                        <div className="mb-1">
+                            <SpeakerBadge name={speaker} colorIndex={speakerIndex ?? 0} />
+                        </div>
+                    )}
                     {isStreaming ? (
                         <div className="bg-gray-100 border border-gray-200 rounded-lg px-3 py-2">
                             <p className="text-base text-gray-800 leading-relaxed">{displayText}</p>
@@ -223,6 +233,21 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     // Use simple rendering for small lists, virtualization for large lists
     const useVirtualization = segments.length >= VIRTUALIZATION_THRESHOLD;
 
+    // Build stable speaker → index mapping (first appearance order)
+    const speakerIndexMap = useMemo(() => {
+        const map = new Map<string, number>();
+        let idx = 0;
+        for (const seg of segments) {
+            if (seg.speaker && !map.has(seg.speaker)) {
+                map.set(seg.speaker, idx++);
+            }
+        }
+        return map;
+    }, [segments]);
+
+    const getSpeakerIndex = (speaker: string | undefined): number | undefined =>
+        speaker ? speakerIndexMap.get(speaker) : undefined;
+
     return (
         <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">
             {/* Recording Status Bar - Sticky at top, always visible when recording */}
@@ -294,6 +319,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
+                                        speaker={segment.speaker}
+                                        speakerIndex={getSpeakerIndex(segment.speaker)}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
                                     />
@@ -350,6 +377,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
+                                        speaker={segment.speaker}
+                                        speakerIndex={getSpeakerIndex(segment.speaker)}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
                                     />
