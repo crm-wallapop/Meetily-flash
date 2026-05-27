@@ -9,3 +9,6 @@ pub mod commands;
 
 #[cfg(test)]
 pub mod mocks;
+
+#[cfg(test)]
+mod smoke_test;

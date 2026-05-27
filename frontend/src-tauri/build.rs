@@ -2,6 +2,9 @@
 mod ffmpeg;
 
 fn main() {
+    // Point ort-sys to sherpa-onnx's ORT to avoid version conflicts
+    configure_shared_ort();
+
     // GPU Acceleration Detection and Build Guidance
     detect_and_report_gpu_capabilities();
 
@@ -88,5 +91,48 @@ fn detect_and_report_gpu_capabilities() {
     if !cfg!(feature = "cuda") && !cfg!(feature = "vulkan") && !cfg!(feature = "hipblas") && !cfg!(feature = "openblas") && target_os != "macos" {
         println!("cargo:warning=📊 Performance: CPU-only builds are significantly slower than GPU/BLAS builds");
         println!("cargo:warning=📚 See README.md for GPU/BLAS setup instructions");
+    }
+}
+
+/// Both `sherpa-onnx-sys` (shared) and `ort-sys` bundle their own ONNX Runtime.
+/// If both download different versions, the DLL loaded at runtime wins, causing API
+/// version mismatches. This fn makes ort-sys reuse sherpa-onnx's ORT by setting
+/// `ORT_LIB_LOCATION` and `ORT_SKIP_DOWNLOAD` before ort-sys runs its build script.
+fn configure_shared_ort() {
+    if std::env::var_os("ORT_LIB_LOCATION").is_some() {
+        return;
+    }
+
+    let target_dir = std::env::var("CARGO_TARGET_DIR")
+        .ok()
+        .or_else(|| {
+            let out_dir = std::env::var("OUT_DIR").ok()?;
+            std::path::PathBuf::from(out_dir)
+                .ancestors()
+                .nth(3)
+                .map(|p| p.display().to_string())
+        })
+        .unwrap_or_else(|| "target".to_string());
+
+    let sherpa_prebuilt = std::path::Path::new(&target_dir)
+        .join("sherpa-onnx-prebuilt");
+
+    // Find the shared lib directory (name varies by version)
+    if let Ok(entries) = std::fs::read_dir(&sherpa_prebuilt) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.contains("shared") && name_str.contains("lib") {
+                let lib_dir = entry.path();
+                // Check for onnxruntime.dll or onnxruntime.lib in lib/ subdirectory
+                let lib_subdir = lib_dir.join("lib");
+                let check_dir = if lib_subdir.exists() { &lib_subdir } else { &lib_dir };
+                if check_dir.join("onnxruntime.lib").exists() || check_dir.join("onnxruntime.dll").exists() {
+                    std::env::set_var("ORT_LIB_LOCATION", check_dir);
+                    std::env::set_var("ORT_SKIP_DOWNLOAD", "1");
+                    return;
+                }
+            }
+        }
     }
 }
