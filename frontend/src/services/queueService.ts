@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 
 export type JobStatus = "Pending" | "InProgress" | "Paused" | "Done" | "Failed";
-export type JobPhase = "Transcribing" | "Summarising";
+export type JobPhase = "Transcribing" | "Summarising" | "Diarizing";
 
 /** IndexedDB-normalised snake_case status — single source of truth for persistence. */
 export type QueueJobStatus = "pending" | "in_progress" | "paused" | "done" | "failed";

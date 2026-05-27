@@ -196,11 +196,12 @@ pub enum JobResult {
     Failed(String),
 }
 
-/// Two-phase processing: first transcription, then (optionally) summary.
+/// Three-phase processing: transcription, then (optionally) summary, then diarization.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum JobPhase {
     Transcribing,
     Summarising,
+    Diarizing,
 }
 
 pub type AsyncJobResult = Pin<Box<dyn Future<Output = JobResult> + Send + 'static>>;
@@ -255,6 +256,8 @@ pub struct TranscriptionQueue {
     processor: ProcessorFn,
     /// Set to `Some` when an LLM provider is configured.
     summary_processor: Option<ProcessorFn>,
+    /// Set to `Some` when diarization models are available.
+    diarization_processor: Option<ProcessorFn>,
     /// Meeting IDs that have been force-started via run_job_now in manual mode.
     /// The worker loop checks this to bypass the manual-mode gate for those jobs.
     forced_meetings: Arc<Mutex<Vec<String>>>,
@@ -276,6 +279,23 @@ impl TranscriptionQueue {
             scheduler: Arc::new(Scheduler::new()),
             processor,
             summary_processor,
+            diarization_processor: None,
+            forced_meetings: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn with_all_processors(
+        processor: ProcessorFn,
+        summary_processor: Option<ProcessorFn>,
+        diarization_processor: Option<ProcessorFn>,
+    ) -> Self {
+        Self {
+            jobs: Arc::new(Mutex::new(Vec::new())),
+            notify: Arc::new(Notify::new()),
+            scheduler: Arc::new(Scheduler::new()),
+            processor,
+            summary_processor,
+            diarization_processor,
             forced_meetings: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -291,6 +311,7 @@ impl TranscriptionQueue {
             scheduler: Arc::new(Scheduler::with_config(config)),
             processor,
             summary_processor,
+            diarization_processor: None,
             forced_meetings: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -428,6 +449,7 @@ impl TranscriptionQueue {
         let scheduler = self.scheduler.clone();
         let processor = self.processor.clone();
         let summary_processor = self.summary_processor.clone();
+        let diarization_processor = self.diarization_processor.clone();
         let forced_meetings = self.forced_meetings.clone();
         tauri::async_runtime::spawn(worker_loop(
             jobs,
@@ -435,6 +457,7 @@ impl TranscriptionQueue {
             scheduler,
             processor,
             summary_processor,
+            diarization_processor,
             notifier,
             forced_meetings,
         ))
@@ -447,6 +470,7 @@ async fn worker_loop(
     scheduler: Arc<Scheduler>,
     processor: ProcessorFn,
     summary_processor: Option<ProcessorFn>,
+    diarization_processor: Option<ProcessorFn>,
     notifier: Option<StateChangeNotifier>,
     forced_meetings: Arc<Mutex<Vec<String>>>,
 ) {
@@ -584,6 +608,13 @@ async fn worker_loop(
                         JobResult::Completed
                     }
                 }
+                JobPhase::Diarizing => {
+                    if let Some(ref dp) = diarization_processor {
+                        (dp)(meeting_id.clone(), audio_path).await
+                    } else {
+                        JobResult::Completed
+                    }
+                }
             };
 
             // Update status / phase based on result.
@@ -607,9 +638,25 @@ async fn worker_loop(
                                 {
                                     j.phase = JobPhase::Summarising;
                                     j.status = JobStatus::Pending;
-                                    // In manual mode can_run() is false, so the worker
-                                    // won't auto-pick up the summary phase. Re-add to
-                                    // forced_meetings so the chain continues.
+                                    if !forced.contains(&meeting_id) {
+                                        forced.push(meeting_id.clone());
+                                    }
+                                } else if j.phase == JobPhase::Transcribing
+                                    && summary_processor.is_none()
+                                    && diarization_processor.is_some()
+                                {
+                                    // No summary — chain directly to diarization
+                                    j.phase = JobPhase::Diarizing;
+                                    j.status = JobStatus::Pending;
+                                    if !forced.contains(&meeting_id) {
+                                        forced.push(meeting_id.clone());
+                                    }
+                                } else if j.phase == JobPhase::Summarising
+                                    && diarization_processor.is_some()
+                                {
+                                    // After summary, chain to diarization
+                                    j.phase = JobPhase::Diarizing;
+                                    j.status = JobStatus::Pending;
                                     if !forced.contains(&meeting_id) {
                                         forced.push(meeting_id.clone());
                                     }
@@ -1292,6 +1339,7 @@ mod tests {
             scheduler: Arc::new(Scheduler::with_config(config)),
             processor,
             summary_processor: None,
+            diarization_processor: None,
             forced_meetings: Arc::new(Mutex::new(Vec::new())),
         });
 
@@ -1349,6 +1397,7 @@ mod tests {
                     JobResult::Completed
                 })
             })),
+            diarization_processor: None,
             forced_meetings: Arc::new(Mutex::new(Vec::new())),
         });
 
@@ -1387,6 +1436,7 @@ mod tests {
             scheduler: Arc::new(Scheduler::with_config(config)),
             processor: noop_processor(),
             summary_processor: None,
+            diarization_processor: None,
             forced_meetings: Arc::new(Mutex::new(Vec::new())),
         });
 
@@ -1421,5 +1471,133 @@ mod tests {
         let forced = queue.forced_meetings.lock().await;
         assert!(!forced.contains(&"cancel-forced".to_string()),
             "cancel must clean up forced_meetings entry");
+    }
+
+    // ── Diarizing phase tests (Group 8) ────────────────────────────────────────
+
+    #[test]
+    fn diarizing_phase_serialization_round_trip() {
+        let phase = JobPhase::Diarizing;
+        let json = serde_json::to_string(&phase).unwrap();
+        let parsed: JobPhase = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, JobPhase::Diarizing);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn summarising_chains_to_diarizing() {
+        SHOULD_YIELD.store(false, Ordering::SeqCst);
+
+        let diarization_called = Arc::new(AtomicBool::new(false));
+        let d_flag = diarization_called.clone();
+
+        let queue = Arc::new(TranscriptionQueue::with_all_processors(
+            Arc::new(|_id, _path| Box::pin(async { JobResult::CompletedChain })),
+            Some(Arc::new(|_id, _path| Box::pin(async { JobResult::CompletedChain }))),
+            Some(Arc::new(move |_id, _path| {
+                let f = d_flag.clone();
+                Box::pin(async move {
+                    f.store(true, Ordering::SeqCst);
+                    JobResult::Completed
+                })
+            })),
+        ));
+
+        let _handle = queue.spawn_worker();
+        queue.enqueue("dia-chain".to_string(), PathBuf::from("/audio.mp4")).await;
+        wait_for_status(&queue, "dia-chain", JobStatus::Done).await;
+
+        assert!(diarization_called.load(Ordering::SeqCst), "diarization must run after summary");
+
+        let state = queue.get_state().await;
+        let job = state.jobs.iter().find(|j| j.meeting_id == "dia-chain").unwrap();
+        assert_eq!(job.phase, JobPhase::Diarizing, "job must end in Diarizing phase after chaining");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn transcribing_chains_directly_to_diarizing_when_no_summary() {
+        SHOULD_YIELD.store(false, Ordering::SeqCst);
+
+        let diarization_called = Arc::new(AtomicBool::new(false));
+        let d_flag = diarization_called.clone();
+
+        let queue = Arc::new(TranscriptionQueue::with_all_processors(
+            Arc::new(|_id, _path| Box::pin(async { JobResult::CompletedChain })),
+            None,
+            Some(Arc::new(move |_id, _path| {
+                let f = d_flag.clone();
+                Box::pin(async move {
+                    f.store(true, Ordering::SeqCst);
+                    JobResult::Completed
+                })
+            })),
+        ));
+
+        let _handle = queue.spawn_worker();
+        queue.enqueue("dia-direct".to_string(), PathBuf::from("/audio.mp4")).await;
+        wait_for_status(&queue, "dia-direct", JobStatus::Done).await;
+
+        assert!(diarization_called.load(Ordering::SeqCst), "diarization must run directly after transcription when no summary");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn diarizing_phase_respects_scheduler_gates() {
+        SHOULD_YIELD.store(false, Ordering::SeqCst);
+
+        let diarization_called = Arc::new(AtomicBool::new(false));
+        let d_flag = diarization_called.clone();
+
+        let queue = Arc::new(TranscriptionQueue::with_all_processors(
+            Arc::new(|_id, _path| Box::pin(async { JobResult::Completed })),
+            None,
+            Some(Arc::new(move |_id, _path| {
+                let f = d_flag.clone();
+                Box::pin(async move {
+                    f.store(true, Ordering::SeqCst);
+                    JobResult::Completed
+                })
+            })),
+        ));
+
+        queue.scheduler.recording_busy.store(true, Ordering::SeqCst);
+        let _handle = queue.spawn_worker();
+        queue.enqueue("dia-gated".to_string(), PathBuf::from("/audio.mp4")).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!diarization_called.load(Ordering::SeqCst), "diarization must not run while scheduler is blocked");
+
+        queue.scheduler.recording_busy.store(false, Ordering::SeqCst);
+        queue.resume_all().await;
+
+        wait_for_status(&queue, "dia-gated", JobStatus::Done).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn snapshot_includes_diarizing_phase() {
+        let queue = Arc::new(TranscriptionQueue::with_all_processors(
+            noop_processor(),
+            None,
+            None,
+        ));
+        queue.enqueue("dia-snap".to_string(), PathBuf::from("/audio.mp4")).await;
+
+        // Manually set phase for testing
+        {
+            let mut jobs = queue.jobs.lock().await;
+            if let Some(j) = jobs.iter_mut().find(|j| j.meeting_id == "dia-snap") {
+                j.phase = JobPhase::Diarizing;
+            }
+        }
+
+        let state = queue.get_state().await;
+        let job = state.jobs.iter().find(|j| j.meeting_id == "dia-snap").unwrap();
+        assert_eq!(job.phase, JobPhase::Diarizing);
+
+        // Verify serialization
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("Diarizing"), "snapshot JSON must include Diarizing phase");
     }
 }

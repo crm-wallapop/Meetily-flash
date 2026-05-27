@@ -1120,6 +1120,11 @@ pub fn run() {
             audio::import::start_import_audio_command,
             audio::import::cancel_import_command,
             audio::import::is_import_in_progress_command,
+            // Speaker labeling commands
+            audio::speaker::commands::label_speaker,
+            audio::speaker::commands::list_speakers_cmd,
+            audio::speaker::commands::remove_speaker_cmd,
+            audio::speaker::commands::rediarize_meeting,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

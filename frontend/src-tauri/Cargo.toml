@@ -130,6 +130,9 @@ sysinfo = "0.32"
 
 lazy_static = { version = "1.4.0" }
 realfft = "3.4.0"
+
+# Speaker diarization and embedding
+sherpa-onnx = { version = "1.13", default-features = false, features = ["shared"] }
 regex = "1.11.0"
 ipnet = "2.9"
 ndarray = "0.16"
