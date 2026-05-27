@@ -77,6 +77,8 @@ impl SpeakerEmbeddingPort for SherpaOnnxEmbeddingAdapter {
 pub struct SherpaOnnxDiarizationAdapter {
     model_path: PathBuf,
     segmentation_model_path: PathBuf,
+    embedding_extractor: SpeakerEmbeddingExtractor,
+    embedding_dim: usize,
 }
 
 impl SherpaOnnxDiarizationAdapter {
@@ -89,16 +91,26 @@ impl SherpaOnnxDiarizationAdapter {
         if !sp.exists() {
             return Err(anyhow!("segmentation model not found: {}", segmentation_model_path));
         }
+
+        let emb_config = SpeakerEmbeddingExtractorConfig {
+            model: Some(mp.to_string_lossy().to_string()),
+            num_threads: 2,
+            debug: false,
+            provider: Some("cpu".to_string()),
+        };
+        let extractor = SpeakerEmbeddingExtractor::create(&emb_config)
+            .ok_or_else(|| anyhow!("failed to create embedding extractor for diarization"))?;
+        let dim = extractor.dim() as usize;
+
         Ok(Self {
             model_path: mp,
             segmentation_model_path: sp,
+            embedding_extractor: extractor,
+            embedding_dim: dim,
         })
     }
 
     fn create_diarization(&self) -> Result<OfflineSpeakerDiarization> {
-        // threshold = cosine-dissimilarity cut height on complete-linkage dendrogram.
-        // Higher → more merges → fewer speakers.  3dspeaker embeddings on noisy
-        // meeting audio need an aggressive threshold to avoid over-segmentation.
         let config = OfflineSpeakerDiarizationConfig {
             segmentation: OfflineSpeakerSegmentationModelConfig {
                 pyannote: OfflineSpeakerSegmentationPyannoteModelConfig {
@@ -123,11 +135,25 @@ impl SherpaOnnxDiarizationAdapter {
         OfflineSpeakerDiarization::create(&config)
             .ok_or_else(|| anyhow!("failed to create diarization"))
     }
+
+    /// Extract a single embedding from an audio chunk at `sample_rate`.
+    fn extract_embedding(&self, audio: &[f32], sample_rate: u32) -> Option<Vec<f32>> {
+        let stream = self.embedding_extractor.create_stream()?;
+        stream.accept_waveform(sample_rate as i32, audio);
+        if !self.embedding_extractor.is_ready(&stream) {
+            return None;
+        }
+        self.embedding_extractor.compute(&stream)
+    }
 }
 
 /// Speakers whose total airtime is below this fraction of the audio duration
 /// are considered noise and merged into the temporally nearest dominant speaker.
 const MIN_SPEAKER_FRACTION: f64 = 0.03;
+
+/// Cosine similarity above which two speaker clusters are merged in the
+/// second-pass centroid clustering.  0.55 = fairly permissive merge.
+const MERGE_SIMILARITY: f32 = 0.50;
 
 impl DiarizationPort for SherpaOnnxDiarizationAdapter {
     fn process(&self, samples: &[f32], _sample_rate: u32) -> Result<Vec<SpeakerSegment>> {
@@ -154,15 +180,28 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
             return Ok(Vec::new());
         }
 
+        // Pass 1: absorb tiny noise clusters into nearest dominant speaker.
         let audio_duration = segments
             .iter()
             .map(|s| s.end_seconds - s.start_seconds)
             .sum::<f64>();
         let min_speaker_duration = audio_duration * MIN_SPEAKER_FRACTION;
-
         segments = merge_small_speakers(segments, min_speaker_duration);
-        segments = renumber_speakers(segments);
 
+        // Pass 2: re-cluster speaker centroids by extracting embeddings from
+        // each speaker's audio and merging those whose cosine similarity exceeds
+        // the threshold.  This catches over-segmentation that threshold tuning
+        // alone cannot fix.
+        segments = merge_similar_speakers(
+            &self.embedding_extractor,
+            self.embedding_dim,
+            segments,
+            samples,
+            16000,
+            MERGE_SIMILARITY,
+        );
+
+        segments = renumber_speakers(segments);
         Ok(segments)
     }
 }
@@ -219,6 +258,151 @@ fn merge_small_speakers(
             s
         })
         .collect()
+}
+
+/// Second-pass clustering: extract an average embedding per speaker from the
+/// original audio, then agglomeratively merge speakers whose centroid cosine
+/// similarity is above `threshold`.
+fn merge_similar_speakers(
+    extractor: &SpeakerEmbeddingExtractor,
+    dim: usize,
+    segments: Vec<SpeakerSegment>,
+    samples: &[f32],
+    sample_rate: u32,
+    threshold: f32,
+) -> Vec<SpeakerSegment> {
+    use std::collections::HashMap;
+
+    let speaker_ids: Vec<u32> = segments
+        .iter()
+        .map(|s| s.speaker_id)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    if speaker_ids.len() <= 1 {
+        return segments;
+    }
+
+    // Build speaker → list of (start_sample, end_sample) from segments.
+    let sr = sample_rate as f64;
+    let mut chunks: HashMap<u32, Vec<(usize, usize)>> = HashMap::new();
+    for s in &segments {
+        let start = ((s.start_seconds * sr) as usize).min(samples.len());
+        let end = ((s.end_seconds * sr) as usize).min(samples.len());
+        if end > start {
+            chunks.entry(s.speaker_id).or_default().push((start, end));
+        }
+    }
+
+    // Extract average embedding per speaker.
+    let mut centroids: HashMap<u32, Vec<f32>> = HashMap::new();
+    for &sid in &speaker_ids {
+        let Some(speaker_chunks) = chunks.get(&sid) else {
+            continue;
+        };
+        let mut sum = vec![0.0f32; dim];
+        let mut count = 0usize;
+        for &(start, end) in speaker_chunks {
+            let audio = &samples[start..end];
+            let stream = match extractor.create_stream() {
+                Some(s) => s,
+                None => continue,
+            };
+            stream.accept_waveform(sample_rate as i32, audio);
+            if !extractor.is_ready(&stream) {
+                continue;
+            }
+            let emb = match extractor.compute(&stream) {
+                Some(e) => e,
+                None => continue,
+            };
+            for (i, v) in emb.iter().enumerate() {
+                sum[i] += v;
+            }
+            count += 1;
+        }
+        if count > 0 {
+            for v in &mut sum {
+                *v /= count as f32;
+            }
+            centroids.insert(sid, sum);
+        }
+    }
+
+    if centroids.len() <= 1 {
+        return segments;
+    }
+
+    // Agglomerative merge: repeatedly find the most similar pair above threshold.
+    // `mapping[sid]` = the canonical speaker ID after merges.
+    let mut mapping: HashMap<u32, u32> = HashMap::new();
+    for &sid in &speaker_ids {
+        mapping.insert(sid, sid);
+    }
+    let mut merged_centroids: HashMap<u32, Vec<f32>> = centroids.clone();
+
+    loop {
+        let mut best_sim = threshold;
+        let mut best_pair: Option<(u32, u32)> = None;
+
+        let ids: Vec<u32> = mapping.values().copied().collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                let a = ids[i];
+                let b = ids[j];
+                let ca = merged_centroids.get(&a);
+                let cb = merged_centroids.get(&b);
+                if let (Some(ca), Some(cb)) = (ca, cb) {
+                    let sim = cosine_similarity(ca, cb);
+                    if sim > best_sim {
+                        best_sim = sim;
+                        best_pair = Some((a, b));
+                    }
+                }
+            }
+        }
+
+        let Some((a, b)) = best_pair else { break };
+
+        // Merge b into a: average their centroids weighted by chunk count.
+        let new_a = if let (Some(ca), Some(cb)) =
+            (merged_centroids.get(&a).cloned(), merged_centroids.get(&b).cloned())
+        {
+            ca.iter().zip(cb.iter()).map(|(x, y)| (x + y) / 2.0).collect()
+        } else {
+            continue;
+        };
+        merged_centroids.insert(a, new_a);
+        merged_centroids.remove(&b);
+
+        for (_, canonical) in mapping.iter_mut() {
+            if *canonical == b {
+                *canonical = a;
+            }
+        }
+    }
+
+    segments
+        .into_iter()
+        .map(|mut s| {
+            s.speaker_id = *mapping.get(&s.speaker_id).unwrap_or(&s.speaker_id);
+            s
+        })
+        .collect()
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a < 1e-8 || norm_b < 1e-8 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
 }
 
 /// Renumber speaker IDs contiguously from 0, preserving order of first appearance.
@@ -442,5 +626,32 @@ mod tests {
         assert_eq!(renumbered[0].speaker_id, 0); // 42 → 0
         assert_eq!(renumbered[1].speaker_id, 1); // 7 → 1
         assert_eq!(renumbered[2].speaker_id, 0); // 42 → 0
+    }
+
+    #[test]
+    fn cosine_similarity_identical() {
+        let a = vec![1.0, 0.0, 0.0];
+        assert!((cosine_similarity(&a, &a) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_orthogonal() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        assert!((cosine_similarity(&a, &b)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_opposite() {
+        let a = vec![1.0, 0.0];
+        let b = vec![-1.0, 0.0];
+        assert!((cosine_similarity(&a, &b) + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_zero_vector() {
+        let a = vec![1.0, 0.0];
+        let b = vec![0.0, 0.0];
+        assert!((cosine_similarity(&a, &b)).abs() < 1e-6);
     }
 }
