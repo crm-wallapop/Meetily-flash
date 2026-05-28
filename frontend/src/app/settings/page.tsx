@@ -11,6 +11,7 @@ import { PreferenceSettings } from '@/components/PreferenceSettings';
 import { SummaryModelSettings } from '@/components/SummaryModelSettings';
 import { BetaSettings } from '@/components/BetaSettings';
 import { BackgroundProcessingSettings } from '@/components/BackgroundProcessingSettings';
+import { SpeakerMergeThresholdSlider } from '@/components/SpeakerSettings';
 import { useConfig } from '@/contexts/ConfigContext';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
@@ -131,6 +132,7 @@ export default function SettingsPage() {
                 transcriptModelConfig={transcriptModelConfig}
                 setTranscriptModelConfig={setTranscriptModelConfig}
               />
+              <SpeakerMergeThresholdSlider />
             </TabsContent>
             <TabsContent value="summaryModels">
               <SummaryModelSettings />
