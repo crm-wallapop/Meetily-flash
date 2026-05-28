@@ -285,11 +285,11 @@ pub async fn rediarize_meeting(
 pub async fn get_speaker_merge_threshold(
     pool: tauri::State<'_, SqlitePool>,
 ) -> Result<f64, String> {
-    let row = sqlx::query("SELECT speaker_merge_threshold FROM settings LIMIT 1")
+    let row = sqlx::query("SELECT speakerMergeThreshold FROM settings LIMIT 1")
         .fetch_one(pool.inner())
         .await
         .map_err(|e| e.to_string())?;
-    let threshold: f64 = sqlx::Row::get(&row, "speaker_merge_threshold");
+    let threshold: f64 = sqlx::Row::get(&row, "speakerMergeThreshold");
     Ok(threshold)
 }
 
@@ -302,7 +302,7 @@ pub async fn set_speaker_merge_threshold(
     if !(0.30..=0.70).contains(&threshold) {
         return Err("Threshold must be between 0.30 and 0.70".to_string());
     }
-    sqlx::query("UPDATE settings SET speaker_merge_threshold = ? WHERE id = '1'")
+    sqlx::query("UPDATE settings SET speakerMergeThreshold = ? WHERE id = '1'")
         .bind(threshold)
         .execute(pool.inner())
         .await
