@@ -65,6 +65,14 @@ export async function setMaxSpeakers(cap: number): Promise<void> {
   return invoke<void>("set_max_speakers", { cap });
 }
 
+export async function getDiarizationEnabled(): Promise<boolean> {
+  return invoke<boolean>("get_diarization_enabled");
+}
+
+export async function setDiarizationEnabled(enabled: boolean): Promise<void> {
+  return invoke<void>("set_diarization_enabled", { enabled });
+}
+
 export function getSpeakerColor(index: number): string {
   const hue = (index * 137.508) % 360;
   return `hsl(${hue}, 65%, 55%)`;

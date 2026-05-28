@@ -526,6 +526,14 @@ async fn run_retranscription<R: Runtime>(
     // Run speaker diarization on the new transcripts
     emit_progress(&app, &meeting_id, "diarizing", 95, "Detecting speakers...");
     if let Some(app_state) = app.try_state::<AppState>() {
+        let diarization_enabled: bool = sqlx::query("SELECT diarizationEnabled FROM settings LIMIT 1")
+            .fetch_one(app_state.db_manager.pool())
+            .await
+            .map(|r| sqlx::Row::get::<i64, _>(&r, "diarizationEnabled") != 0)
+            .unwrap_or(true);
+        if !diarization_enabled {
+            info!("Diarization skipped — disabled in settings");
+        } else {
         let threshold_fp = app_state.speaker_merge_threshold_fp.load(Ordering::Relaxed);
         let diarize_result = crate::audio::speaker::commands::run_diarization_for_meeting(
             app_state.db_manager.pool(),
@@ -545,6 +553,7 @@ async fn run_retranscription<R: Runtime>(
                 }));
             }
             Err(e) => warn!("Post-retranscription diarization failed (non-fatal): {}", e),
+        }
         }
     }
 

@@ -1133,6 +1133,8 @@ pub fn run() {
             audio::speaker::commands::set_max_speakers,
             audio::speaker::model_download::download_speaker_models,
             audio::speaker::model_download::check_speaker_models_available,
+            audio::speaker::commands::get_diarization_enabled,
+            audio::speaker::commands::set_diarization_enabled,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

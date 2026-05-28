@@ -18,7 +18,6 @@ fn sanitize_speaker_name(name: &str) -> Result<String, String> {
             trimmed.len()
         ));
     }
-    // Strip HTML tags to prevent XSS
     let sanitized = strip_html_tags(trimmed);
     Ok(sanitized)
 }
@@ -38,24 +37,23 @@ fn strip_html_tags(input: &str) -> String {
 }
 
 fn pick_color(index: usize) -> String {
-    // Golden angle spacing — maximizes hue separation between consecutive speakers.
     let hue = (index as f64 * 137.508) % 360.0;
     format!("hsl({}, 65%, 55%)", hue.round() as u16)
 }
 
 #[tauri::command]
 pub async fn label_speaker(
-    pool: tauri::State<'_, SqlitePool>,
+    app_state: tauri::State<'_, AppState>,
     meeting_id: String,
     cluster_label: String,
     speaker_name: String,
 ) -> Result<String, String> {
+    let pool = app_state.db_manager.pool();
     let name = sanitize_speaker_name(&speaker_name)?;
 
-    // Verify meeting exists
     let meeting_exists = sqlx::query("SELECT id FROM meetings WHERE id = ?")
         .bind(&meeting_id)
-        .fetch_optional(pool.inner())
+        .fetch_optional(pool)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -63,13 +61,12 @@ pub async fn label_speaker(
         return Err(format!("Meeting not found: {}", meeting_id));
     }
 
-    // Verify cluster has transcripts
     let cluster_rows = sqlx::query(
         "SELECT COUNT(*) as count FROM transcripts WHERE meeting_id = ? AND speaker_label = ?",
     )
     .bind(&meeting_id)
     .bind(&cluster_label)
-    .fetch_one(pool.inner())
+    .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
 
@@ -81,7 +78,6 @@ pub async fn label_speaker(
         ));
     }
 
-    // Create or find speaker
     let speaker_id = format!("speaker-{}", Uuid::new_v4());
 
     #[derive(sqlx::FromRow)]
@@ -90,33 +86,31 @@ pub async fn label_speaker(
         color: String,
     }
 
-    // Check if a speaker with this name already exists
     let existing = sqlx::query_as::<_, SpeakerIdColor>(
         "SELECT id, color FROM speakers WHERE name = ?",
     )
     .bind(&name)
-    .fetch_optional(pool.inner())
+    .fetch_optional(pool)
     .await
     .map_err(|e| e.to_string())?;
 
-    let (final_speaker_id, final_color) = match existing {
+    let (final_speaker_id, _final_color) = match existing {
         Some(row) => (row.id, row.color),
         None => {
-            let speaker_count = SpeakerRepository::list_speakers(pool.inner())
+            let speaker_count = SpeakerRepository::list_speakers(pool)
                 .await
                 .map(|s| s.len())
                 .unwrap_or(0);
             let color = pick_color(speaker_count);
-            SpeakerRepository::create_speaker(pool.inner(), &speaker_id, &name, &color)
+            SpeakerRepository::create_speaker(pool, &speaker_id, &name, &color)
                 .await
                 .map_err(|e| e.to_string())?;
             (speaker_id, color)
         }
     };
 
-    // Update all transcript rows for this cluster
     let updated = SpeakerRepository::update_meeting_speakers(
-        pool.inner(),
+        pool,
         &meeting_id,
         &cluster_label,
         &name,
@@ -137,9 +131,10 @@ pub async fn label_speaker(
 
 #[tauri::command]
 pub async fn list_speakers_cmd(
-    pool: tauri::State<'_, SqlitePool>,
+    app_state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let speakers = SpeakerRepository::list_speakers(pool.inner())
+    let pool = app_state.db_manager.pool();
+    let speakers = SpeakerRepository::list_speakers(pool)
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(speakers).map_err(|e| e.to_string())
@@ -147,10 +142,11 @@ pub async fn list_speakers_cmd(
 
 #[tauri::command]
 pub async fn remove_speaker_cmd(
-    pool: tauri::State<'_, SqlitePool>,
+    app_state: tauri::State<'_, AppState>,
     speaker_id: String,
 ) -> Result<bool, String> {
-    SpeakerRepository::remove_speaker(pool.inner(), &speaker_id)
+    let pool = app_state.db_manager.pool();
+    SpeakerRepository::remove_speaker(pool, &speaker_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -158,12 +154,12 @@ pub async fn remove_speaker_cmd(
 #[tauri::command]
 pub async fn rediarize_meeting<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
-    pool: tauri::State<'_, SqlitePool>,
     app_state: tauri::State<'_, AppState>,
     meeting_id: String,
 ) -> Result<u64, String> {
+    let pool = app_state.db_manager.pool().clone();
     let threshold_fp = app_state.speaker_merge_threshold_fp.load(Ordering::Relaxed);
-    let result = run_diarization_for_meeting(pool.inner(), &meeting_id, threshold_fp).await?;
+    let result = run_diarization_for_meeting(&pool, &meeting_id, threshold_fp).await?;
     let _ = app.emit("diarization-complete", serde_json::json!({
         "meeting_id": meeting_id,
         "speaker_count": result.speaker_count,
@@ -173,13 +169,11 @@ pub async fn rediarize_meeting<R: tauri::Runtime>(
 }
 
 /// Run speaker diarization on a meeting's audio and label transcripts.
-/// Can be called from any context (Tauri command, retranscription, import).
 pub async fn run_diarization_for_meeting(
     pool: &SqlitePool,
     meeting_id: &str,
     threshold_fp: u32,
 ) -> Result<DiarizationResult, String> {
-    // Clear existing auto labels
     let cleared = SpeakerRepository::clear_auto_speaker_labels(pool, meeting_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -190,7 +184,6 @@ pub async fn run_diarization_for_meeting(
         meeting_id
     );
 
-    // Look up meeting folder path
     let row = sqlx::query("SELECT folder_path FROM meetings WHERE id = ?")
         .bind(meeting_id)
         .fetch_optional(pool)
@@ -203,7 +196,6 @@ pub async fn run_diarization_for_meeting(
         return Ok(DiarizationResult { segments_labeled: cleared, speaker_count: 0 });
     };
 
-    // Find audio file — try standard names first, then any audio extension
     let folder_path = std::path::Path::new(&folder);
     let audio_path = find_audio_in_folder(folder_path);
     let Some(audio_path) = audio_path else {
@@ -211,7 +203,6 @@ pub async fn run_diarization_for_meeting(
         return Ok(DiarizationResult { segments_labeled: cleared, speaker_count: 0 });
     };
 
-    // Resolve model paths
     let models_dir = dirs::home_dir()
         .unwrap_or_default()
         .join(".meetily-models");
@@ -223,12 +214,10 @@ pub async fn run_diarization_for_meeting(
         return Ok(DiarizationResult { segments_labeled: cleared, speaker_count: 0 });
     }
 
-    // Decode audio
     let decoded = crate::audio::decoder::decode_audio_file(&audio_path)
         .map_err(|e| format!("Audio decode failed: {}", e))?;
     let mono = to_mono_f32(&decoded);
 
-    // Create adapter with shared threshold
     let shared_fp = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(threshold_fp));
     let adapter = super::sherpa_adapter::SherpaOnnxDiarizationAdapter::with_shared_threshold(
         embedding_path.to_str().unwrap_or(""),
@@ -237,7 +226,6 @@ pub async fn run_diarization_for_meeting(
     )
     .map_err(|e| format!("Failed to create diarization adapter: {}", e))?;
 
-    // Run diarization
     let segments = adapter.process(&mono, 16000)
         .map_err(|e| format!("Diarization failed: {}", e))?;
 
@@ -254,7 +242,6 @@ pub async fn run_diarization_for_meeting(
         meeting_id
     );
 
-    // Fetch transcripts and align
     let transcripts = fetch_transcripts_for_alignment(pool, meeting_id).await
         .map_err(|e| format!("Failed to fetch transcripts: {}", e))?;
 
@@ -292,12 +279,10 @@ pub async fn run_diarization_for_meeting(
         meeting_id
     );
 
-    let result = DiarizationResult {
+    Ok(DiarizationResult {
         segments_labeled,
         speaker_count: num_speakers.len(),
-    };
-
-    Ok(result)
+    })
 }
 
 pub struct DiarizationResult {
@@ -320,11 +305,40 @@ fn find_audio_in_folder(folder: &std::path::Path) -> Option<std::path::PathBuf> 
 }
 
 #[tauri::command]
+pub async fn get_diarization_enabled(
+    app_state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    let pool = app_state.db_manager.pool();
+    let row = sqlx::query("SELECT diarizationEnabled FROM settings LIMIT 1")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let enabled: i64 = sqlx::Row::get(&row, "diarizationEnabled");
+    Ok(enabled != 0)
+}
+
+#[tauri::command]
+pub async fn set_diarization_enabled(
+    app_state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let pool = app_state.db_manager.pool();
+    sqlx::query("UPDATE settings SET diarizationEnabled = ? WHERE id = '1'")
+        .bind(enabled as i64)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    log::info!("set_diarization_enabled: updated to {}", enabled);
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn get_speaker_merge_threshold(
-    pool: tauri::State<'_, SqlitePool>,
+    app_state: tauri::State<'_, AppState>,
 ) -> Result<f64, String> {
+    let pool = app_state.db_manager.pool();
     let row = sqlx::query("SELECT speakerMergeThreshold FROM settings LIMIT 1")
-        .fetch_one(pool.inner())
+        .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())?;
     let threshold: f64 = sqlx::Row::get(&row, "speakerMergeThreshold");
@@ -333,16 +347,16 @@ pub async fn get_speaker_merge_threshold(
 
 #[tauri::command]
 pub async fn set_speaker_merge_threshold(
-    pool: tauri::State<'_, SqlitePool>,
     app_state: tauri::State<'_, AppState>,
     threshold: f64,
 ) -> Result<(), String> {
     if !(0.30..=0.70).contains(&threshold) {
         return Err("Threshold must be between 0.30 and 0.70".to_string());
     }
+    let pool = app_state.db_manager.pool();
     sqlx::query("UPDATE settings SET speakerMergeThreshold = ? WHERE id = '1'")
         .bind(threshold)
-        .execute(pool.inner())
+        .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
     let fp = (threshold as f32 * 65536.0) as u32;
@@ -353,10 +367,11 @@ pub async fn set_speaker_merge_threshold(
 
 #[tauri::command]
 pub async fn get_speaker_embedding_model(
-    pool: tauri::State<'_, SqlitePool>,
+    app_state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
+    let pool = app_state.db_manager.pool();
     let row = sqlx::query("SELECT speakerEmbeddingModel FROM settings LIMIT 1")
-        .fetch_one(pool.inner())
+        .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())?;
     let model: String = sqlx::Row::get(&row, "speakerEmbeddingModel");
@@ -365,16 +380,17 @@ pub async fn get_speaker_embedding_model(
 
 #[tauri::command]
 pub async fn set_speaker_embedding_model(
-    pool: tauri::State<'_, SqlitePool>,
+    app_state: tauri::State<'_, AppState>,
     model: String,
 ) -> Result<(), String> {
     let valid = model == "3dspeaker" || model == "wespeaker";
     if !valid {
         return Err(format!("Unknown speaker embedding model: {}", model));
     }
+    let pool = app_state.db_manager.pool();
     sqlx::query("UPDATE settings SET speakerEmbeddingModel = ? WHERE id = '1'")
         .bind(&model)
-        .execute(pool.inner())
+        .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
     log::info!("set_speaker_embedding_model: updated to {}", model);
@@ -383,10 +399,11 @@ pub async fn set_speaker_embedding_model(
 
 #[tauri::command]
 pub async fn get_max_speakers(
-    pool: tauri::State<'_, SqlitePool>,
+    app_state: tauri::State<'_, AppState>,
 ) -> Result<i64, String> {
+    let pool = app_state.db_manager.pool();
     let row = sqlx::query("SELECT maxSpeakers FROM settings LIMIT 1")
-        .fetch_one(pool.inner())
+        .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())?;
     let cap: i64 = sqlx::Row::get(&row, "maxSpeakers");
@@ -395,15 +412,16 @@ pub async fn get_max_speakers(
 
 #[tauri::command]
 pub async fn set_max_speakers(
-    pool: tauri::State<'_, SqlitePool>,
+    app_state: tauri::State<'_, AppState>,
     cap: i64,
 ) -> Result<(), String> {
     if !(2..=20).contains(&cap) {
         return Err("Max speakers must be between 2 and 20".to_string());
     }
+    let pool = app_state.db_manager.pool();
     sqlx::query("UPDATE settings SET maxSpeakers = ? WHERE id = '1'")
         .bind(cap)
-        .execute(pool.inner())
+        .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
     log::info!("set_max_speakers: updated to {}", cap);
@@ -515,7 +533,6 @@ mod tests {
     fn pick_color_is_deterministic() {
         assert_eq!(pick_color(0), pick_color(0));
         assert_ne!(pick_color(0), pick_color(1));
-        // Golden angle ensures consecutive indices are far apart in hue
         let c0 = pick_color(0);
         let c1 = pick_color(1);
         assert!(c0.starts_with("hsl("));
