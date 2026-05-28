@@ -523,6 +523,31 @@ async fn run_retranscription<R: Runtime>(
         warn!("Failed to update metadata.json: {}", e);
     }
 
+    // Run speaker diarization on the new transcripts
+    emit_progress(&app, &meeting_id, "diarizing", 95, "Detecting speakers...");
+    if let Some(app_state) = app.try_state::<AppState>() {
+        let threshold_fp = app_state.speaker_merge_threshold_fp.load(Ordering::Relaxed);
+        let diarize_result = crate::audio::speaker::commands::run_diarization_for_meeting(
+            app_state.db_manager.pool(),
+            &meeting_id,
+            threshold_fp,
+        ).await;
+        match &diarize_result {
+            Ok(r) => {
+                info!(
+                    "Post-retranscription diarization: {} speakers, {} segments labeled",
+                    r.speaker_count, r.segments_labeled
+                );
+                let _ = app.emit("diarization-complete", serde_json::json!({
+                    "meeting_id": meeting_id,
+                    "speaker_count": r.speaker_count,
+                    "segments_labeled": r.segments_labeled,
+                }));
+            }
+            Err(e) => warn!("Post-retranscription diarization failed (non-fatal): {}", e),
+        }
+    }
+
     emit_progress(&app, &meeting_id, "complete", 100, "Retranscription complete");
 
     Ok(RetranscriptionResult {

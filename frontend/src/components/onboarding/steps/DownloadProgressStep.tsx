@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { Mic, Sparkles, Check, Loader2, Download } from 'lucide-react';
+import { Mic, Sparkles, Check, Loader2, Download, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { useOnboarding } from '@/contexts/OnboardingContext';
@@ -53,10 +53,19 @@ export function DownloadProgressStep() {
     speedMbps: 0,
   });
 
+  const [speakerModelState, setSpeakerModelState] = useState<DownloadState>({
+    status: 'waiting',
+    progress: 0,
+    downloadedMb: 0,
+    totalMb: 76, // ~50 MB segmentation + ~26 MB embedding
+    speedMbps: 0,
+  });
+
   const [isCompleting, setIsCompleting] = useState(false);
   const downloadStartedRef = useRef(false);
   const retryingRef = useRef(false);
   const retryingSummaryRef = useRef(false);
+  const retryingSpeakerRef = useRef(false);
 
   // Retry download handler
   const handleRetryDownload = async () => {
@@ -141,6 +150,36 @@ export function DownloadProgressStep() {
       setTimeout(() => {
         retryingSummaryRef.current = false;
       }, 2000);
+    }
+  };
+
+  // Retry speaker model download handler
+  const handleRetrySpeakerDownload = async () => {
+    if (retryingSpeakerRef.current) return;
+    retryingSpeakerRef.current = true;
+
+    setSpeakerModelState((prev) => ({
+      ...prev,
+      status: 'waiting',
+      error: undefined,
+      progress: 0,
+      downloadedMb: 0,
+      speedMbps: 0,
+    }));
+
+    try {
+      await invoke('download_speaker_models');
+    } catch (error) {
+      setSpeakerModelState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: error instanceof Error ? error.message : 'Retry failed',
+      }));
+      toast.error('Speaker model download retry failed', {
+        description: 'Please check your connection and try again.',
+      });
+    } finally {
+      setTimeout(() => { retryingSpeakerRef.current = false; }, 2000);
     }
   };
 
@@ -273,8 +312,46 @@ export function DownloadProgressStep() {
     };
   }, [selectedSummaryModel]);
 
+  // Listen to speaker model download progress
+  useEffect(() => {
+    let unlistenProgress: Promise<() => void>;
+    let unlistenError: Promise<() => void>;
+
+    unlistenProgress = listen<{
+      model: string;
+      progress: number;
+      downloaded_mb: number;
+      total_mb: number;
+      status: string;
+    }>('speaker-model-download-progress', (event) => {
+      setSpeakerModelState((prev) => ({
+        ...prev,
+        status: event.payload.status === 'completed' ? 'completed' : 'downloading',
+        progress: event.payload.progress,
+        downloadedMb: event.payload.downloaded_mb ?? prev.downloadedMb,
+        totalMb: event.payload.total_mb ?? prev.totalMb,
+      }));
+    });
+
+    unlistenError = listen<{
+      model: string;
+      error: string;
+    }>('speaker-model-download-error', () => {
+      setSpeakerModelState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: 'Download failed',
+      }));
+    });
+
+    return () => {
+      unlistenProgress.then((fn) => fn());
+      unlistenError.then((fn) => fn());
+    };
+  }, []);
+
   const startDownloads = async () => {
-    // Always download both Parakeet and Gemma (system-recommended)
+    // Always download Parakeet and Gemma; speaker models are best-effort
     if (!parakeetDownloaded || !summaryModelDownloaded) {
       try {
         if (!parakeetDownloaded) {
@@ -290,6 +367,26 @@ export function DownloadProgressStep() {
           setParakeetState((prev) => ({ ...prev, status: 'error', error: String(error) }));
         }
       }
+    }
+
+    // Start speaker model download (best-effort, doesn't block onboarding)
+    try {
+      const alreadyAvailable = await invoke<boolean>('check_speaker_models_available');
+      if (!alreadyAvailable) {
+        setSpeakerModelState((prev) => ({ ...prev, status: 'downloading' }));
+        invoke('download_speaker_models').catch((err) => {
+          console.warn('Speaker model download failed (non-blocking):', err);
+          setSpeakerModelState((prev) => ({
+            ...prev,
+            status: 'error',
+            error: 'Download failed — speaker detection will be unavailable',
+          }));
+        });
+      } else {
+        setSpeakerModelState((prev) => ({ ...prev, status: 'completed', progress: 100 }));
+      }
+    } catch {
+      // Ignore — speaker models are optional
     }
   };
 
@@ -356,7 +453,8 @@ export function DownloadProgressStep() {
     title: string,
     icon: React.ReactNode,
     state: DownloadState,
-    modelSize: string
+    modelSize: string,
+    onRetry?: () => void,
   ) => (
     <div className="bg-white rounded-xl border border-gray-200 p-5">
       <div className="flex items-center justify-between mb-4">
@@ -418,9 +516,9 @@ export function DownloadProgressStep() {
         <div className="mt-2 p-3 bg-red-50 border border-red-200 rounded-md">
           <p className="text-sm text-red-600 font-medium">Download Error</p>
           <p className="text-xs text-red-500 mt-1">{state.error}</p>
-          {(title === 'Transcription Engine' || title === 'Summary Engine') && (
+          {(onRetry || title === 'Transcription Engine' || title === 'Summary Engine') && (
             <button
-              onClick={title === 'Transcription Engine' ? handleRetryDownload : handleRetrySummaryDownload}
+              onClick={onRetry ?? (title === 'Transcription Engine' ? handleRetryDownload : handleRetrySummaryDownload)}
               className="mt-3 w-full h-9 px-4 bg-gray-900 hover:bg-gray-800 text-white text-sm font-medium rounded-md transition-colors flex items-center justify-center gap-2"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -457,6 +555,14 @@ export function DownloadProgressStep() {
             <Sparkles className="w-5 h-5 text-gray-600" />,
             gemmaState,
             recommendedModel === 'gemma3:4b' ? '~2.5 GB' : '~806 MB'
+          )}
+
+          {renderDownloadCard(
+            'Speaker Detection',
+            <Users className="w-5 h-5 text-gray-600" />,
+            speakerModelState,
+            '~76 MB',
+            handleRetrySpeakerDownload,
           )}
         </div>
 

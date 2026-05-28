@@ -6,6 +6,7 @@ pub mod alignment;
 pub mod sherpa_adapter;
 pub mod token_timestamps;
 pub mod commands;
+pub mod model_download;
 
 #[cfg(test)]
 pub mod mocks;

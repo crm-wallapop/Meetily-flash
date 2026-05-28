@@ -42,6 +42,29 @@ export async function setSpeakerMergeThreshold(threshold: number): Promise<void>
   return invoke<void>("set_speaker_merge_threshold", { threshold });
 }
 
+export type SpeakerEmbeddingModel = "3dspeaker" | "wespeaker";
+
+export const SPEAKER_EMBEDDING_MODELS: { value: SpeakerEmbeddingModel; label: string }[] = [
+  { value: "3dspeaker", label: "3DSpeaker (multilingual, ~26 MB)" },
+  { value: "wespeaker", label: "Wespeaker (higher accuracy, ~90 MB)" },
+];
+
+export async function getSpeakerEmbeddingModel(): Promise<SpeakerEmbeddingModel> {
+  return invoke<SpeakerEmbeddingModel>("get_speaker_embedding_model");
+}
+
+export async function setSpeakerEmbeddingModel(model: SpeakerEmbeddingModel): Promise<void> {
+  return invoke<void>("set_speaker_embedding_model", { model });
+}
+
+export async function getMaxSpeakers(): Promise<number> {
+  return invoke<number>("get_max_speakers");
+}
+
+export async function setMaxSpeakers(cap: number): Promise<void> {
+  return invoke<void>("set_max_speakers", { cap });
+}
+
 export function getSpeakerColor(index: number): string {
   const hue = (index * 137.508) % 360;
   return `hsl(${hue}, 65%, 55%)`;

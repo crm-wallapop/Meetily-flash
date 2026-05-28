@@ -186,52 +186,52 @@
 - [x] 10.15 RED: test "Unknown Speaker (possibly Alice)" renders with suggestion styling (italic, muted)
 - [x] 10.16 GREEN: implement suggestion badge variant
 - [x] 10.17 Integrate `SpeakerBadge` into transcript segment rendering
-- [ ] 10.18 RED: test `diarization-complete` event with malformed payload (missing fields) → no crash
-- [ ] 10.19 GREEN: validate event payload before updating state
+- [x] 10.18 RED: test `diarization-complete` event with malformed payload (missing fields) → no crash
+- [x] 10.19 GREEN: validate event payload before updating state
 
 ## 11. Frontend — Settings & Queue UI
 
-- [ ] 11.1 RED: test speaker model dropdown renders both options
-- [ ] 11.2 GREEN: create speaker model selection component
+- [x] 11.1 RED: test speaker model dropdown renders both options
+- [x] 11.2 GREEN: create speaker model selection component
 - [x] 11.3 RED: test confidence threshold slider rejects values outside 0.5–0.8
 - [x] 11.4 GREEN: implement threshold slider with bounds
-- [ ] 11.5 RED: test max speaker cap input rejects values outside 2–20
-- [ ] 11.6 GREEN: implement cap input with bounds
+- [x] 11.5 RED: test max speaker cap input rejects values outside 2–20
+- [x] 11.6 GREEN: implement cap input with bounds
 - [x] 11.7 Add "Re-diarize" button in meeting details view
 - [x] 11.8 RED: test queue UI shows "Diarizing" phase correctly
 - [x] 11.9 GREEN: extend queue UI to handle Diarizing phase — type updated in queueService.ts
-- [ ] 11.10 Listen for `diarization-complete` event and update transcript view state
+- [x] 11.10 Listen for `diarization-complete` event and update transcript view state
 
 ## 12. Re-transcription & Import Integration
 
-- [ ] 12.1 RED: test re-transcription clears `speaker` and `speaker_source` on auto-labeled rows
-- [ ] 12.2 GREEN: implement clear on re-transcription trigger
-- [ ] 12.3 RED: test re-transcription preserves rows with `speaker_source = "manual"`
-- [ ] 12.4 GREEN: implement selective clear
-- [ ] 12.5 RED: test re-transcription re-enqueues Diarizing phase
-- [ ] 12.6 GREEN: implement re-enqueue after re-transcription
-- [ ] 12.7 RED: test imported audio includes Diarizing phase in queue job
-- [ ] 12.8 GREEN: wire Diarizing phase into import queue path
+- [x] 12.1 RED: test re-transcription clears `speaker` and `speaker_source` on auto-labeled rows
+- [x] 12.2 GREEN: implement clear on re-transcription trigger
+- [x] 12.3 RED: test re-transcription preserves rows with `speaker_source = "manual"`
+- [x] 12.4 GREEN: implement selective clear
+- [x] 12.5 RED: test re-transcription re-enqueues Diarizing phase
+- [x] 12.6 GREEN: implement re-enqueue after re-transcription
+- [x] 12.7 RED: test imported audio includes Diarizing phase in queue job
+- [x] 12.8 GREEN: wire Diarizing phase into import queue path
 
 ## 13. Onboarding Integration
 
-- [ ] 13.1 RED: test onboarding Step 3 includes speaker model in download list
-- [ ] 13.2 GREEN: add pyannote segmentation + default embedding model to Step 3
-- [ ] 13.3 RED: test speaker model download failure does not block onboarding completion
-- [ ] 13.4 GREEN: implement graceful failure with warning
-- [ ] 13.5 RED: test speaker model download progress tracked alongside existing downloads
-- [ ] 13.6 GREEN: integrate progress tracking
+- [x] 13.1 RED: test onboarding Step 3 includes speaker model in download list
+- [x] 13.2 GREEN: add pyannote segmentation + default embedding model to Step 3
+- [x] 13.3 RED: test speaker model download failure does not block onboarding completion
+- [x] 13.4 GREEN: implement graceful failure with warning
+- [x] 13.5 RED: test speaker model download progress tracked alongside existing downloads
+- [x] 13.6 GREEN: integrate progress tracking
 
 ## 14. Integration Tests (automated, run in CI)
 
-- [ ] 14.1 RED: test full pipeline with 1s test audio → decode → diarize → align → DB rows updated
-- [ ] 14.2 GREEN: wire end-to-end test with small test WAV file
-- [ ] 14.3 RED: test pipeline with silence-only audio → 0 speakers → all "Unknown"
-- [ ] 14.4 GREEN: handle silence gracefully
-- [ ] 14.5 RED: test label_speaker → cross-meeting matching → auto-label in second meeting
-- [ ] 14.6 GREEN: implement and verify cross-meeting flow
-- [ ] 14.7 RED: test re-diarize → manual corrections preserved
-- [ ] 14.8 GREEN: verify re-diarization flow
+- [x] 14.1 RED: test full pipeline with 1s test audio → decode → diarize → align → DB rows updated
+- [x] 14.2 GREEN: wire end-to-end test with small test WAV file
+- [x] 14.3 RED: test pipeline with silence-only audio → 0 speakers → all "Unknown"
+- [x] 14.4 GREEN: handle silence gracefully
+- [x] 14.5 RED: test label_speaker → cross-meeting matching → auto-label in second meeting
+- [x] 14.6 GREEN: implement and verify cross-meeting flow
+- [x] 14.7 RED: test re-diarize → manual corrections preserved
+- [x] 14.8 GREEN: verify re-diarization flow
 
 ## 15. Smoke Tests (manual, in-app)
 

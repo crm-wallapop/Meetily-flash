@@ -101,6 +101,12 @@ pub struct Setting {
     #[sqlx(rename = "speakerMergeThreshold")]
     #[serde(rename = "speakerMergeThreshold")]
     pub speaker_merge_threshold: f64,
+    #[sqlx(rename = "speakerEmbeddingModel")]
+    #[serde(rename = "speakerEmbeddingModel")]
+    pub speaker_embedding_model: String,
+    #[sqlx(rename = "maxSpeakers")]
+    #[serde(rename = "maxSpeakers")]
+    pub max_speakers: i64,
 }
 
 impl Setting {

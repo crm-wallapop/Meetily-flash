@@ -3,6 +3,7 @@ use crate::audio::speaker::diarization::DiarizationPort;
 use crate::database::repositories::speaker::SpeakerRepository;
 use crate::state::AppState;
 use sqlx::SqlitePool;
+use tauri::Emitter;
 use std::sync::atomic::Ordering;
 use uuid::Uuid;
 
@@ -155,45 +156,60 @@ pub async fn remove_speaker_cmd(
 }
 
 #[tauri::command]
-pub async fn rediarize_meeting(
+pub async fn rediarize_meeting<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     pool: tauri::State<'_, SqlitePool>,
     app_state: tauri::State<'_, AppState>,
     meeting_id: String,
 ) -> Result<u64, String> {
+    let threshold_fp = app_state.speaker_merge_threshold_fp.load(Ordering::Relaxed);
+    let result = run_diarization_for_meeting(pool.inner(), &meeting_id, threshold_fp).await?;
+    let _ = app.emit("diarization-complete", serde_json::json!({
+        "meeting_id": meeting_id,
+        "speaker_count": result.speaker_count,
+        "segments_labeled": result.segments_labeled,
+    }));
+    Ok(result.segments_labeled)
+}
+
+/// Run speaker diarization on a meeting's audio and label transcripts.
+/// Can be called from any context (Tauri command, retranscription, import).
+pub async fn run_diarization_for_meeting(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    threshold_fp: u32,
+) -> Result<DiarizationResult, String> {
     // Clear existing auto labels
-    let cleared = SpeakerRepository::clear_auto_speaker_labels(pool.inner(), &meeting_id)
+    let cleared = SpeakerRepository::clear_auto_speaker_labels(pool, meeting_id)
         .await
         .map_err(|e| e.to_string())?;
 
     log::info!(
-        "rediarize_meeting: cleared {} auto labels for meeting {}",
+        "run_diarization_for_meeting: cleared {} auto labels for meeting {}",
         cleared,
         meeting_id
     );
 
     // Look up meeting folder path
     let row = sqlx::query("SELECT folder_path FROM meetings WHERE id = ?")
-        .bind(&meeting_id)
-        .fetch_optional(pool.inner())
+        .bind(meeting_id)
+        .fetch_optional(pool)
         .await
         .map_err(|e| e.to_string())?;
 
     let folder_path: Option<String> = row.and_then(|r| sqlx::Row::get(&r, "folder_path"));
     let Some(folder) = folder_path else {
-        log::warn!("rediarize_meeting: no folder_path for meeting {}", meeting_id);
-        return Ok(cleared);
+        log::warn!("run_diarization_for_meeting: no folder_path for meeting {}", meeting_id);
+        return Ok(DiarizationResult { segments_labeled: cleared, speaker_count: 0 });
     };
 
-    // Find audio file
+    // Find audio file — try standard names first, then any audio extension
     let folder_path = std::path::Path::new(&folder);
-    let audio_path = folder_path.join("audio.mp4");
-    if !audio_path.exists() {
-        log::warn!(
-            "rediarize_meeting: no audio.mp4 in {}",
-            folder_path.display()
-        );
-        return Ok(cleared);
-    }
+    let audio_path = find_audio_in_folder(folder_path);
+    let Some(audio_path) = audio_path else {
+        log::warn!("run_diarization_for_meeting: no audio file in {}", folder_path.display());
+        return Ok(DiarizationResult { segments_labeled: cleared, speaker_count: 0 });
+    };
 
     // Resolve model paths
     let models_dir = dirs::home_dir()
@@ -203,9 +219,8 @@ pub async fn rediarize_meeting(
     let segmentation_path = models_dir.join("pyannote-segmentation.onnx");
 
     if !embedding_path.exists() || !segmentation_path.exists() {
-        return Err(
-            "Speaker models not found. Download pyannote-segmentation.onnx and 3dspeaker-embedding.onnx to ~/.meetily-models/".to_string()
-        );
+        log::warn!("run_diarization_for_meeting: speaker models not found, skipping");
+        return Ok(DiarizationResult { segments_labeled: cleared, speaker_count: 0 });
     }
 
     // Decode audio
@@ -214,7 +229,6 @@ pub async fn rediarize_meeting(
     let mono = to_mono_f32(&decoded);
 
     // Create adapter with shared threshold
-    let threshold_fp = app_state.speaker_merge_threshold_fp.load(Ordering::Relaxed);
     let shared_fp = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(threshold_fp));
     let adapter = super::sherpa_adapter::SherpaOnnxDiarizationAdapter::with_shared_threshold(
         embedding_path.to_str().unwrap_or(""),
@@ -228,24 +242,24 @@ pub async fn rediarize_meeting(
         .map_err(|e| format!("Diarization failed: {}", e))?;
 
     if segments.is_empty() {
-        log::info!("rediarize_meeting: 0 speakers detected for meeting {}", meeting_id);
-        return Ok(cleared);
+        log::info!("run_diarization_for_meeting: 0 speakers detected for meeting {}", meeting_id);
+        return Ok(DiarizationResult { segments_labeled: cleared, speaker_count: 0 });
     }
 
     let num_speakers: std::collections::HashSet<u32> =
         segments.iter().map(|s| s.speaker_id).collect();
     log::info!(
-        "rediarize_meeting: detected {} speakers for meeting {}",
+        "run_diarization_for_meeting: detected {} speakers for meeting {}",
         num_speakers.len(),
         meeting_id
     );
 
     // Fetch transcripts and align
-    let transcripts = fetch_transcripts_for_alignment(pool.inner(), &meeting_id).await
+    let transcripts = fetch_transcripts_for_alignment(pool, meeting_id).await
         .map_err(|e| format!("Failed to fetch transcripts: {}", e))?;
 
     if transcripts.is_empty() {
-        return Ok(cleared);
+        return Ok(DiarizationResult { segments_labeled: cleared, speaker_count: num_speakers.len() });
     }
 
     use crate::audio::speaker::alignment::{
@@ -266,19 +280,43 @@ pub async fn rediarize_meeting(
     let mut segments_labeled = 0u64;
     for seg in &aligned {
         let label = resolve_label(&seg.speaker);
-        SpeakerRepository::update_transcript_speaker(pool.inner(), &seg.original_id, &label, "auto")
+        SpeakerRepository::update_transcript_speaker(pool, &seg.original_id, &label, "auto")
             .await
             .map_err(|e| e.to_string())?;
         segments_labeled += 1;
     }
 
     log::info!(
-        "rediarize_meeting: labeled {} segments for meeting {}",
+        "run_diarization_for_meeting: labeled {} segments for meeting {}",
         segments_labeled,
         meeting_id
     );
 
-    Ok(segments_labeled)
+    let result = DiarizationResult {
+        segments_labeled,
+        speaker_count: num_speakers.len(),
+    };
+
+    Ok(result)
+}
+
+pub struct DiarizationResult {
+    pub segments_labeled: u64,
+    pub speaker_count: usize,
+}
+
+fn find_audio_in_folder(folder: &std::path::Path) -> Option<std::path::PathBuf> {
+    let candidates = [
+        "audio.mp4", "audio.m4a", "audio.wav", "audio.mp3",
+        "audio.flac", "audio.ogg", "recording.mp4",
+    ];
+    for name in &candidates {
+        let path = folder.join(name);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 #[tauri::command]
@@ -310,6 +348,65 @@ pub async fn set_speaker_merge_threshold(
     let fp = (threshold as f32 * 65536.0) as u32;
     app_state.speaker_merge_threshold_fp.store(fp, Ordering::Relaxed);
     log::info!("set_speaker_merge_threshold: updated to {}", threshold);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_speaker_embedding_model(
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<String, String> {
+    let row = sqlx::query("SELECT speakerEmbeddingModel FROM settings LIMIT 1")
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+    let model: String = sqlx::Row::get(&row, "speakerEmbeddingModel");
+    Ok(model)
+}
+
+#[tauri::command]
+pub async fn set_speaker_embedding_model(
+    pool: tauri::State<'_, SqlitePool>,
+    model: String,
+) -> Result<(), String> {
+    let valid = model == "3dspeaker" || model == "wespeaker";
+    if !valid {
+        return Err(format!("Unknown speaker embedding model: {}", model));
+    }
+    sqlx::query("UPDATE settings SET speakerEmbeddingModel = ? WHERE id = '1'")
+        .bind(&model)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+    log::info!("set_speaker_embedding_model: updated to {}", model);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_max_speakers(
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<i64, String> {
+    let row = sqlx::query("SELECT maxSpeakers FROM settings LIMIT 1")
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+    let cap: i64 = sqlx::Row::get(&row, "maxSpeakers");
+    Ok(cap)
+}
+
+#[tauri::command]
+pub async fn set_max_speakers(
+    pool: tauri::State<'_, SqlitePool>,
+    cap: i64,
+) -> Result<(), String> {
+    if !(2..=20).contains(&cap) {
+        return Err("Max speakers must be between 2 and 20".to_string());
+    }
+    sqlx::query("UPDATE settings SET maxSpeakers = ? WHERE id = '1'")
+        .bind(cap)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+    log::info!("set_max_speakers: updated to {}", cap);
     Ok(())
 }
 

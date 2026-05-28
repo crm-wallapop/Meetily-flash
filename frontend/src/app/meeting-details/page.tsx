@@ -9,6 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { LoaderIcon } from "lucide-react";
 import { useConfig } from "@/contexts/ConfigContext";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
+import { onDiarizationComplete } from "@/services/diarizationEvents";
 
 interface MeetingDetailsResponse {
   id: string;
@@ -198,6 +199,18 @@ function MeetingDetailsContent() {
       }
     };
   }, [meetingId, stopSummaryPolling]);
+
+  // Refetch transcripts when diarization completes for this meeting
+  useEffect(() => {
+    if (!meetingId) return;
+    let unlisten: (() => void) | undefined;
+    onDiarizationComplete((payload) => {
+      if (payload.meeting_id === meetingId) {
+        refetch();
+      }
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [meetingId, refetch]);
 
   useEffect(() => {
     console.log('MeetingDetails useEffect triggered - meetingId:', meetingId);
