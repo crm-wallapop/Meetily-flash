@@ -1,0 +1,1 @@
+UPDATE settings SET speakerMergeThreshold = 0.40 WHERE speakerMergeThreshold >= 0.50;

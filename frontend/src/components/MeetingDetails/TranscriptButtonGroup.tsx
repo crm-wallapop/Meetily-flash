@@ -8,6 +8,7 @@ import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
 import { rediarizeMeeting } from '@/services/speakerService';
+import { toast } from 'sonner';
 
 
 interface TranscriptButtonGroupProps {
@@ -36,11 +37,25 @@ export function TranscriptButtonGroup({
     if (!meetingId) return;
     setIsRediarizing(true);
     try {
+      const { listen } = await import('@tauri-apps/api/event');
+      const unlisten = await listen<{ meeting_id: string; speaker_count: number; segments_labeled: number }>(
+        'diarization-complete',
+        async (event) => {
+          if (event.payload.meeting_id === meetingId) {
+            unlisten();
+            if (onRefetchTranscripts) await onRefetchTranscripts();
+            setIsRediarizing(false);
+            toast.success(`Detected ${event.payload.speaker_count} speaker${event.payload.speaker_count !== 1 ? 's' : ''}`);
+          }
+        }
+      );
+
       await rediarizeMeeting(meetingId);
-      if (onRefetchTranscripts) await onRefetchTranscripts();
     } catch (e) {
       console.error('Re-diarization failed:', e);
-    } finally {
+      toast.error('Re-diarization failed', {
+        description: e instanceof Error ? e.message : String(e),
+      });
       setIsRediarizing(false);
     }
   }, [meetingId, onRefetchTranscripts]);
@@ -53,8 +68,8 @@ export function TranscriptButtonGroup({
   }, [onRefetchTranscripts]);
 
   return (
-    <div className="flex items-center justify-center w-full gap-2">
-      <ButtonGroup>
+    <div className="flex items-center justify-center w-full gap-2 overflow-x-auto">
+      <ButtonGroup className="w-full flex-wrap justify-center">
         <Button
           variant="outline"
           size="sm"

@@ -142,7 +142,7 @@ impl DiarizationProcessor {
         let mono = to_mono_f32(&decoded);
 
         // Run diarization
-        let speaker_segments = self.diarization.process(&mono, decoded.sample_rate)?;
+        let speaker_segments = self.diarization.process(&mono, decoded.sample_rate, &[])?;
 
         if speaker_segments.is_empty() {
             // Silence-only or no speakers detected

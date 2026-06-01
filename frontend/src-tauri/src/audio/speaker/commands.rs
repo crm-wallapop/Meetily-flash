@@ -1,11 +1,17 @@
 use crate::audio::speaker::alignment::TranscriptInput;
 use crate::audio::speaker::diarization::DiarizationPort;
+use crate::audio::speaker::registry::SpeakerIdentificationPort;
+use crate::audio::speaker::sherpa_adapter::SherpaOnnxRegistryAdapter;
+use crate::audio::speaker::types::EmbeddingVector;
 use crate::database::repositories::speaker::SpeakerRepository;
 use crate::state::AppState;
 use sqlx::SqlitePool;
 use tauri::Emitter;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+
+const DIARIZATION_SAMPLE_RATE: u32 = 16000;
 
 fn sanitize_speaker_name(name: &str) -> Result<String, String> {
     let trimmed = name.trim();
@@ -157,22 +163,38 @@ pub async fn rediarize_meeting<R: tauri::Runtime>(
     app_state: tauri::State<'_, AppState>,
     meeting_id: String,
 ) -> Result<u64, String> {
+    log::warn!("rediarize_meeting: CALLED with meeting_id={}", meeting_id);
     let pool = app_state.db_manager.pool().clone();
     let threshold_fp = app_state.speaker_merge_threshold_fp.load(Ordering::Relaxed);
-    let result = run_diarization_for_meeting(&pool, &meeting_id, threshold_fp).await?;
-    let _ = app.emit("diarization-complete", serde_json::json!({
-        "meeting_id": meeting_id,
-        "speaker_count": result.speaker_count,
-        "segments_labeled": result.segments_labeled,
-    }));
-    Ok(result.segments_labeled)
+    let registry = app_state.speaker_registry.clone();
+
+    let app_clone = app.clone();
+    let mid = meeting_id.clone();
+    tokio::spawn(async move {
+        let result = run_diarization_for_meeting(&pool, &mid, threshold_fp, registry).await;
+        match result {
+            Ok(r) => {
+                let _ = app_clone.emit("diarization-complete", serde_json::json!({
+                    "meeting_id": mid,
+                    "speaker_count": r.speaker_count,
+                    "segments_labeled": r.segments_labeled,
+                }));
+                log::warn!("rediarize_meeting: DONE for {}, {} speakers, {} segments", mid, r.speaker_count, r.segments_labeled);
+            }
+            Err(e) => {
+                log::error!("rediarize_meeting: FAILED for {}: {}", mid, e);
+            }
+        }
+    }).await.map_err(|e| e.to_string())?;
+
+    Ok(0)
 }
 
-/// Run speaker diarization on a meeting's audio and label transcripts.
 pub async fn run_diarization_for_meeting(
     pool: &SqlitePool,
     meeting_id: &str,
     threshold_fp: u32,
+    registry: Arc<Mutex<Option<SherpaOnnxRegistryAdapter>>>,
 ) -> Result<DiarizationResult, String> {
     let cleared = SpeakerRepository::clear_auto_speaker_labels(pool, meeting_id)
         .await
@@ -197,11 +219,13 @@ pub async fn run_diarization_for_meeting(
     };
 
     let folder_path = std::path::Path::new(&folder);
+    log::warn!("run_diarization_for_meeting: looking for audio in {}", folder_path.display());
     let audio_path = find_audio_in_folder(folder_path);
     let Some(audio_path) = audio_path else {
         log::warn!("run_diarization_for_meeting: no audio file in {}", folder_path.display());
         return Ok(DiarizationResult { segments_labeled: cleared, speaker_count: 0 });
     };
+    log::warn!("run_diarization_for_meeting: found audio at {}", audio_path.display());
 
     let models_dir = dirs::home_dir()
         .unwrap_or_default()
@@ -214,10 +238,31 @@ pub async fn run_diarization_for_meeting(
         return Ok(DiarizationResult { segments_labeled: cleared, speaker_count: 0 });
     }
 
+    // Step 1: Decode audio + resample to 16kHz mono via sinc resampler.
+    let t0 = std::time::Instant::now();
     let decoded = crate::audio::decoder::decode_audio_file(&audio_path)
         .map_err(|e| format!("Audio decode failed: {}", e))?;
-    let mono = to_mono_f32(&decoded);
+    let samples = decoded.to_whisper_format();
+    let audio_duration = decoded.duration_seconds;
+    log::warn!(
+        "DIARIZATION: audio decode + sinc resample: {:.2}s ({}Hz → 16kHz, {:.1}s)",
+        t0.elapsed().as_secs_f64(),
+        decoded.sample_rate,
+        audio_duration,
+    );
 
+    // Step 2: Fetch transcript timestamps FIRST.
+    let transcript_segments = fetch_transcript_timestamps(pool, meeting_id, audio_duration)
+        .await
+        .map_err(|e| format!("Failed to fetch transcript timestamps: {}", e))?;
+
+    log::warn!(
+        "DIARIZATION: fetched {} valid transcript segments",
+        transcript_segments.len(),
+    );
+
+    // Step 3: Create adapter.
+    let t1 = std::time::Instant::now();
     let shared_fp = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(threshold_fp));
     let adapter = super::sherpa_adapter::SherpaOnnxDiarizationAdapter::with_shared_threshold(
         embedding_path.to_str().unwrap_or(""),
@@ -225,9 +270,13 @@ pub async fn run_diarization_for_meeting(
         shared_fp,
     )
     .map_err(|e| format!("Failed to create diarization adapter: {}", e))?;
+    log::warn!("DIARIZATION: adapter creation: {:.2}s", t1.elapsed().as_secs_f64());
 
-    let segments = adapter.process(&mono, 16000)
+    // Step 4: Run diarization with transcript-driven segments.
+    let t2 = std::time::Instant::now();
+    let segments = adapter.process(&samples, DIARIZATION_SAMPLE_RATE, &transcript_segments)
         .map_err(|e| format!("Diarization failed: {}", e))?;
+    log::warn!("DIARIZATION: full pipeline: {:.2}s → {} segments", t2.elapsed().as_secs_f64(), segments.len());
 
     if segments.is_empty() {
         log::info!("run_diarization_for_meeting: 0 speakers detected for meeting {}", meeting_id);
@@ -242,6 +291,59 @@ pub async fn run_diarization_for_meeting(
         meeting_id
     );
 
+    // Create speaker rows with colors so the frontend can render them.
+    let sorted_speakers: Vec<&u32> = num_speakers.iter().collect();
+    for (idx, &sid) in sorted_speakers.iter().enumerate() {
+        let cluster_label = format!("Speaker {}", sid);
+        let color = pick_color(idx);
+        if let Err(e) = SpeakerRepository::create_speaker(
+            pool,
+            &format!("speaker-auto-{}-{}", meeting_id, sid),
+            &cluster_label,
+            &color,
+        )
+        .await
+        {
+            log::warn!("DIARIZATION: failed to create speaker {}: {}", cluster_label, e);
+        }
+    }
+
+    // Step 5: Voice fingerprinting — store embeddings + cross-meeting matching.
+    let centroids = adapter.extract_speaker_centroids(
+        &samples,
+        DIARIZATION_SAMPLE_RATE,
+        &segments,
+    );
+    let mut label_map: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    for (speaker_id, centroid) in &centroids {
+        let emb_id = format!("emb-{}", Uuid::new_v4());
+        let cluster_label = format!("Speaker {}", speaker_id);
+        if let Err(e) = SpeakerRepository::store_embedding(
+            pool,
+            &emb_id,
+            None,
+            centroid,
+            meeting_id,
+            &cluster_label,
+        )
+        .await
+        {
+            log::warn!("DIARIZATION: failed to store embedding for {}: {}", cluster_label, e);
+        }
+
+        // Cross-meeting matching via registry.
+        if let Ok(emb) = EmbeddingVector::from_slice(centroid, centroid.len()) {
+            let matched_name = registry.lock().ok().and_then(|mut guard| {
+                guard.as_ref().and_then(|r| r.search(&emb, 0.60).ok().flatten())
+            });
+            if let Some(name) = matched_name {
+                log::info!("DIARIZATION: matched Speaker {} → {}", speaker_id, name);
+                label_map.insert(*speaker_id, name);
+            }
+        }
+    }
+
+    // Step 6: Fetch full transcripts for alignment.
     let transcripts = fetch_transcripts_for_alignment(pool, meeting_id).await
         .map_err(|e| format!("Failed to fetch transcripts: {}", e))?;
 
@@ -262,11 +364,40 @@ pub async fn run_diarization_for_meeting(
         })
         .collect();
 
-    let aligned = align_transcripts_with_diarization(transcripts, &diarization_segs);
+    let mut aligned = align_transcripts_with_diarization(transcripts, &diarization_segs);
 
+    // Step 7: Temporal assignment for "Unknown Speaker" labels.
+    let labeled_midpoints: Vec<(i64, String)> = aligned
+        .iter()
+        .filter(|s| s.speaker != "Unknown Speaker")
+        .map(|s| {
+            let mid = (s.audio_start_ms + s.audio_end_ms) / 2;
+            (mid, s.speaker.clone())
+        })
+        .collect();
+
+    let mut temporal_assigned = 0u64;
+    for seg in &mut aligned {
+        if seg.speaker == "Unknown Speaker" && !labeled_midpoints.is_empty() {
+            let mid = (seg.audio_start_ms + seg.audio_end_ms) / 2;
+            let nearest = labeled_midpoints
+                .iter()
+                .min_by_key(|(m, _)| (mid - *m).unsigned_abs())
+                .map(|(_, name)| name.clone());
+            if let Some(name) = nearest {
+                seg.speaker = name;
+                temporal_assigned += 1;
+            }
+        }
+    }
+    if temporal_assigned > 0 {
+        log::warn!("DIARIZATION: assigned {} short segments via temporal adjacency", temporal_assigned);
+    }
+
+    // Step 8: Write labels to DB.
     let mut segments_labeled = 0u64;
     for seg in &aligned {
-        let label = resolve_label(&seg.speaker);
+        let label = resolve_label(&seg.speaker, &label_map);
         SpeakerRepository::update_transcript_speaker(pool, &seg.original_id, &label, "auto")
             .await
             .map_err(|e| e.to_string())?;
@@ -302,6 +433,40 @@ fn find_audio_in_folder(folder: &std::path::Path) -> Option<std::path::PathBuf> 
         }
     }
     None
+}
+
+async fn fetch_transcript_timestamps(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    audio_duration_secs: f64,
+) -> Result<Vec<(f64, f64)>, String> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        audio_start_time: Option<f64>,
+        audio_end_time: Option<f64>,
+    }
+
+    let rows = sqlx::query_as::<_, Row>(
+        "SELECT audio_start_time, audio_end_time FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time ASC",
+    )
+    .bind(meeting_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            let start = r.audio_start_time?;
+            let end = r.audio_end_time?;
+            // Validate: non-null, start < end, within audio bounds
+            if start < end && start >= 0.0 && end <= audio_duration_secs + 1.0 {
+                Some((start, end))
+            } else {
+                None
+            }
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -350,8 +515,8 @@ pub async fn set_speaker_merge_threshold(
     app_state: tauri::State<'_, AppState>,
     threshold: f64,
 ) -> Result<(), String> {
-    if !(0.30..=0.70).contains(&threshold) {
-        return Err("Threshold must be between 0.30 and 0.70".to_string());
+    if !(0.35..=0.70).contains(&threshold) {
+        return Err("Threshold must be between 0.35 and 0.70".to_string());
     }
     let pool = app_state.db_manager.pool();
     sqlx::query("UPDATE settings SET speakerMergeThreshold = ? WHERE id = '1'")
@@ -466,19 +631,15 @@ async fn fetch_transcripts_for_alignment(
         .collect())
 }
 
-fn resolve_label(speaker: &str) -> String {
-    speaker.to_string()
-}
-
-fn to_mono_f32(decoded: &crate::audio::decoder::DecodedAudio) -> Vec<f32> {
-    if decoded.channels == 1 {
-        return decoded.samples.clone();
+fn resolve_label(speaker: &str, label_map: &std::collections::HashMap<u32, String>) -> String {
+    if let Some(id_str) = speaker.strip_prefix("Speaker ") {
+        if let Ok(id) = id_str.parse::<u32>() {
+            if let Some(label) = label_map.get(&id) {
+                return label.clone();
+            }
+        }
     }
-    decoded
-        .samples
-        .chunks_exact(decoded.channels as usize)
-        .map(|chunk| chunk.iter().sum::<f32>() / decoded.channels as f32)
-        .collect()
+    speaker.to_string()
 }
 
 #[cfg(test)]
@@ -538,5 +699,66 @@ mod tests {
         assert!(c0.starts_with("hsl("));
         assert!(c1.starts_with("hsl("));
         assert_ne!(c0, c1);
+    }
+
+    #[test]
+    fn resolve_label_returns_cluster_name_when_no_match() {
+        let map = std::collections::HashMap::new();
+        assert_eq!(resolve_label("Speaker 1", &map), "Speaker 1");
+        assert_eq!(resolve_label("Unknown Speaker", &map), "Unknown Speaker");
+    }
+
+    #[test]
+    fn resolve_label_returns_matched_name() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(1u32, "Alice".to_string());
+        assert_eq!(resolve_label("Speaker 1", &map), "Alice");
+    }
+
+    #[test]
+    fn threshold_range_validates() {
+        assert!(set_speaker_merge_threshold_validate(0.39).is_err());
+        assert!(set_speaker_merge_threshold_validate(0.40).is_ok());
+        assert!(set_speaker_merge_threshold_validate(0.80).is_ok());
+        assert!(set_speaker_merge_threshold_validate(0.81).is_err());
+    }
+
+    fn set_speaker_merge_threshold_validate(threshold: f64) -> Result<(), String> {
+        if !(0.40..=0.80).contains(&threshold) {
+            return Err("Threshold must be between 0.40 and 0.80".to_string());
+        }
+        Ok(())
+    }
+
+    /// Run diarization on the test meeting directly — no UI needed.
+    /// `cargo test -p meetily-flash --features vulkan -- --ignored test_diarize_meeting_403`
+    #[tokio::test]
+    #[ignore]
+    async fn test_diarize_meeting_403() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let db_path = r"C:\Users\user\AppData\Roaming\com.meetily.ai\meeting_minutes.sqlite";
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=rw", db_path))
+            .await
+            .expect("DB connect");
+
+        let registry = Arc::new(Mutex::new(None));
+        let threshold_fp = (0.40f32 * 65536.0) as u32;
+        let meeting_id = "meeting-00000000-0000-4000-8000-000000000003";
+
+        let result = run_diarization_for_meeting(&pool, meeting_id, threshold_fp, registry).await;
+
+        match &result {
+            Ok(r) => eprintln!(
+                "SUCCESS: {} speakers, {} segments labeled",
+                r.speaker_count, r.segments_labeled
+            ),
+            Err(e) => eprintln!("FAILED: {}", e),
+        }
+
+        assert!(result.is_ok(), "Diarization should succeed");
+        let r = result.unwrap();
+        assert!(r.speaker_count >= 2, "Should detect at least 2 speakers, got {}", r.speaker_count);
+        assert!(r.speaker_count <= 8, "Should detect at most 8 speakers (3 main + noise), got {}", r.speaker_count);
+        assert!(r.segments_labeled > 0, "Should label at least 1 segment");
     }
 }

@@ -175,7 +175,7 @@ impl MockDiarizationPort {
 }
 
 impl DiarizationPort for MockDiarizationPort {
-    fn process(&self, _samples: &[f32], _sample_rate: u32) -> Result<Vec<SpeakerSegment>> {
+    fn process(&self, _samples: &[f32], _sample_rate: u32, _segments: &[(f64, f64)]) -> Result<Vec<SpeakerSegment>> {
         Ok(self.segments.clone())
     }
 }
@@ -249,14 +249,14 @@ mod tests {
             SpeakerSegment { start_seconds: 0.0, end_seconds: 5.0, speaker_id: 1 },
             SpeakerSegment { start_seconds: 5.0, end_seconds: 10.0, speaker_id: 2 },
         ]);
-        let result = port.process(&[0.0; 1000], 16000).unwrap();
+        let result = port.process(&[0.0; 1000], 16000, &[(0.0, 5.0), (5.0, 10.0)]).unwrap();
         assert_eq!(result.len(), 2);
     }
 
     #[test]
     fn mock_diarization_silence() {
         let port = MockDiarizationPort::silence();
-        let result = port.process(&[0.0; 1000], 16000).unwrap();
+        let result = port.process(&[0.0; 1000], 16000, &[]).unwrap();
         assert!(result.is_empty());
     }
 }

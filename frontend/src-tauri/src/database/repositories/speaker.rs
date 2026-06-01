@@ -159,6 +159,29 @@ impl SpeakerRepository {
         Ok(rows)
     }
 
+    pub async fn list_all_embeddings(pool: &SqlitePool) -> Result<Vec<(String, Vec<f32>)>> {
+        #[derive(sqlx::FromRow)]
+        struct EmbeddingWithName {
+            embedding: Vec<u8>,
+            name: String,
+        }
+
+        let rows = sqlx::query_as::<_, EmbeddingWithName>(
+            "SELECT e.embedding, COALESCE(s.name, e.cluster_label) as name \
+             FROM speaker_embeddings e \
+             LEFT JOIN speakers s ON e.speaker_id = s.id",
+        )
+        .fetch_all(pool)
+        .await?;
+
+        let mut result = Vec::with_capacity(rows.len());
+        for row in rows {
+            let embedding = Self::deserialize_embedding(&row.embedding)?;
+            result.push((row.name, embedding));
+        }
+        Ok(result)
+    }
+
     pub async fn link_embedding_to_speaker(
         pool: &SqlitePool,
         embedding_id: &str,

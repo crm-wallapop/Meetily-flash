@@ -308,7 +308,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({ transcripts, isR
               <div className="flex-1">
                 {transcript.speaker && (
                   <div className="mb-1">
-                    <SpeakerBadge name={transcript.speaker} colorIndex={index} />
+                    <SpeakerBadge name={transcript.speaker} colorIndex={parseInt(transcript.speaker?.replace("Speaker ", "") || "0", 10)} />
                   </div>
                 )}
                 {isStreaming ? (

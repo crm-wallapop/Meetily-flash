@@ -175,7 +175,8 @@ async fn test_full_pipeline_with_test_audio() -> Result<()> {
         .await?;
 
     // Run diarization
-    let result = run_diarization_for_meeting(&pool, meeting_id, ((0.50f32 * 65536.0) as u32)).await;
+    let registry = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let result = run_diarization_for_meeting(&pool, meeting_id, ((0.50f32 * 65536.0) as u32), registry).await;
 
     // Pipeline should succeed (even if silence yields 0 speakers)
     match result {
@@ -241,7 +242,8 @@ async fn test_pipeline_with_silence_audio() -> Result<()> {
         .execute(&pool)
         .await?;
 
-    let result = run_diarization_for_meeting(&pool, meeting_id, ((0.50f32 * 65536.0) as u32)).await;
+    let registry = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let result = run_diarization_for_meeting(&pool, meeting_id, ((0.50f32 * 65536.0) as u32), registry).await;
 
     // Silence should either give 0 speakers or succeed gracefully
     match result {

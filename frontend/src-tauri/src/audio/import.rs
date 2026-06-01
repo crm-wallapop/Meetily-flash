@@ -761,6 +761,7 @@ async fn run_import<R: Runtime>(
             app_state.db_manager.pool(),
             &meeting_id,
             threshold_fp,
+            app_state.speaker_registry.clone(),
         ).await;
         match &diarize_result {
             Ok(r) => {

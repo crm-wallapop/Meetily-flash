@@ -10,10 +10,13 @@ interface SpeakerBadgeProps {
 }
 
 function textColorForBackground(hsl: string): string {
-  // Extract lightness from hsl(L, S%, L%)
   const match = hsl.match(/hsl\(\s*[\d.]+\s*,\s*[\d.]+%\s*,\s*([\d.]+)%\s*\)/);
   const lightness = match ? parseFloat(match[1]) : 55;
   return lightness < 50 ? "#ffffff" : "#000000";
+}
+
+function toHsla(hsl: string, alpha: number): string {
+  return hsl.replace("hsl(", "hsla(").replace(")", `, ${alpha})`);
 }
 
 export function SpeakerBadge({
@@ -36,9 +39,9 @@ export function SpeakerBadge({
     <span
       className={`${baseClasses} ${cursorClass} ${suggestionClass}`}
       style={{
-        backgroundColor: `${bgColor}20`,
+        backgroundColor: toHsla(bgColor, 0.19),
         color: textColor,
-        border: `1px solid ${bgColor}40`,
+        border: `1px solid ${toHsla(bgColor, 0.38)}`,
       }}
       onClick={onClick}
       role={onClick ? "button" : undefined}

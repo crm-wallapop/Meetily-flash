@@ -15,7 +15,7 @@ import {
   type SpeakerEmbeddingModel,
 } from '@/services/speakerService';
 
-const MERGE_MIN = 0.30;
+const MERGE_MIN = 0.35;
 const MERGE_MAX = 0.70;
 const MERGE_STEP = 0.05;
 const CAP_MIN = 2;
@@ -34,8 +34,8 @@ function hintFor(value: number) {
 }
 
 export function SpeakerMergeThresholdSlider() {
-  const [threshold, setThreshold] = useState(0.50);
-  const [saved, setSaved] = useState(0.50);
+  const [threshold, setThreshold] = useState(0.40);
+  const [saved, setSaved] = useState(0.40);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
