@@ -4,7 +4,8 @@ use sqlx::SqlitePool;
 use tracing::info;
 
 const MAX_NAME_LEN: usize = 200;
-const EMBEDDING_DIM: usize = 256;
+const MIN_EMBEDDING_DIM: usize = 64;
+const MAX_EMBEDDING_DIM: usize = 1024;
 
 pub struct SpeakerRepository;
 
@@ -114,10 +115,11 @@ impl SpeakerRepository {
         source_meeting_id: &str,
         cluster_label: &str,
     ) -> Result<()> {
-        if embedding.len() != EMBEDDING_DIM {
+        if !(MIN_EMBEDDING_DIM..=MAX_EMBEDDING_DIM).contains(&embedding.len()) {
             return Err(anyhow!(
-                "wrong embedding dimension: expected {}, got {}",
-                EMBEDDING_DIM,
+                "embedding dimension out of range [{}, {}]: got {}",
+                MIN_EMBEDDING_DIM,
+                MAX_EMBEDDING_DIM,
                 embedding.len()
             ));
         }
@@ -261,10 +263,11 @@ impl SpeakerRepository {
             ));
         }
         let dim = blob.len() / 4;
-        if dim != EMBEDDING_DIM {
+        if !(MIN_EMBEDDING_DIM..=MAX_EMBEDDING_DIM).contains(&dim) {
             return Err(anyhow!(
-                "embedding blob has wrong dimension: expected {}, got {}",
-                EMBEDDING_DIM,
+                "embedding dimension out of range [{}, {}]: got {}",
+                MIN_EMBEDDING_DIM,
+                MAX_EMBEDDING_DIM,
                 dim
             ));
         }
