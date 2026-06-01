@@ -3,11 +3,12 @@ use sherpa_onnx::{
     SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig,
     SpeakerEmbeddingManager,
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use super::diarization::DiarizationPort;
+use super::diarization::{DiarizationOutput, DiarizationPort};
 use super::embedding::SpeakerEmbeddingPort;
 use super::registry::SpeakerIdentificationPort;
 use super::types::{EmbeddingVector, SpeakerSegment};
@@ -140,9 +141,9 @@ struct Chunk {
 }
 
 impl DiarizationPort for SherpaOnnxDiarizationAdapter {
-    fn process(&self, samples: &[f32], sample_rate: u32, segments: &[(f64, f64)]) -> Result<Vec<SpeakerSegment>> {
+    fn process(&self, samples: &[f32], sample_rate: u32, segments: &[(f64, f64)]) -> Result<DiarizationOutput> {
         if samples.is_empty() {
-            return Ok(Vec::new());
+            return Ok(DiarizationOutput { segments: vec![], centroids: HashMap::new() });
         }
 
         let sr = sample_rate as usize;
@@ -158,11 +159,14 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
         };
 
         if segments.is_empty() {
-            return Ok(vec![SpeakerSegment {
-                start_seconds: 0.0,
-                end_seconds: duration_secs,
-                speaker_id: 0,
-            }]);
+            return Ok(DiarizationOutput {
+                segments: vec![SpeakerSegment {
+                    start_seconds: 0.0,
+                    end_seconds: duration_secs,
+                    speaker_id: 0,
+                }],
+                centroids: HashMap::new(),
+            });
         }
 
         // Step 1: Create audio chunks from transcript segments.
@@ -235,17 +239,20 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
         );
 
         if chunks.is_empty() {
-            return Ok(vec![SpeakerSegment {
-                start_seconds: 0.0,
-                end_seconds: duration_secs,
-                speaker_id: 0,
-            }]);
+            return Ok(DiarizationOutput {
+                segments: vec![SpeakerSegment {
+                    start_seconds: 0.0,
+                    end_seconds: duration_secs,
+                    speaker_id: 0,
+                }],
+                centroids: HashMap::new(),
+            });
         }
 
         // Step 2: Centroid-based agglomerative clustering.
         let t_cluster = std::time::Instant::now();
         let threshold = self.merge_threshold();
-        let labels = cluster_by_centroids(&chunks, threshold);
+        let (labels, cluster_centroids) = cluster_by_centroids(&chunks, threshold);
         let n_clusters: std::collections::HashSet<u32> = labels.iter().copied().collect();
         log::warn!(
             "DIARIZATION: clustering produced {} speakers from {} chunks in {:.2}s (threshold={:.2})",
@@ -262,7 +269,7 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
 
         let mut result: Vec<SpeakerSegment> = Vec::new();
         if indexed.is_empty() {
-            return Ok(result);
+            return Ok(DiarizationOutput { segments: result, centroids: HashMap::new() });
         }
 
         let mut cur_speaker = indexed[0].1;
@@ -293,7 +300,7 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
             speaker_id: cur_speaker,
         });
 
-        result = renumber_speakers(result);
+        let (result, id_map) = renumber_speakers(result);
 
         let n_spk: std::collections::HashSet<u32> = result.iter().map(|s| s.speaker_id).collect();
         log::warn!(
@@ -302,7 +309,12 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
             result.len(),
         );
 
-        Ok(result)
+        let centroids: HashMap<u32, Vec<f32>> = cluster_centroids
+            .into_iter()
+            .filter_map(|(old_id, c)| Some((*id_map.get(&old_id)?, c)))
+            .collect();
+
+        Ok(DiarizationOutput { segments: result, centroids })
     }
 }
 
@@ -315,50 +327,12 @@ impl SherpaOnnxDiarizationAdapter {
         }
         self.extractor.compute(&stream)
     }
-
-    pub fn extract_speaker_centroids(
-        &self,
-        samples: &[f32],
-        sample_rate: u32,
-        segments: &[SpeakerSegment],
-    ) -> Vec<(u32, Vec<f32>)> {
-        let sr = sample_rate as f64;
-        let mut per_speaker: std::collections::HashMap<u32, (Vec<f32>, f64)> =
-            std::collections::HashMap::new();
-
-        for seg in segments {
-            let start = ((seg.start_seconds * sr) as usize).min(samples.len());
-            let end = ((seg.end_seconds * sr) as usize).min(samples.len());
-            if end <= start {
-                continue;
-            }
-            let dur = (end - start) as f64 / sr;
-            let audio = &samples[start..end];
-            if let Some(emb) = self.extract_embedding(audio, sample_rate) {
-                let entry = per_speaker
-                    .entry(seg.speaker_id)
-                    .or_insert_with(|| (vec![0.0; self.dim], 0.0));
-                for (i, v) in emb.iter().enumerate() {
-                    entry.0[i] += v * dur as f32;
-                }
-                entry.1 += dur;
-            }
-        }
-
-        per_speaker
-            .into_iter()
-            .map(|(id, (summed, total_dur))| {
-                let centroid: Vec<f32> = summed.iter().map(|v| v / total_dur as f32).collect();
-                (id, centroid)
-            })
-            .collect()
-    }
 }
 
-fn cluster_by_centroids(chunks: &[Chunk], threshold: f32) -> Vec<u32> {
+fn cluster_by_centroids(chunks: &[Chunk], threshold: f32) -> (Vec<u32>, HashMap<u32, Vec<f32>>) {
     let n = chunks.len();
     if n == 0 {
-        return Vec::new();
+        return (Vec::new(), HashMap::new());
     }
 
     // Each chunk starts as its own cluster.
@@ -408,10 +382,11 @@ fn cluster_by_centroids(chunks: &[Chunk], threshold: f32) -> Vec<u32> {
         alive[b] = false;
     }
 
-    // Build label array.
+    // Build label array and collect final centroids per cluster.
     let mut labels = vec![0u32; n];
     let mut next_label = 0u32;
-    let mut label_map: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    let mut label_map: HashMap<usize, u32> = HashMap::new();
+    let mut final_centroids: HashMap<u32, Vec<f32>> = HashMap::new();
     for (idx, is_alive) in alive.iter().enumerate() {
         if !is_alive {
             continue;
@@ -422,9 +397,10 @@ fn cluster_by_centroids(chunks: &[Chunk], threshold: f32) -> Vec<u32> {
         for &member in &members[idx] {
             labels[member] = label;
         }
+        final_centroids.insert(label, centroids[idx].clone());
     }
 
-    labels
+    (labels, final_centroids)
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -437,12 +413,10 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a * norm_b)
 }
 
-fn renumber_speakers(segments: Vec<SpeakerSegment>) -> Vec<SpeakerSegment> {
-    use std::collections::HashMap;
-
+fn renumber_speakers(segments: Vec<SpeakerSegment>) -> (Vec<SpeakerSegment>, HashMap<u32, u32>) {
     let mut mapping: HashMap<u32, u32> = HashMap::new();
     let mut next_id: u32 = 0;
-    segments
+    let result = segments
         .into_iter()
         .map(|mut s| {
             let assigned = *mapping.entry(s.speaker_id).or_insert_with(|| {
@@ -453,7 +427,8 @@ fn renumber_speakers(segments: Vec<SpeakerSegment>) -> Vec<SpeakerSegment> {
             s.speaker_id = assigned;
             s
         })
-        .collect()
+        .collect();
+    (result, mapping)
 }
 
 fn energy_vad_segments(samples: &[f32], sample_rate: u32) -> Vec<(f64, f64)> {
@@ -723,9 +698,10 @@ mod tests {
             duration_secs: 3.0,
             embedding: vec![1.0; 8],
         }];
-        let labels = cluster_by_centroids(&chunks, 0.5);
+        let (labels, centroids) = cluster_by_centroids(&chunks, 0.5);
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0], 0);
+        assert_eq!(centroids.len(), 1);
     }
 
     #[test]
@@ -734,7 +710,7 @@ mod tests {
             Chunk { start_sample: 0, end_sample: 48000, duration_secs: 3.0, embedding: vec![1.0, 0.0, 0.0, 0.0] },
             Chunk { start_sample: 48000, end_sample: 96000, duration_secs: 3.0, embedding: vec![1.0, 0.0, 0.0, 0.0] },
         ];
-        let labels = cluster_by_centroids(&chunks, 0.5);
+        let (labels, _centroids) = cluster_by_centroids(&chunks, 0.5);
         assert_eq!(labels.len(), 2);
         assert_eq!(labels[0], labels[1], "identical embeddings should merge");
     }
@@ -745,9 +721,10 @@ mod tests {
             Chunk { start_sample: 0, end_sample: 48000, duration_secs: 3.0, embedding: vec![1.0, 0.0, 0.0, 0.0] },
             Chunk { start_sample: 48000, end_sample: 96000, duration_secs: 3.0, embedding: vec![0.0, 1.0, 0.0, 0.0] },
         ];
-        let labels = cluster_by_centroids(&chunks, 0.99);
+        let (labels, centroids) = cluster_by_centroids(&chunks, 0.99);
         assert_eq!(labels.len(), 2);
         assert_ne!(labels[0], labels[1], "orthogonal embeddings should stay separate at high threshold");
+        assert_eq!(centroids.len(), 2);
     }
 
     #[test]
@@ -757,7 +734,7 @@ mod tests {
             SpeakerSegment { start_seconds: 1.0, end_seconds: 2.0, speaker_id: 7 },
             SpeakerSegment { start_seconds: 2.0, end_seconds: 3.0, speaker_id: 42 },
         ];
-        let renumbered = renumber_speakers(segments);
+        let (renumbered, _mapping) = renumber_speakers(segments);
         assert_eq!(renumbered[0].speaker_id, 0);
         assert_eq!(renumbered[1].speaker_id, 1);
         assert_eq!(renumbered[2].speaker_id, 0);

@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use super::diarization::DiarizationPort;
+use super::diarization::DiarizationPort; // trait in scope for .process()
 use super::sherpa_adapter::SherpaOnnxDiarizationAdapter;
 use crate::audio::decoder::decode_audio_file;
 
@@ -83,7 +83,8 @@ fn diarization_smoke_test() -> Result<()> {
     // 4. Run diarization
     println!("Running diarization on {:.0}s of audio...", decoded.duration_seconds);
     let start = std::time::Instant::now();
-    let segments = adapter.process(&samples, 16000, &[])?;
+    let output = adapter.process(&samples, 16000, &[])?;
+    let segments = output.segments;
     let elapsed = start.elapsed();
 
     println!("Diarization completed in {:.1}s", elapsed.as_secs_f64());

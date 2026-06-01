@@ -6,7 +6,7 @@ use crate::audio::decoder::decode_audio_file;
 use crate::audio::speaker::alignment::{
     align_transcripts_with_diarization, DiarizationSegment, TranscriptInput,
 };
-use crate::audio::speaker::diarization::DiarizationPort;
+use crate::audio::speaker::diarization::{DiarizationOutput, DiarizationPort};
 use crate::audio::speaker::embedding::SpeakerEmbeddingPort;
 use crate::audio::speaker::registry::SpeakerIdentificationPort;
 use crate::database::repositories::speaker::SpeakerRepository;
@@ -142,7 +142,9 @@ impl DiarizationProcessor {
         let mono = to_mono_f32(&decoded);
 
         // Run diarization
-        let speaker_segments = self.diarization.process(&mono, decoded.sample_rate, &[])?;
+        let output: DiarizationOutput = self.diarization.process(&mono, decoded.sample_rate, &[])?;
+        let speaker_segments = output.segments;
+        let centroids = output.centroids;
 
         if speaker_segments.is_empty() {
             // Silence-only or no speakers detected
@@ -166,9 +168,14 @@ impl DiarizationProcessor {
             ));
         }
 
-        // Extract embeddings per speaker cluster
-        self.extract_and_store_embeddings(pool, meeting_id, &speaker_segments, &mono, decoded.sample_rate)
-            .await?;
+        // Store centroids from the diarization output
+        for (speaker_id, centroid) in &centroids {
+            let emb_id = format!("emb-{}", uuid::Uuid::new_v4());
+            let cluster_label = format!("Speaker {}", speaker_id);
+            let _ = crate::database::repositories::speaker::SpeakerRepository::store_embedding(
+                pool, &emb_id, None, centroid, meeting_id, &cluster_label,
+            ).await;
+        }
 
         // Cross-meeting matching
         let label_map = self.match_speakers(&speaker_segments).await?;

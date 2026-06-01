@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 
-use super::diarization::DiarizationPort;
+use super::diarization::{DiarizationOutput, DiarizationPort};
 use super::embedding::SpeakerEmbeddingPort;
 use super::registry::SpeakerIdentificationPort;
 use super::types::{EmbeddingVector, SpeakerSegment};
@@ -175,8 +175,11 @@ impl MockDiarizationPort {
 }
 
 impl DiarizationPort for MockDiarizationPort {
-    fn process(&self, _samples: &[f32], _sample_rate: u32, _segments: &[(f64, f64)]) -> Result<Vec<SpeakerSegment>> {
-        Ok(self.segments.clone())
+    fn process(&self, _samples: &[f32], _sample_rate: u32, _segments: &[(f64, f64)]) -> Result<DiarizationOutput> {
+        Ok(DiarizationOutput {
+            segments: self.segments.clone(),
+            centroids: HashMap::new(),
+        })
     }
 }
 
@@ -250,13 +253,13 @@ mod tests {
             SpeakerSegment { start_seconds: 5.0, end_seconds: 10.0, speaker_id: 2 },
         ]);
         let result = port.process(&[0.0; 1000], 16000, &[(0.0, 5.0), (5.0, 10.0)]).unwrap();
-        assert_eq!(result.len(), 2);
+        assert_eq!(result.segments.len(), 2);
     }
 
     #[test]
     fn mock_diarization_silence() {
         let port = MockDiarizationPort::silence();
         let result = port.process(&[0.0; 1000], 16000, &[]).unwrap();
-        assert!(result.is_empty());
+        assert!(result.segments.is_empty());
     }
 }

@@ -274,8 +274,10 @@ pub async fn run_diarization_for_meeting(
 
     // Step 4: Run diarization with transcript-driven segments.
     let t2 = std::time::Instant::now();
-    let segments = adapter.process(&samples, DIARIZATION_SAMPLE_RATE, &transcript_segments)
+    let diarization = adapter.process(&samples, DIARIZATION_SAMPLE_RATE, &transcript_segments)
         .map_err(|e| format!("Diarization failed: {}", e))?;
+    let segments = diarization.segments;
+    let centroids = diarization.centroids;
     log::warn!("DIARIZATION: full pipeline: {:.2}s → {} segments", t2.elapsed().as_secs_f64(), segments.len());
 
     if segments.is_empty() {
@@ -309,11 +311,6 @@ pub async fn run_diarization_for_meeting(
     }
 
     // Step 5: Voice fingerprinting — store embeddings + cross-meeting matching.
-    let centroids = adapter.extract_speaker_centroids(
-        &samples,
-        DIARIZATION_SAMPLE_RATE,
-        &segments,
-    );
     let mut label_map: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     for (speaker_id, centroid) in &centroids {
         let emb_id = format!("emb-{}", Uuid::new_v4());
