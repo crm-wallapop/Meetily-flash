@@ -124,6 +124,7 @@ const MERGE_SIMILARITY_DEFAULT: f32 = 0.40;
 const MIN_SPEECH_SECS: f64 = 1.5;
 const MAX_CHUNK_SECS: f64 = 10.0;
 const SPLIT_TARGET_SECS: f64 = 3.0;
+const MIN_CLUSTER_FRAC: f64 = 0.02;
 
 fn to_fp(v: f32) -> u32 {
     (v * 65536.0) as u32
@@ -300,7 +301,20 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
             speaker_id: cur_speaker,
         });
 
-        let (result, id_map) = renumber_speakers(result);
+        let (mut result, id_map) = renumber_speakers(result);
+
+        let centroids: HashMap<u32, Vec<f32>> = cluster_centroids
+            .into_iter()
+            .filter_map(|(old_id, c)| Some((*id_map.get(&old_id)?, c)))
+            .collect();
+
+        // Merge short-duration speakers into their nearest neighbour.
+        // A speaker whose total speech is below MIN_CLUSTER_SECS is too short
+        // for a reliable voice print and is almost always a boundary artefact.
+        let total_audio_secs = result.iter()
+            .map(|s| s.end_seconds - s.start_seconds)
+            .sum::<f64>();
+        result = merge_short_speakers(result, &centroids, total_audio_secs);
 
         let n_spk: std::collections::HashSet<u32> = result.iter().map(|s| s.speaker_id).collect();
         log::warn!(
@@ -309,9 +323,8 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
             result.len(),
         );
 
-        let centroids: HashMap<u32, Vec<f32>> = cluster_centroids
-            .into_iter()
-            .filter_map(|(old_id, c)| Some((*id_map.get(&old_id)?, c)))
+        let centroids: HashMap<u32, Vec<f32>> = n_spk.iter()
+            .filter_map(|&id| centroids.get(&id).map(|c| (id, c.clone())))
             .collect();
 
         Ok(DiarizationOutput { segments: result, centroids })
@@ -327,6 +340,91 @@ impl SherpaOnnxDiarizationAdapter {
         }
         self.extractor.compute(&stream)
     }
+}
+
+/// Merge speakers whose total duration is below threshold into nearest neighbour.
+/// Threshold = MIN_CLUSTER_FRAC × total audio, but never below MIN_SPEECH_SECS
+/// (model can't produce embeddings from shorter clips anyway).
+fn merge_short_speakers(
+    mut segments: Vec<SpeakerSegment>,
+    centroids: &HashMap<u32, Vec<f32>>,
+    total_audio_secs: f64,
+) -> Vec<SpeakerSegment> {
+    let min_dur = (MIN_CLUSTER_FRAC * total_audio_secs).max(MIN_SPEECH_SECS);
+
+    let mut speaker_dur: HashMap<u32, f64> = HashMap::new();
+    for s in &segments {
+        *speaker_dur.entry(s.speaker_id).or_default() += s.end_seconds - s.start_seconds;
+    }
+
+    let short_speakers: Vec<u32> = speaker_dur.iter()
+        .filter(|(_, &dur)| dur < min_dur)
+        .map(|(&id, _)| id)
+        .collect();
+
+    if short_speakers.is_empty() {
+        return segments;
+    }
+
+    let long_speakers: Vec<u32> = speaker_dur.iter()
+        .filter(|(_, &dur)| dur >= min_dur)
+        .map(|(&id, _)| id)
+        .collect();
+
+    if long_speakers.is_empty() {
+        return segments;
+    }
+
+    let mut remap: HashMap<u32, u32> = HashMap::new();
+    for short_id in &short_speakers {
+        let short_centroid = match centroids.get(short_id) {
+            Some(c) => c,
+            None => continue,
+        };
+        let best = long_speakers.iter()
+            .filter_map(|&long_id| {
+                centroids.get(&long_id).map(|c| (long_id, cosine_similarity(short_centroid, c)))
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(id, _)| id);
+        if let Some(target) = best {
+            remap.insert(*short_id, target);
+            log::warn!(
+                "DIARIZATION: merging short speaker {} ({:.1}s) → speaker {}",
+                short_id,
+                speaker_dur[short_id],
+                target,
+            );
+        }
+    }
+
+    for s in &mut segments {
+        if let Some(&new_id) = remap.get(&s.speaker_id) {
+            s.speaker_id = new_id;
+        }
+    }
+
+    // Merge adjacent segments with same speaker and renumber.
+    segments = merge_adjacent(segments);
+    let (segments, _) = renumber_speakers(segments);
+    segments
+}
+
+fn merge_adjacent(mut segments: Vec<SpeakerSegment>) -> Vec<SpeakerSegment> {
+    if segments.is_empty() {
+        return segments;
+    }
+    segments.sort_by(|a, b| a.start_seconds.partial_cmp(&b.start_seconds).unwrap_or(std::cmp::Ordering::Equal));
+    let mut merged = vec![segments[0].clone()];
+    for s in segments.into_iter().skip(1) {
+        let last = merged.last_mut().unwrap();
+        if s.speaker_id == last.speaker_id && s.start_seconds <= last.end_seconds + 0.5 {
+            last.end_seconds = last.end_seconds.max(s.end_seconds);
+        } else {
+            merged.push(s);
+        }
+    }
+    merged
 }
 
 fn cluster_by_centroids(chunks: &[Chunk], threshold: f32) -> (Vec<u32>, HashMap<u32, Vec<f32>>) {

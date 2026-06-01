@@ -754,8 +754,7 @@ mod tests {
 
         assert!(result.is_ok(), "Diarization should succeed");
         let r = result.unwrap();
-        assert!(r.speaker_count >= 2, "Should detect at least 2 speakers, got {}", r.speaker_count);
-        assert!(r.speaker_count <= 8, "Should detect at most 8 speakers (3 main + noise), got {}", r.speaker_count);
+        assert_eq!(r.speaker_count, 3, "Should detect exactly 3 speakers, got {}", r.speaker_count);
         assert!(r.segments_labeled > 0, "Should label at least 1 segment");
     }
 }
