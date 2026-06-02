@@ -1,14 +1,22 @@
 # Speaker Diarization — Capability Spec
 
-> Status: **proposed** — new capability introduced by `speaker-diarization`.
+> Status: **active** — implemented, specs updated to match runtime behavior.
 
 ---
 
 ## ADDED Requirements
 
-### Requirement: Offline speaker diarization runs as a post-processing queue phase
+### Requirement: Transcript-timestamp-driven speaker diarization runs as a post-processing queue phase
 
-After the transcription and summarisation phases complete, the system SHALL run offline speaker diarization on the meeting's `audio.mp4` as a `Diarizing` phase in the transcription queue. The diarization phase SHALL decode the audio to raw f32 samples, run `OfflineSpeakerDiarization::process`, and produce a list of speaker segments `(start_seconds, end_seconds, speaker_id)`.
+After the transcription and summarisation phases complete, the system SHALL run offline speaker diarization on the meeting's `audio.mp4` as a `Diarizing` phase in the transcription queue. The diarization phase SHALL:
+
+1. Decode the audio to 16kHz mono f32 samples via `DecodedAudio::to_whisper_format()`
+2. Read transcript timestamps from the `transcripts` table to define speech segments
+3. Chunk each segment into `SPLIT_TARGET_SECS`-sized pieces (range [`MIN_SPEECH_SECS`, `MAX_CHUNK_SECS`])
+4. Extract a 3DSpeaker embedding for each chunk via `SpeakerEmbeddingExtractor`
+5. Cluster chunks using centroid-based agglomerative clustering with duration-weighted averaging
+6. Merge short-duration speakers into their cosine-nearest larger cluster
+7. Align transcript rows with diarization speaker segments
 
 The diarization phase SHALL be skipped if no `audio.mp4` exists (e.g., `auto_save = false`). The diarization phase SHALL run on imported audio files using the same queue path.
 
@@ -38,6 +46,21 @@ The diarization phase SHALL be skipped if no `audio.mp4` exists (e.g., `auto_sav
 
 ---
 
+### Requirement: Short-duration noise speakers are merged into nearest cluster
+
+After clustering, speakers with total speech duration below `MIN_CLUSTER_FRAC × total_audio_secs` (default 2%) SHALL be merged into their cosine-nearest larger cluster. The absolute floor SHALL be `MIN_SPEECH_SECS` (1.5s) — the model's own minimum embedding input.
+
+After merging, adjacent segments with the same speaker SHALL be coalesced, and speaker IDs SHALL be renumbered in temporal first-appearance order.
+
+#### Scenario: Noise speakers merged in 3-speaker meeting
+
+- **GIVEN** clustering produces 7 speakers where 4 have total duration < 3s each and 3 have > 100s each
+- **WHEN** the short-speaker merge runs
+- **THEN** the 4 short speakers are reassigned to their cosine-nearest large speaker
+- **AND** the final output has exactly 3 speakers
+
+---
+
 ### Requirement: Token-level timestamps align transcript text with diarization speaker boundaries
 
 The diarization processor SHALL read token timestamps from the `transcripts` table (stored by the Whisper provider) and align each word with the diarization speaker segment whose time range contains the word's timestamp. When a Whisper segment spans multiple speakers, the text SHALL be split at the speaker change boundary, producing separate transcript rows per speaker.
@@ -46,89 +69,81 @@ When token timestamps are unavailable (e.g., Parakeet provider), the processor S
 
 #### Scenario: Single-speaker Whisper segment
 
-- **GIVEN** a Whisper segment with `audio_start_time = 5.0`, `audio_end_time = 9.0`, and all token timestamps fall within diarization speaker "Speaker 1" (5.0–9.0)
+- **GIVEN** a Whisper segment with `audio_start_time = 5.0`, `audio_end_time = 9.0`, and all token timestamps fall within diarization speaker "Speaker 0" (5.0–9.0)
 - **WHEN** the diarization processor aligns the segment
-- **THEN** the transcript row is assigned `speaker = "Speaker 1"` without splitting
+- **THEN** the transcript row is assigned `speaker_label = "Speaker 0"` without splitting
 
 #### Scenario: Multi-speaker Whisper segment split at boundary
 
 - **GIVEN** a Whisper segment with `audio_start_time = 5.0`, `audio_end_time = 9.0`, and token timestamps show words at [5.0, 5.2, 5.4, 7.3, 7.5, 7.7]
-- **AND** diarization shows "Speaker 1" at 5.0–7.1 and "Speaker 2" at 7.2–9.0
+- **AND** diarization shows "Speaker 0" at 5.0–7.1 and "Speaker 1" at 7.2–9.0
 - **WHEN** the diarization processor aligns the segment
 - **THEN** the original transcript row is replaced by two rows:
-  - Row 1: text from tokens 5.0–5.4, `speaker = "Speaker 1"`, `audio_start_time = 5.0`, `audio_end_time = 7.1`
-  - Row 2: text from tokens 7.3–7.7, `speaker = "Speaker 2"`, `audio_start_time = 7.2`, `audio_end_time = 9.0`
+  - Row 1: text from tokens 5.0–5.4, `speaker_label = "Speaker 0"`, `audio_start_time = 5.0`, `audio_end_time = 7.1`
+  - Row 2: text from tokens 7.3–7.7, `speaker_label = "Speaker 1"`, `audio_start_time = 7.2`, `audio_end_time = 9.0`
 
 #### Scenario: Parakeet fallback with proportional split
 
 - **GIVEN** a Whisper segment with no token timestamps (Parakeet provider), `audio_start_time = 5.0`, `audio_end_time = 9.0`
-- **AND** diarization shows "Speaker 1" at 5.0–7.2 and "Speaker 2" at 7.2–9.0
+- **AND** diarization shows "Speaker 0" at 5.0–7.2 and "Speaker 1" at 7.2–9.0
 - **WHEN** the diarization processor aligns the segment
-- **THEN** the text is split proportionally (2.2s / 4.0s = 55% of words to Speaker 1)
+- **THEN** the text is split proportionally (2.2s / 4.0s = 55% of words to Speaker 0)
 
 ---
 
-### Requirement: Speaker embeddings are stored per speaker per meeting for cross-meeting matching
+### Requirement: Centroid embeddings are stored per speaker per meeting for cross-meeting matching
 
-The diarization processor SHALL extract an average embedding for each speaker cluster identified during diarization. The embedding SHALL be stored in the `speaker_embeddings` table with the speaker cluster ID, the embedding vector as a BLOB, and the source meeting ID.
+The diarization processor SHALL return centroid embeddings directly from the clustering step. Centroids are duration-weighted averages of per-chunk embeddings, computed during agglomerative clustering. They SHALL be stored in the `speaker_embeddings` table as BLOBs with the cluster label and source meeting ID.
 
-When a user labels a speaker (e.g., "Speaker 1" → "Alice"), the system SHALL create or update a `speakers` table row with the name and persistent color, and link the corresponding `speaker_embeddings` row to the named speaker.
+Embedding dimensions are model-dependent (not hardcoded). The storage layer SHALL accept any dimension in range [64, 1024] and validate that all values are finite.
 
-#### Scenario: Embeddings stored during diarization
+When a user labels a speaker (e.g., "Speaker 0" → "Alice"), the system SHALL create or update a `speakers` table row with the name and persistent color, and link the corresponding `speaker_embeddings` row to the named speaker.
+
+#### Scenario: Centroids stored during diarization
 
 - **WHEN** diarization identifies 3 speakers in a meeting
-- **THEN** 3 rows are inserted into `speaker_embeddings`, each containing the average embedding vector for that speaker cluster, the source meeting ID, and a generated cluster label ("Speaker 1", "Speaker 2", "Speaker 3")
+- **THEN** 3 rows are inserted into `speaker_embeddings`, each containing the duration-weighted centroid embedding vector for that cluster, the source meeting ID, and a generated cluster label ("Speaker 0", "Speaker 1", "Speaker 2")
 
 #### Scenario: Labeling a speaker creates a named profile
 
-- **WHEN** the user labels "Speaker 1" as "Alice"
+- **WHEN** the user labels "Speaker 0" as "Alice"
 - **THEN** a row is inserted or updated in `speakers` with `name = "Alice"` and a persistent color from the palette
 - **AND** the corresponding `speaker_embeddings` row is linked to the named speaker via `speaker_id`
-- **AND** all transcript rows with `speaker = "Speaker 1"` in that meeting are updated to `speaker = "Alice"`
+- **AND** all transcript rows with `speaker_label = "Speaker 0"` in that meeting are updated to `speaker_label = "Alice"`
 
 ---
 
-### Requirement: Cross-meeting speaker matching uses embedding similarity with confidence tiers
+### Requirement: Cross-meeting speaker matching uses embedding similarity
 
-After diarization assigns anonymous speaker labels ("Speaker 1", etc.), the system SHALL compare each speaker cluster's average embedding against all named speakers in the `speakers` table using `SpeakerEmbeddingManager::search(embedding, threshold)`. Matches SHALL be classified into tiers:
+After diarization assigns anonymous speaker labels ("Speaker 0", etc.), the system SHALL compare each speaker cluster's centroid embedding against all named speakers in the `speakers` table using cosine similarity. Matches above the threshold SHALL auto-label the speaker with the matched name.
 
-- **High confidence** (similarity ≥ threshold): speaker is labeled with the matched name directly
-- **Medium confidence** (0.5 ≤ similarity < threshold): speaker is labeled as "Unknown Speaker (possibly <name>)"
-- **Low confidence** (similarity < 0.5): speaker is labeled as "Unknown Speaker"
+The threshold SHALL default to 0.40 and SHALL be configurable via advanced settings in range [0.35, 0.70].
 
-The threshold SHALL default to 0.6 and SHALL be configurable via advanced settings.
-
-#### Scenario: High-confidence match auto-labels speaker
+#### Scenario: Matching speaker auto-labeled
 
 - **GIVEN** "Alice" exists in the `speakers` table with stored embeddings
-- **WHEN** diarization produces a speaker cluster with embedding similarity = 0.78 to Alice
+- **WHEN** diarization produces a speaker cluster with centroid embedding cosine similarity ≥ 0.60 to Alice
 - **THEN** the speaker is labeled "Alice" directly
 
-#### Scenario: Medium-confidence match shows suggestion
+#### Scenario: No match produces cluster label
 
-- **GIVEN** "Alice" exists in the `speakers` table
-- **WHEN** diarization produces a speaker cluster with embedding similarity = 0.55 to Alice (below threshold 0.6)
-- **THEN** the speaker is labeled "Unknown Speaker (possibly Alice)"
-
-#### Scenario: No match produces unknown label
-
-- **GIVEN** no speakers in the registry have similarity ≥ 0.5
+- **GIVEN** no speakers in the registry have similarity ≥ threshold
 - **WHEN** diarization produces a speaker cluster
-- **THEN** the speaker is labeled "Unknown Speaker"
+- **THEN** the speaker keeps its cluster label ("Speaker 0")
 
 ---
 
 ### Requirement: Retroactive speaker labeling via inline badges
 
-The frontend SHALL render an inline speaker badge next to each transcript segment. The badge SHALL display the current speaker label ("Speaker 1", "Alice", "Unknown Speaker"). Clicking the badge SHALL open an inline input to type a new name or select from existing named speakers.
+The frontend SHALL render an inline speaker badge next to each transcript segment. The badge SHALL display the current speaker label ("Speaker 0", "Alice", "Unknown Speaker"). Clicking the badge SHALL open an inline input to type a new name or select from existing named speakers.
 
 When the user assigns a name, the frontend SHALL invoke `label_speaker(meeting_id, cluster_label, speaker_name)`, which creates/updates the `speakers` row, links embeddings, and updates all transcript rows for that cluster in the meeting.
 
 #### Scenario: Label an unknown speaker
 
-- **WHEN** the user clicks the "Speaker 1" badge and types "Alice"
+- **WHEN** the user clicks the "Speaker 0" badge and types "Alice"
 - **THEN** the badge updates to "Alice" with Alice's persistent color
-- **AND** all transcript segments from "Speaker 1" in this meeting update to "Alice"
+- **AND** all transcript segments from "Speaker 0" in this meeting update to "Alice"
 
 #### Scenario: Re-label a previously named speaker
 
@@ -146,7 +161,7 @@ When the user triggers "re-diarize" on a meeting, the system SHALL re-run offlin
 
 #### Scenario: Re-diarize preserves manual corrections
 
-- **GIVEN** a meeting where the user manually corrected "Speaker 2" → "Bob"
+- **GIVEN** a meeting where the user manually corrected "Speaker 1" → "Bob"
 - **WHEN** the user triggers re-diarization
 - **THEN** the re-diarization runs and produces new speaker clusters
 - **AND** clusters matching "Bob" by embedding similarity keep the "Bob" label
@@ -154,16 +169,16 @@ When the user triggers "re-diarize" on a meeting, the system SHALL re-run offlin
 
 #### Scenario: Re-diarize re-labels auto-assigned rows
 
-- **GIVEN** a meeting where "Speaker 1" was auto-assigned to "Alice" with `speaker_source = "auto"`
+- **GIVEN** a meeting where "Speaker 0" was auto-assigned to "Alice" with `speaker_source = "auto"`
 - **WHEN** the user triggers re-diarization
-- **THEN** "Speaker 1" is re-evaluated against the speaker registry
+- **THEN** "Speaker 0" is re-evaluated against the speaker registry
 - **AND** the label is updated based on the new embedding match
 
 ---
 
 ### Requirement: Speaker model selection and download
 
-The system SHALL support two embedding models: `3dspeaker_speech_campplus_sv_zh-cn_16k-common` (default, ~26 MB) and `wespeaker_zh_cnce_resnet` (~90 MB). The pyannote segmentation model (~50 MB) SHALL be a required download. All models SHALL be downloaded during onboarding Step 3 or on first use if skipped during onboarding.
+The system SHALL support two embedding models: `3dspeaker` (default, ~26 MB) and `wespeaker` (~90 MB). The pyannote segmentation model (~6 MB) SHALL be a required download. All models SHALL be downloaded during onboarding Step 3 or on first use if skipped during onboarding.
 
 The active embedding model SHALL be configurable in settings. Changing the model SHALL NOT trigger re-diarization of existing meetings (user can manually re-diarize).
 
@@ -181,7 +196,7 @@ The active embedding model SHALL be configurable in settings. Changing the model
 
 #### Scenario: User switches embedding model
 
-- **WHEN** the user selects `wespeaker_zh_cnce_resnet` in settings
+- **WHEN** the user selects `wespeaker` in settings
 - **THEN** the model is downloaded if not already present
 - **AND** subsequent diarization jobs use the new model
 - **AND** existing meetings retain their current labels
@@ -190,37 +205,37 @@ The active embedding model SHALL be configurable in settings. Changing the model
 
 ### Requirement: Per-speaker persistent colors
 
-Each speaker in the `speakers` table SHALL have a `color` field assigned from a fixed 10-color categorical palette when the speaker is first created. The color SHALL be used consistently across all meetings where that speaker appears.
+Each speaker in the `speakers` table SHALL have a `color` field assigned using golden-angle HSL distribution (`hue = index × 137.508 mod 360`, saturation 65%, lightness 55%) when the speaker is first created. The color SHALL be used consistently across all meetings where that speaker appears.
 
 #### Scenario: New speaker gets a color from the palette
 
 - **WHEN** the user labels a speaker for the first time
-- **THEN** the speaker is assigned the next available color from the palette
+- **THEN** the speaker is assigned the next available color from the golden-angle palette
 - **AND** all transcript segments for that speaker in all meetings display with that color
 
 #### Scenario: Known speaker retains color across meetings
 
-- **GIVEN** "Alice" has `color = "#0EA5E9"` (sky blue)
+- **GIVEN** "Alice" has `color = "hsl(137, 65%, 55%)"`
 - **WHEN** Alice is auto-matched in a new meeting
-- **THEN** her badge and transcript segments use the same sky blue color
+- **THEN** her badge and transcript segments use the same color
 
 ---
 
-### Requirement: Speaker count auto-detection with user cap
+### Requirement: Merge threshold configurable in settings
 
-`OfflineSpeakerDiarization` SHALL auto-detect the number of speakers. The system SHALL support a user-configurable maximum speaker cap (default: 8, range: 2–20). When auto-detection exceeds the cap, the diarization SHALL be re-run with the cap as the maximum speaker count. The cap SHALL be configurable in advanced settings.
+The clustering merge threshold SHALL default to 0.40 and SHALL be configurable via settings in range [0.35, 0.70]. Higher values produce more speakers (more conservative merging). Lower values produce fewer speakers (more aggressive merging). The threshold controls the cosine similarity below which two clusters are merged.
 
-#### Scenario: Auto-detect within cap
+#### Scenario: Default threshold produces correct speaker count
 
-- **GIVEN** the user cap is 8
-- **WHEN** diarization auto-detects 5 speakers
-- **THEN** 5 speakers are identified and labeled
+- **GIVEN** a meeting with 3 speakers
+- **WHEN** diarization runs with threshold 0.40
+- **THEN** 3 speakers are identified after short-speaker merge
 
-#### Scenario: Auto-detect exceeds cap
+#### Scenario: Higher threshold produces more speakers
 
-- **GIVEN** the user cap is 4
-- **WHEN** diarization auto-detects 7 speakers
-- **THEN** diarization is re-run with a maximum of 4 speakers (closest clusters are merged)
+- **GIVEN** a meeting with 3 speakers
+- **WHEN** diarization runs with threshold 0.60
+- **THEN** more than 3 speakers are identified (clusters stay separate)
 
 ---
 
@@ -231,5 +246,5 @@ When a user re-transcribes a meeting with a different model, the system SHALL cl
 #### Scenario: Re-transcription triggers re-diarization
 
 - **WHEN** the user re-transcribes a meeting that has speaker labels
-- **THEN** all transcript rows for that meeting have `speaker` set to `NULL` and `speaker_source` set to `NULL`
+- **THEN** all transcript rows for that meeting have `speaker_label` set to `NULL` and `speaker_source` set to `NULL`
 - **AND** a diarization job is enqueued for the meeting

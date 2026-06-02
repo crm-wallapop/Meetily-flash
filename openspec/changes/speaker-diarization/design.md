@@ -1,19 +1,19 @@
 ## Context
 
-Meetily records multi-participant meetings but produces speaker-anonymous transcripts. The current pipeline is: VAD → Whisper → transcript segments stored in SQLite. There is no speaker attribution at any stage. Dead `pyannote` code in `stt.rs` references embedding extraction but was never integrated.
+Meetily records multi-participant meetings but produces speaker-anonymous transcripts. The current pipeline is: VAD → Whisper → transcript segments stored in SQLite. There is no speaker attribution at any stage.
 
 The transcription queue already supports phase chaining (`Transcribing` → `Summarising`) via `JobResult::CompletedChain`. The Whisper provider already sets `set_token_timestamps(true)` but discards the per-token timing data.
 
-The `sherpa-onnx` crate (v1.13.2, Apache-2.0) provides official Rust bindings for `OfflineSpeakerDiarization`, `SpeakerEmbeddingExtractor`, and `SpeakerEmbeddingManager`. Auto-downloads prebuilt static libraries for all target platforms. Thread-safe (`Send + Sync`).
+The `sherpa-onnx` crate (v1.13.2, Apache-2.0) provides official Rust bindings for `SpeakerEmbeddingExtractor` and `SpeakerEmbeddingManager`. Auto-downloads prebuilt static libraries for all target platforms. Thread-safe (`Send + Sync`).
 
 ## Goals / Non-Goals
 
 **Goals:**
 - Offline speaker diarization as a post-processing queue phase, chained after summarisation
 - Token-level timestamp alignment between Whisper segments and diarization speaker boundaries
-- Cross-meeting speaker identification via embedding matching with confidence tiers
+- Cross-meeting speaker identification via embedding matching
 - Retroactive speaker labeling with persistent per-speaker colors
-- User-selectable embedding models (3dspeaker/wespeaker) and required pyannote segmentation model
+- User-selectable embedding models (3dspeaker/wespeaker) and pyannote segmentation model
 - Diarization for both recorded and imported audio
 
 **Non-Goals:**
@@ -29,7 +29,7 @@ The `sherpa-onnx` crate (v1.13.2, Apache-2.0) provides official Rust bindings fo
 
 **Choice**: Official `sherpa-onnx` crate.
 **Alternatives**: `sherpa-rs` (deprecated, README redirects to official crate), hand-rolled ONNX bindings.
-**Rationale**: Official crate is maintained by the k2-fsa project, provides `OfflineSpeakerDiarization` + `SpeakerEmbeddingExtractor` + `SpeakerEmbeddingManager` with full Rust API, thread-safe, static linking, cross-platform.
+**Rationale**: Official crate is maintained by the k2-fsa project, provides `SpeakerEmbeddingExtractor` + `SpeakerEmbeddingManager` with full Rust API, thread-safe, static linking, cross-platform.
 
 ### D2: Offline-only diarization as a queue phase
 
@@ -37,49 +37,47 @@ The `sherpa-onnx` crate (v1.13.2, Apache-2.0) provides official Rust bindings fo
 **Alternatives**: Online embedding during recording; standalone post-processing outside the queue.
 **Rationale**: Queue phase chaining already exists (`JobResult::CompletedChain`). Diarization runs after transcription completes so it can align against stored transcript segments. Zero CPU overhead during recording.
 
-### D3: Token-level timestamps for alignment
+### D3: Transcript-timestamp-driven chunking with centroid clustering
 
-**Choice**: Extract and store per-word timestamps from Whisper during transcription. Use them to assign each word to a diarization speaker based on timestamp overlap.
-**Alternatives**: Proportional time-split (splits text at arbitrary points); re-transcribe sub-segments (expensive).
-**Rationale**: Whisper already generates token timestamps (`set_token_timestamps(true)`). Storing them adds ~200 bytes per segment. Word-level alignment produces natural sentence splits at speaker boundaries.
+**Choice**: Instead of using `OfflineSpeakerDiarization`, the pipeline uses transcript timestamps to define audio chunks, extracts 3DSpeaker embeddings per chunk, then runs centroid-based agglomerative clustering.
+**Alternatives**: `OfflineSpeakerDiarization` (sherpa-onnx built-in), energy-based VAD chunking.
+**Rationale**: Transcript timestamps are more reliable than energy-based VAD for finding speech boundaries. Per-chunk embeddings (~2-5s each) produce clean voice prints. Agglomerative clustering with duration-weighted centroids produces accurate speaker grouping. Constants derived from model characteristics: `MIN_SPEECH_SECS=1.5`, `MAX_CHUNK_SECS=10.0`, `SPLIT_TARGET_SECS=3.0`.
 
-**Fallback**: For Parakeet (no token timestamps), use segment-level timestamps with proportional text-split as a degraded mode.
+### D4: Centroid extraction from clustering (not re-extraction)
 
-### D4: Retroactive labeling with embedding-based cross-meeting matching
+**Choice**: Centroids are returned directly from `cluster_by_centroids()` as duration-weighted averages of per-chunk embeddings. `DiarizationOutput` carries both segments and centroids. No separate extraction step.
+**Alternatives**: Re-extract embeddings from merged segments (broken — feeds minute-long audio to 3DSpeaker).
+**Rationale**: The clustering already maintains accurate duration-weighted centroids. Re-extracting from merged segments produces garbage because 3DSpeaker expects ~2-5s windows, not 150s.
 
-**Choice**: Users label "Speaker 1" → "Alice" inline in the transcript view. The system extracts the average embedding for that speaker cluster from the diarization results and stores it in `speaker_embeddings`. Future meetings auto-match if cosine similarity exceeds the threshold.
+### D5: Short-speaker noise merge
+
+**Choice**: After clustering, speakers with total duration below `MIN_CLUSTER_FRAC × total_audio` (default 2%) are merged into their cosine-nearest larger cluster. The absolute floor is `MIN_SPEECH_SECS` (1.5s) — the model's own minimum embedding input.
+**Alternatives**: No merge (leaves noise speakers); fixed absolute threshold.
+**Rationale**: Clustering at threshold 0.40 produces noise speakers (1-3s artifacts from boundary effects). These should not appear as separate speakers. The fraction-based threshold scales with meeting length.
+
+### D6: Retroactive labeling with embedding-based cross-meeting matching
+
+**Choice**: Users label "Speaker 0" → "Alice" inline in the transcript view. The centroid embedding from clustering is already stored in `speaker_embeddings`. Future meetings auto-match if cosine similarity exceeds the threshold.
 **Alternatives**: Guided enrollment; no cross-meeting matching.
-**Rationale**: Zero upfront friction. The system gets smarter as users label more speakers. False-positive risk mitigated by confidence tiers.
+**Rationale**: Zero upfront friction. The system gets smarter as users label more speakers.
 
-### D5: Confidence tiers for cross-meeting matching
+### D7: Embedding dimension is model-dependent, not hardcoded
 
-**Choice**: High-confidence matches (> threshold) show the speaker name directly. Lower-confidence matches (0.5–threshold) show "Unknown Speaker (possibly Alice)". Below 0.5: "Unknown Speaker".
-**Alternatives**: Binary threshold; always show best match.
-**Rationale**: Prevents confident false attribution for summarization. Users can verify suggestions. Threshold is configurable in advanced settings.
-
-### D6: Average embedding per speaker per meeting
-
-**Choice**: Store one average embedding per speaker per meeting in `speaker_embeddings` table. Cross-meeting matching uses `SpeakerEmbeddingManager::search()` against all stored embeddings.
-**Alternatives**: Store every per-segment embedding (~50 per meeting).
-**Rationale**: Sufficient for matching with the official `SpeakerEmbeddingManager`. Lower storage overhead (~5 KB per meeting vs ~50 KB).
-
-### D7: Embedding-based speaker ID stability across re-diarizations
-
-**Choice**: When re-diarizing, match new speaker clusters against existing labeled speakers by embedding similarity. If a cluster matches "Alice", it keeps the "Alice" label.
-**Alternatives**: Numeric labels that reset on re-diarization.
-**Rationale**: Prevents user corrections from being lost. Labels are tied to voice identity, not arbitrary numbering.
+**Choice**: `speaker_embeddings` accepts any dimension in range [64, 1024]. The 3DSpeaker model on the current system outputs 512-dim embeddings, not 256-dim.
+**Alternatives**: Hardcode 256-dim (rejected — rejected valid centroids).
+**Rationale**: Different model versions and model types produce different embedding dimensions. Storage is self-describing (blob size / 4 = dim).
 
 ### D8: Per-speaker persistent colors
 
 **Choice**: Each speaker in the `speakers` table has a `color` field. Assigned from a fixed palette when the speaker is first created. The color is used consistently across all meetings.
-**Alternatives**: Fixed palette by position (Speaker 1 always blue).
+**Alternatives**: Fixed palette by position (Speaker 0 always blue).
 **Rationale**: Named speakers should look the same in every meeting. Alice is always teal.
 
 ### D9: Model selection
 
 **Embedding models (user-selectable)**:
-- `3dspeaker_speech_campplus_sv_zh-cn_16k-common` (~26 MB, 256-dim) — default, multilingual
-- `wespeaker_zh_cnce_resnet` (~90 MB, 256-dim) — higher accuracy option
+- `3dspeaker_speech_campplus_sv_zh-cn_16k-common` (~26 MB, 512-dim) — default, multilingual
+- `wespeaker_zh_cnce_resnet` (~90 MB) — higher accuracy option
 
 **Segmentation model (required)**:
 - Pyannote segmentation model (~50 MB) — always downloaded during onboarding
@@ -88,17 +86,24 @@ The `sherpa-onnx` crate (v1.13.2, Apache-2.0) provides official Rust bindings fo
 
 **Choice**: Always run diarization and label, even for 1 speaker. Useful for matching against the speaker registry ("this is Alice"). Single-speaker false positives (split into 2) are visible to the user and can be corrected.
 
+### D11: Merge threshold calibrated at 0.40
+
+**Choice**: Default merge threshold is 0.40 (range [0.35, 0.70]). Empirically calibrated: 0.45 produces 10 speakers, 0.40 produces 3 main + 4 noise (handled by short-speaker merge).
+**Rationale**: The original 0.60 default was too high, producing 53 speakers from a 3-speaker meeting.
+
 ## Risks / Trade-offs
 
 **[Cold-start]** → First N meetings have no auto-matching value. Users must manually label speakers. Mitigated by inline labeling being low-friction (click badge → type name).
 
-**[Cross-meeting accuracy]** → Embedding matching across different microphones, rooms, and days is unproven. False positives are trust-destroying for summarization. Mitigated by confidence tiers and configurable threshold. Default threshold is conservative (0.6).
+**[Cross-meeting accuracy]** → Embedding matching across different microphones, rooms, and days is unproven. False positives are trust-destroying for summarization. Mitigated by configurable threshold. Default threshold is conservative (0.40).
 
 **[Proportional split for Parakeet]** → When Parakeet is the transcription provider, token timestamps are unavailable. Alignment falls back to segment-level proportional split, which can split mid-sentence. Mitigated by documenting as a known limitation and recommending Whisper for best diarization results.
 
 **[Download size]** → Adding ~50 MB (segmentation) + 26–90 MB (embedding) to onboarding downloads. Mitigated by being optional — diarization models can be downloaded separately if user skips during onboarding.
 
 **[Overlapping speech]** → Diarization assigns overlapping speech to one speaker. This is a fundamental limitation of single-channel diarization. Documented as known limitation.
+
+**[Debug-mode performance]** → Debug builds take ~8 min for a 30-min meeting. Release mode estimated at 3-4 min. Mitigated by release-mode production builds.
 
 ## Migration Plan
 
@@ -107,8 +112,9 @@ The `sherpa-onnx` crate (v1.13.2, Apache-2.0) provides official Rust bindings fo
 3. **Model download**: Add segmentation + embedding model download to onboarding Step 3. Graceful fallback if download fails — diarization phase is skipped and a warning is logged.
 4. **Rollback**: Remove `sherpa-onnx` dependency, revert queue changes, drop new DB columns/tables. Existing recordings are unaffected (speaker columns are nullable).
 
-## Open Questions
+## Resolved Open Questions
 
-- Default confidence threshold value (tentatively 0.6 — needs empirical tuning).
-- Whether to expose speaker count cap as a global setting or per-recording setting (tentatively global).
-- Exact color palette for persistent speaker colors (tentatively a 10-color categorical palette).
+- Default confidence threshold: **0.40** (empirically calibrated, range [0.35, 0.70]).
+- Speaker count cap: **global setting**.
+- Color palette: **golden-angle HSL** (`hue = index × 137.508 mod 360`), not a fixed 10-color palette.
+- Embedding dimension: **model-dependent** (3DSpeaker outputs 512-dim), accepted range [64, 1024].

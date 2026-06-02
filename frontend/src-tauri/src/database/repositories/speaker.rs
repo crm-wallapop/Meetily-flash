@@ -204,14 +204,25 @@ impl SpeakerRepository {
         speaker_label: &str,
         source: &str,
     ) -> Result<bool> {
-        let result = sqlx::query(
-            "UPDATE transcripts SET speaker_label = ?, speaker_source = ? WHERE id = ?",
-        )
-        .bind(speaker_label)
-        .bind(source)
-        .bind(transcript_id)
-        .execute(pool)
-        .await?;
+        let result = if source == "auto" {
+            sqlx::query(
+                "UPDATE transcripts SET speaker_label = ?, speaker_source = ? WHERE id = ? AND (speaker_source IS NULL OR speaker_source != 'manual')",
+            )
+            .bind(speaker_label)
+            .bind(source)
+            .bind(transcript_id)
+            .execute(pool)
+            .await?
+        } else {
+            sqlx::query(
+                "UPDATE transcripts SET speaker_label = ?, speaker_source = ? WHERE id = ?",
+            )
+            .bind(speaker_label)
+            .bind(source)
+            .bind(transcript_id)
+            .execute(pool)
+            .await?
+        };
         Ok(result.rows_affected() > 0)
     }
 

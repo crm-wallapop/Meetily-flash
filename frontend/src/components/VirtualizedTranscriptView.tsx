@@ -9,7 +9,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
-import { SpeakerBadge } from "./SpeakerBadge";
+import { SpeakerBadge, SpeakerLabelInput } from "./SpeakerBadge";
+import { labelSpeaker, listSpeakers } from "@/services/speakerService";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -35,6 +36,10 @@ export interface VirtualizedTranscriptViewProps {
     totalCount?: number;
     loadedCount?: number;
     onLoadMore?: () => void;
+
+    // Speaker rename props
+    meetingId?: string;
+    onSpeakersChanged?: () => Promise<void>;
 }
 
 // Threshold for enabling virtualization (below this, use simple rendering)
@@ -74,6 +79,11 @@ const TranscriptSegment = memo(function TranscriptSegment({
     speakerIndex,
     isStreaming,
     showConfidence,
+    isEditingSpeaker,
+    onSpeakerClick,
+    onSpeakerSubmit,
+    onSpeakerCancel,
+    knownSpeakers,
 }: {
     id: string;
     timestamp: number;
@@ -83,6 +93,11 @@ const TranscriptSegment = memo(function TranscriptSegment({
     speakerIndex?: number;
     isStreaming: boolean;
     showConfidence: boolean;
+    isEditingSpeaker?: boolean;
+    onSpeakerClick?: () => void;
+    onSpeakerSubmit?: (name: string) => void;
+    onSpeakerCancel?: () => void;
+    knownSpeakers?: string[];
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
 
@@ -104,7 +119,19 @@ const TranscriptSegment = memo(function TranscriptSegment({
                 <div className="flex-1">
                     {speaker && (
                         <div className="mb-1">
-                            <SpeakerBadge name={speaker} colorIndex={speakerIndex ?? 0} />
+                            {isEditingSpeaker ? (
+                                <SpeakerLabelInput
+                                    onSubmit={onSpeakerSubmit!}
+                                    onCancel={onSpeakerCancel!}
+                                    suggestions={knownSpeakers}
+                                />
+                            ) : (
+                                <SpeakerBadge
+                                    name={speaker}
+                                    colorIndex={speakerIndex ?? 0}
+                                    onClick={onSpeakerClick}
+                                />
+                            )}
                         </div>
                     )}
                     {isStreaming ? (
@@ -134,7 +161,11 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     totalCount = 0,
     loadedCount = 0,
     onLoadMore,
+    meetingId,
+    onSpeakersChanged,
 }) => {
+    const [editingSpeaker, setEditingSpeaker] = useState<string | null>(null);
+    const [knownSpeakers, setKnownSpeakers] = useState<string[]>([]);
     // Create scroll ref first - shared between virtualizer and auto-scroll hook
     const scrollRef = useRef<HTMLDivElement>(null);
     // Ref for infinite scroll trigger element
@@ -142,6 +173,25 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
 
     // Force re-render without flushSync (avoids React warning)
     const [, rerender] = useReducer((x: number) => x + 1, 0);
+
+    // Load known speaker names for suggestions
+    useEffect(() => {
+        listSpeakers().then(speakers => {
+            setKnownSpeakers(speakers.map(s => s.name).filter(n => !n.startsWith("Speaker ")));
+        }).catch(() => {});
+    }, []);
+
+    const handleSpeakerSubmit = useCallback(async (clusterLabel: string, name: string) => {
+        if (!meetingId) return;
+        try {
+            await labelSpeaker(meetingId, clusterLabel, name);
+            setEditingSpeaker(null);
+            await onSpeakersChanged?.();
+        } catch (err) {
+            console.error("Failed to rename speaker:", err);
+            setEditingSpeaker(null);
+        }
+    }, [meetingId, onSpeakersChanged]);
 
     // Setup virtualizer for efficient rendering of large lists
     const virtualizer = useVirtualizer({
@@ -323,6 +373,11 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         speakerIndex={getSpeakerIndex(segment.speaker)}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        isEditingSpeaker={editingSpeaker === segment.speaker}
+                                        onSpeakerClick={segment.speaker ? () => setEditingSpeaker(segment.speaker!) : undefined}
+                                        onSpeakerSubmit={(name) => segment.speaker && handleSpeakerSubmit(segment.speaker, name)}
+                                        onSpeakerCancel={() => setEditingSpeaker(null)}
+                                        knownSpeakers={knownSpeakers}
                                     />
                                 </div>
                             );
@@ -381,6 +436,11 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         speakerIndex={getSpeakerIndex(segment.speaker)}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        isEditingSpeaker={editingSpeaker === segment.speaker}
+                                        onSpeakerClick={segment.speaker ? () => setEditingSpeaker(segment.speaker!) : undefined}
+                                        onSpeakerSubmit={(name) => segment.speaker && handleSpeakerSubmit(segment.speaker, name)}
+                                        onSpeakerCancel={() => setEditingSpeaker(null)}
+                                        knownSpeakers={knownSpeakers}
                                     />
                                 </motion.div>
                             );

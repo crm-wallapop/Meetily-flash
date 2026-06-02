@@ -757,4 +757,55 @@ mod tests {
         assert_eq!(r.speaker_count, 3, "Should detect exactly 3 speakers, got {}", r.speaker_count);
         assert!(r.segments_labeled > 0, "Should label at least 1 segment");
     }
+
+    #[tokio::test]
+    async fn auto_label_does_not_overwrite_manual() {
+        let db_path = r"C:\Users\user\AppData\Roaming\com.meetily.ai\meeting_minutes.sqlite";
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=rw", db_path))
+            .await
+            .expect("DB connect");
+
+        let meeting_id = "meeting-00000000-0000-4000-8000-000000000003";
+        let transcript_id = format!("test-concurrent-{}", uuid::Uuid::new_v4());
+
+        // Insert a test transcript with manual label
+        sqlx::query(
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker_label, speaker_source)
+             VALUES (?, ?, 'test', '00:00', 0.0, 1.0, 1.0, 'Alice', 'manual')"
+        )
+        .bind(&transcript_id)
+        .bind(meeting_id)
+        .execute(&pool)
+        .await
+        .expect("insert");
+
+        // Try to auto-label the same transcript
+        let updated = SpeakerRepository::update_transcript_speaker(
+            &pool, &transcript_id, "Speaker 0", "auto",
+        )
+        .await
+        .expect("update");
+
+        // Auto-label should NOT have updated a manually labeled row
+        assert!(!updated, "auto-label should not overwrite manual label");
+
+        // Verify the manual label is intact
+        let row: (String, String) = sqlx::query_as(
+            "SELECT speaker_label, speaker_source FROM transcripts WHERE id = ?"
+        )
+        .bind(&transcript_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch");
+
+        assert_eq!(row.0, "Alice");
+        assert_eq!(row.1, "manual");
+
+        // Cleanup
+        sqlx::query("DELETE FROM transcripts WHERE id = ?")
+            .bind(&transcript_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup");
+    }
 }

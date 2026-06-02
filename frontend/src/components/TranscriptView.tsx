@@ -1,20 +1,23 @@
 'use client';
 
 import { Transcript } from '@/types';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ConfidenceIndicator } from './ConfidenceIndicator';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { RecordingStatusBar } from './RecordingStatusBar';
-import { SpeakerBadge } from './SpeakerBadge';
+import { SpeakerBadge, SpeakerLabelInput } from './SpeakerBadge';
+import { labelSpeaker, listSpeakers } from '@/services/speakerService';
 import { motion, AnimatePresence } from 'framer-motion';
 
 interface TranscriptViewProps {
   transcripts: Transcript[];
   isRecording?: boolean;
-  isPaused?: boolean; // Is recording paused (affects UI indicators)
-  isProcessing?: boolean; // Is processing/finalizing transcription (hides "Listening..." indicator)
-  isStopping?: boolean; // Is recording being stopped (provides immediate UI feedback)
-  enableStreaming?: boolean; // Enable streaming effect for live transcription UX
+  isPaused?: boolean;
+  isProcessing?: boolean;
+  isStopping?: boolean;
+  enableStreaming?: boolean;
+  meetingId?: string;
+  onSpeakersChanged?: () => Promise<void>;
 }
 
 interface SpeechDetectedEvent {
@@ -105,8 +108,38 @@ function cleanStopWords(text: string): string {
   return cleanedText;
 }
 
-export const TranscriptView: React.FC<TranscriptViewProps> = ({ transcripts, isRecording = false, isPaused = false, isProcessing = false, isStopping = false, enableStreaming = false }) => {
+export const TranscriptView: React.FC<TranscriptViewProps> = ({
+  transcripts,
+  isRecording = false,
+  isPaused = false,
+  isProcessing = false,
+  isStopping = false,
+  enableStreaming = false,
+  meetingId,
+  onSpeakersChanged,
+}) => {
+  const [editingSpeaker, setEditingSpeaker] = useState<string | null>(null);
+  const [knownSpeakers, setKnownSpeakers] = useState<string[]>([]);
   const [speechDetected, setSpeechDetected] = useState(false);
+
+  // Load known speaker names for suggestions
+  useEffect(() => {
+    listSpeakers().then(speakers => {
+      setKnownSpeakers(speakers.map(s => s.name).filter(n => !n.startsWith("Speaker ")));
+    }).catch(() => {});
+  }, []);
+
+  const handleSpeakerSubmit = useCallback(async (clusterLabel: string, name: string) => {
+    if (!meetingId) return;
+    try {
+      await labelSpeaker(meetingId, clusterLabel, name);
+      setEditingSpeaker(null);
+      await onSpeakersChanged?.();
+    } catch (err) {
+      console.error("Failed to rename speaker:", err);
+      setEditingSpeaker(null);
+    }
+  }, [meetingId, onSpeakersChanged]);
 
   // Debug: Log the props to understand what's happening
   console.log('TranscriptView render:', {
@@ -308,7 +341,19 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({ transcripts, isR
               <div className="flex-1">
                 {transcript.speaker && (
                   <div className="mb-1">
-                    <SpeakerBadge name={transcript.speaker} colorIndex={parseInt(transcript.speaker?.replace("Speaker ", "") || "0", 10)} />
+                    {editingSpeaker === transcript.speaker ? (
+                      <SpeakerLabelInput
+                        onSubmit={(name) => handleSpeakerSubmit(transcript.speaker!, name)}
+                        onCancel={() => setEditingSpeaker(null)}
+                        suggestions={knownSpeakers}
+                      />
+                    ) : (
+                      <SpeakerBadge
+                        name={transcript.speaker}
+                        colorIndex={parseInt(transcript.speaker?.replace("Speaker ", "") || "0", 10)}
+                        onClick={() => setEditingSpeaker(transcript.speaker!)}
+                      />
+                    )}
                   </div>
                 )}
                 {isStreaming ? (
