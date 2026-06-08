@@ -1,12 +1,12 @@
 'use client';
 
 import { Transcript } from '@/types';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ConfidenceIndicator } from './ConfidenceIndicator';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { RecordingStatusBar } from './RecordingStatusBar';
 import { SpeakerBadge, SpeakerLabelInput } from './SpeakerBadge';
-import { labelSpeaker, listSpeakers } from '@/services/speakerService';
+import { useSpeakerRename } from '@/hooks/useSpeakerRename';
 import { motion, AnimatePresence } from 'framer-motion';
 
 interface TranscriptViewProps {
@@ -118,28 +118,8 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
   meetingId,
   onSpeakersChanged,
 }) => {
-  const [editingSpeaker, setEditingSpeaker] = useState<string | null>(null);
-  const [knownSpeakers, setKnownSpeakers] = useState<string[]>([]);
+  const { editingSegmentId, setEditingSegmentId, knownSpeakers, handleSpeakerSubmit } = useSpeakerRename(meetingId, onSpeakersChanged);
   const [speechDetected, setSpeechDetected] = useState(false);
-
-  // Load known speaker names for suggestions
-  useEffect(() => {
-    listSpeakers().then(speakers => {
-      setKnownSpeakers(speakers.map(s => s.name).filter(n => !n.startsWith("Speaker ")));
-    }).catch(() => {});
-  }, []);
-
-  const handleSpeakerSubmit = useCallback(async (clusterLabel: string, name: string) => {
-    if (!meetingId) return;
-    try {
-      await labelSpeaker(meetingId, clusterLabel, name);
-      setEditingSpeaker(null);
-      await onSpeakersChanged?.();
-    } catch (err) {
-      console.error("Failed to rename speaker:", err);
-      setEditingSpeaker(null);
-    }
-  }, [meetingId, onSpeakersChanged]);
 
   // Debug: Log the props to understand what's happening
   console.log('TranscriptView render:', {
@@ -341,17 +321,17 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
               <div className="flex-1">
                 {transcript.speaker && (
                   <div className="mb-1">
-                    {editingSpeaker === transcript.speaker ? (
+                    {editingSegmentId === transcript.id ? (
                       <SpeakerLabelInput
                         onSubmit={(name) => handleSpeakerSubmit(transcript.speaker!, name)}
-                        onCancel={() => setEditingSpeaker(null)}
+                        onCancel={() => setEditingSegmentId(null)}
                         suggestions={knownSpeakers}
                       />
                     ) : (
                       <SpeakerBadge
                         name={transcript.speaker}
                         colorIndex={parseInt(transcript.speaker?.replace("Speaker ", "") || "0", 10)}
-                        onClick={() => setEditingSpeaker(transcript.speaker!)}
+                        onClick={() => setEditingSegmentId(transcript.id)}
                       />
                     )}
                   </div>

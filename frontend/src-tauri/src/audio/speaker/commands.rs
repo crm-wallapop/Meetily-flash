@@ -786,10 +786,7 @@ mod tests {
         .await
         .expect("update");
 
-        // Auto-label should NOT have updated a manually labeled row
-        assert!(!updated, "auto-label should not overwrite manual label");
-
-        // Verify the manual label is intact
+        // Verify the manual label is intact (before any assertion that could panic)
         let row: (String, String) = sqlx::query_as(
             "SELECT speaker_label, speaker_source FROM transcripts WHERE id = ?"
         )
@@ -798,14 +795,15 @@ mod tests {
         .await
         .expect("fetch");
 
-        assert_eq!(row.0, "Alice");
-        assert_eq!(row.1, "manual");
-
-        // Cleanup
+        // Cleanup first, then assert (so cleanup runs even if update assertion fails)
         sqlx::query("DELETE FROM transcripts WHERE id = ?")
             .bind(&transcript_id)
             .execute(&pool)
             .await
             .expect("cleanup");
+
+        assert!(!updated, "auto-label should not overwrite manual label");
+        assert_eq!(row.0, "Alice");
+        assert_eq!(row.1, "manual");
     }
 }

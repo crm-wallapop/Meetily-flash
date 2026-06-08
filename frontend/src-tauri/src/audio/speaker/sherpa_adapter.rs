@@ -301,7 +301,7 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
             speaker_id: cur_speaker,
         });
 
-        let (mut result, id_map) = renumber_speakers(result);
+        let (result, id_map) = renumber_speakers(result);
 
         let centroids: HashMap<u32, Vec<f32>> = cluster_centroids
             .into_iter()
@@ -309,12 +309,10 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
             .collect();
 
         // Merge short-duration speakers into their nearest neighbour.
-        // A speaker whose total speech is below MIN_CLUSTER_SECS is too short
-        // for a reliable voice print and is almost always a boundary artefact.
         let total_audio_secs = result.iter()
             .map(|s| s.end_seconds - s.start_seconds)
             .sum::<f64>();
-        result = merge_short_speakers(result, &centroids, total_audio_secs);
+        let (result, centroids) = merge_short_speakers(result, centroids, total_audio_secs);
 
         let n_spk: std::collections::HashSet<u32> = result.iter().map(|s| s.speaker_id).collect();
         log::warn!(
@@ -322,10 +320,6 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
             n_spk.len(),
             result.len(),
         );
-
-        let centroids: HashMap<u32, Vec<f32>> = n_spk.iter()
-            .filter_map(|&id| centroids.get(&id).map(|c| (id, c.clone())))
-            .collect();
 
         Ok(DiarizationOutput { segments: result, centroids })
     }
@@ -347,9 +341,9 @@ impl SherpaOnnxDiarizationAdapter {
 /// (model can't produce embeddings from shorter clips anyway).
 fn merge_short_speakers(
     mut segments: Vec<SpeakerSegment>,
-    centroids: &HashMap<u32, Vec<f32>>,
+    mut centroids: HashMap<u32, Vec<f32>>,
     total_audio_secs: f64,
-) -> Vec<SpeakerSegment> {
+) -> (Vec<SpeakerSegment>, HashMap<u32, Vec<f32>>) {
     let min_dur = (MIN_CLUSTER_FRAC * total_audio_secs).max(MIN_SPEECH_SECS);
 
     let mut speaker_dur: HashMap<u32, f64> = HashMap::new();
@@ -363,7 +357,7 @@ fn merge_short_speakers(
         .collect();
 
     if short_speakers.is_empty() {
-        return segments;
+        return (segments, centroids);
     }
 
     let long_speakers: Vec<u32> = speaker_dur.iter()
@@ -372,7 +366,7 @@ fn merge_short_speakers(
         .collect();
 
     if long_speakers.is_empty() {
-        return segments;
+        return (segments, centroids);
     }
 
     let mut remap: HashMap<u32, u32> = HashMap::new();
@@ -398,16 +392,34 @@ fn merge_short_speakers(
         }
     }
 
+    // Remap segment speaker IDs
     for s in &mut segments {
         if let Some(&new_id) = remap.get(&s.speaker_id) {
             s.speaker_id = new_id;
         }
     }
 
+    // Drop centroids for merged-away speakers
+    for short_id in &short_speakers {
+        if remap.contains_key(short_id) {
+            centroids.remove(short_id);
+        }
+    }
+
     // Merge adjacent segments with same speaker and renumber.
     segments = merge_adjacent(segments);
-    let (segments, _) = renumber_speakers(segments);
-    segments
+    let (segments, renum_map) = renumber_speakers(segments);
+
+    // Remap centroid keys to match final speaker IDs
+    let centroids: HashMap<u32, Vec<f32>> = centroids
+        .into_iter()
+        .filter_map(|(old_id, c)| {
+            let new_id = renum_map.get(&old_id).copied().unwrap_or(old_id);
+            Some((new_id, c))
+        })
+        .collect();
+
+    (segments, centroids)
 }
 
 fn merge_adjacent(mut segments: Vec<SpeakerSegment>) -> Vec<SpeakerSegment> {

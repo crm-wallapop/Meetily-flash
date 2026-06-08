@@ -4,13 +4,13 @@ import { useCallback, useRef, useReducer, startTransition, useEffect, useState, 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAutoScroll } from "@/hooks/useAutoScroll";
 import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
+import { useSpeakerRename } from "@/hooks/useSpeakerRename";
 import { ConfidenceIndicator } from "./ConfidenceIndicator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 import { SpeakerBadge, SpeakerLabelInput } from "./SpeakerBadge";
-import { labelSpeaker, listSpeakers } from "@/services/speakerService";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -164,8 +164,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     meetingId,
     onSpeakersChanged,
 }) => {
-    const [editingSpeaker, setEditingSpeaker] = useState<string | null>(null);
-    const [knownSpeakers, setKnownSpeakers] = useState<string[]>([]);
+    const { editingSegmentId, setEditingSegmentId, knownSpeakers, handleSpeakerSubmit } = useSpeakerRename(meetingId, onSpeakersChanged);
     // Create scroll ref first - shared between virtualizer and auto-scroll hook
     const scrollRef = useRef<HTMLDivElement>(null);
     // Ref for infinite scroll trigger element
@@ -173,25 +172,6 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
 
     // Force re-render without flushSync (avoids React warning)
     const [, rerender] = useReducer((x: number) => x + 1, 0);
-
-    // Load known speaker names for suggestions
-    useEffect(() => {
-        listSpeakers().then(speakers => {
-            setKnownSpeakers(speakers.map(s => s.name).filter(n => !n.startsWith("Speaker ")));
-        }).catch(() => {});
-    }, []);
-
-    const handleSpeakerSubmit = useCallback(async (clusterLabel: string, name: string) => {
-        if (!meetingId) return;
-        try {
-            await labelSpeaker(meetingId, clusterLabel, name);
-            setEditingSpeaker(null);
-            await onSpeakersChanged?.();
-        } catch (err) {
-            console.error("Failed to rename speaker:", err);
-            setEditingSpeaker(null);
-        }
-    }, [meetingId, onSpeakersChanged]);
 
     // Setup virtualizer for efficient rendering of large lists
     const virtualizer = useVirtualizer({
@@ -373,10 +353,10 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         speakerIndex={getSpeakerIndex(segment.speaker)}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
-                                        isEditingSpeaker={editingSpeaker === segment.speaker}
-                                        onSpeakerClick={segment.speaker ? () => setEditingSpeaker(segment.speaker!) : undefined}
+                                        isEditingSpeaker={editingSegmentId === segment.id}
+                                        onSpeakerClick={segment.speaker ? () => setEditingSegmentId(segment.id) : undefined}
                                         onSpeakerSubmit={(name) => segment.speaker && handleSpeakerSubmit(segment.speaker, name)}
-                                        onSpeakerCancel={() => setEditingSpeaker(null)}
+                                        onSpeakerCancel={() => setEditingSegmentId(null)}
                                         knownSpeakers={knownSpeakers}
                                     />
                                 </div>
@@ -436,10 +416,10 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         speakerIndex={getSpeakerIndex(segment.speaker)}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
-                                        isEditingSpeaker={editingSpeaker === segment.speaker}
-                                        onSpeakerClick={segment.speaker ? () => setEditingSpeaker(segment.speaker!) : undefined}
+                                        isEditingSpeaker={editingSegmentId === segment.id}
+                                        onSpeakerClick={segment.speaker ? () => setEditingSegmentId(segment.id) : undefined}
                                         onSpeakerSubmit={(name) => segment.speaker && handleSpeakerSubmit(segment.speaker, name)}
-                                        onSpeakerCancel={() => setEditingSpeaker(null)}
+                                        onSpeakerCancel={() => setEditingSegmentId(null)}
                                         knownSpeakers={knownSpeakers}
                                     />
                                 </motion.div>
