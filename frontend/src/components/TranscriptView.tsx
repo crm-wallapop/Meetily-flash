@@ -118,7 +118,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
   meetingId,
   onSpeakersChanged,
 }) => {
-  const { editingSegmentId, setEditingSegmentId, knownSpeakers, handleSpeakerSubmit } = useSpeakerRename(meetingId, onSpeakersChanged);
+  const { editingSegmentId, setEditingSegmentId, knownSpeakers, handleSpeakerSubmit, handleSpeakerRevert } = useSpeakerRename(meetingId, onSpeakersChanged);
   const [speechDetected, setSpeechDetected] = useState(false);
 
   // Debug: Log the props to understand what's happening
@@ -332,6 +332,8 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
                         name={transcript.speaker}
                         colorIndex={parseInt(transcript.speaker?.replace("Speaker ", "") || "0", 10)}
                         onClick={() => setEditingSegmentId(transcript.id)}
+                        canRevert={!!transcript.speaker && !transcript.speaker.startsWith("Speaker ") && !transcript.speaker.startsWith("Unknown")}
+                        onRevert={() => handleSpeakerRevert(transcript.speaker!)}
                       />
                     )}
                   </div>

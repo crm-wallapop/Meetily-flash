@@ -107,6 +107,23 @@ impl SpeakerRepository {
         }
     }
 
+    pub async fn remove_auto_speakers_for_meeting(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<u64> {
+        let prefix = format!("speaker-auto-{}-", meeting_id);
+        let result = sqlx::query("DELETE FROM speakers WHERE id LIKE ?")
+            .bind(format!("{}%", prefix))
+            .execute(pool)
+            .await?;
+
+        let count = result.rows_affected();
+        if count > 0 {
+            info!("Removed {} auto speakers for meeting {}", count, meeting_id);
+        }
+        Ok(count)
+    }
+
     pub async fn store_embedding(
         pool: &SqlitePool,
         id: &str,
@@ -145,6 +162,24 @@ impl SpeakerRepository {
         .await?;
 
         Ok(())
+    }
+
+    pub async fn delete_embeddings_by_meeting(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<u64> {
+        let result = sqlx::query(
+            "DELETE FROM speaker_embeddings WHERE source_meeting_id = ?",
+        )
+        .bind(meeting_id)
+        .execute(pool)
+        .await?;
+
+        let count = result.rows_affected();
+        if count > 0 {
+            info!("Deleted {} embeddings for meeting {}", count, meeting_id);
+        }
+        Ok(count)
     }
 
     pub async fn get_embeddings_by_meeting(
@@ -226,6 +261,23 @@ impl SpeakerRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    pub async fn update_transcript_speaker_manual(
+        pool: &SqlitePool,
+        transcript_id: &str,
+        speaker_label: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE transcripts SET speaker_label = ?, speaker_source = 'manual', \
+             previous_label = CASE WHEN previous_label IS NULL THEN speaker_label ELSE previous_label END \
+             WHERE id = ?",
+        )
+        .bind(speaker_label)
+        .bind(transcript_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn update_meeting_speakers(
         pool: &SqlitePool,
         meeting_id: &str,
@@ -233,7 +285,7 @@ impl SpeakerRepository {
         new_label: &str,
     ) -> Result<u64> {
         let result = sqlx::query(
-            "UPDATE transcripts SET speaker_label = ?, speaker_source = 'manual' WHERE meeting_id = ? AND speaker_label = ?",
+            "UPDATE transcripts SET speaker_label = ?, speaker_source = 'manual', previous_label = CASE WHEN previous_label IS NULL THEN speaker_label ELSE previous_label END WHERE meeting_id = ? AND speaker_label = ?",
         )
         .bind(new_label)
         .bind(meeting_id)
@@ -245,7 +297,7 @@ impl SpeakerRepository {
 
     pub async fn clear_auto_speaker_labels(pool: &SqlitePool, meeting_id: &str) -> Result<u64> {
         let result = sqlx::query(
-            "UPDATE transcripts SET speaker_label = NULL, speaker_source = NULL WHERE meeting_id = ? AND speaker_source = 'auto'",
+            "UPDATE transcripts SET speaker_label = NULL, speaker_source = NULL, previous_label = NULL WHERE meeting_id = ? AND speaker_source = 'auto'",
         )
         .bind(meeting_id)
         .execute(pool)
@@ -255,6 +307,53 @@ impl SpeakerRepository {
             result.rows_affected(),
             meeting_id
         );
+        Ok(result.rows_affected())
+    }
+
+    pub async fn clear_all_speaker_labels(pool: &SqlitePool, meeting_id: &str) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE transcripts SET speaker_label = NULL, speaker_source = NULL, previous_label = NULL WHERE meeting_id = ?",
+        )
+        .bind(meeting_id)
+        .execute(pool)
+        .await?;
+        info!(
+            "Cleared ALL {} speaker labels for meeting {}",
+            result.rows_affected(),
+            meeting_id
+        );
+        Ok(result.rows_affected())
+    }
+
+    pub async fn revert_speaker_label(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        manual_label: &str,
+    ) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE transcripts SET speaker_label = previous_label, speaker_source = NULL, previous_label = NULL WHERE meeting_id = ? AND speaker_label = ? AND previous_label IS NOT NULL",
+        )
+        .bind(meeting_id)
+        .bind(manual_label)
+        .execute(pool)
+        .await?;
+
+        if result.rows_affected() > 0 {
+            sqlx::query(
+                "UPDATE speaker_embeddings SET speaker_id = NULL WHERE source_meeting_id = ? AND cluster_label NOT IN (SELECT DISTINCT speaker_label FROM transcripts WHERE meeting_id = ? AND speaker_label IS NOT NULL)",
+            )
+            .bind(meeting_id)
+            .bind(meeting_id)
+            .execute(pool)
+            .await?;
+
+            info!(
+                "Reverted {} transcript rows from '{}' in meeting {}",
+                result.rows_affected(),
+                manual_label,
+                meeting_id
+            );
+        }
         Ok(result.rows_affected())
     }
 
@@ -331,10 +430,8 @@ mod tests {
 
     #[test]
     fn deserialize_wrong_dimension_rejected() {
-        let values = vec![0.5f32; 128];
+        let values = vec![0.5f32; 8];
         let blob = SpeakerRepository::serialize_embedding(&values);
-        // But wait, serialize doesn't validate dimension — it just writes bytes
-        // The validation is in store_embedding. Let's just check deserialize.
         let result = SpeakerRepository::deserialize_embedding(&blob);
         assert!(result.is_err());
     }

@@ -133,17 +133,28 @@ The threshold SHALL default to 0.40 and SHALL be configurable via advanced setti
 
 ---
 
-### Requirement: Retroactive speaker labeling via inline badges
+### Requirement: Retroactive speaker labeling via inline badges with per-speaker revert
 
 The frontend SHALL render an inline speaker badge next to each transcript segment. The badge SHALL display the current speaker label ("Speaker 0", "Alice", "Unknown Speaker"). Clicking the badge SHALL open an inline input to type a new name or select from existing named speakers.
 
-When the user assigns a name, the frontend SHALL invoke `label_speaker(meeting_id, cluster_label, speaker_name)`, which creates/updates the `speakers` row, links embeddings, and updates all transcript rows for that cluster in the meeting.
+When the user assigns a name, the frontend SHALL invoke `label_speaker(meeting_id, cluster_label, speaker_name)`, which creates/updates the `speakers` row, links embeddings, and updates all transcript rows for that cluster in the meeting. The original cluster label SHALL be preserved in a `previous_label` column on each transcript row (set only once, on first manual label).
+
+The inline input SHALL show suggestion chips of existing named speakers (excluding auto-generated "Speaker N" labels). Selecting an existing speaker name SHALL merge the current cluster into that speaker — all transcript segments for the cluster are relabeled to the selected name. This is an intentional merge action, not a rename.
+
+Manually-named speaker badges SHALL show a small undo icon (visible on hover) that reverts that speaker to its original auto-generated cluster label. Clicking the icon SHALL invoke `revert_speaker_label(meeting_id, speaker_label)`, which restores all transcript rows for that speaker in the meeting to their `previous_label`, sets `speaker_source` to `NULL`, and unlinks the corresponding embedding. The undo icon SHALL NOT appear on auto-generated labels ("Speaker N") or when `previous_label IS NULL`.
 
 #### Scenario: Label an unknown speaker
 
 - **WHEN** the user clicks the "Speaker 0" badge and types "Alice"
 - **THEN** the badge updates to "Alice" with Alice's persistent color
 - **AND** all transcript segments from "Speaker 0" in this meeting update to "Alice"
+
+#### Scenario: Merge a cluster into an existing speaker via suggestion chip
+
+- **GIVEN** a meeting where "Speaker 0" was renamed to "Alice" and "Speaker 1" was renamed to "Bob"
+- **WHEN** the user clicks the "Speaker 2" badge and selects "Alice" from the suggestion chips
+- **THEN** all transcript segments from "Speaker 2" are relabeled to "Alice"
+- **AND** "Speaker 2" is effectively merged into "Alice" for this meeting
 
 #### Scenario: Re-label a previously named speaker
 
@@ -153,32 +164,68 @@ When the user assigns a name, the frontend SHALL invoke `label_speaker(meeting_i
 - **AND** all transcript segments in this meeting update to "Bob"
 - **AND** the embedding previously linked to "Alice" is now linked to "Bob" for this meeting only — other meetings with "Alice" are unaffected
 
+#### Scenario: Revert a named speaker to original cluster label
+
+- **GIVEN** a meeting where the user manually renamed "Speaker 0" → "Alice"
+- **WHEN** the user hovers over the "Alice" badge and clicks the undo icon
+- **THEN** all transcript rows with `speaker_label = "Alice"` in that meeting revert to `speaker_label = "Speaker 0"`
+- **AND** `speaker_source` is set to `NULL`
+- **AND** `previous_label` is cleared to `NULL`
+- **AND** the corresponding embedding is unlinked (`speaker_id = NULL`)
+
+#### Scenario: Revert after merge restores different original labels
+
+- **GIVEN** a meeting where "Speaker 0" was renamed to "Alice" and "Speaker 2" was also renamed to "Alice"
+- **WHEN** the user reverts "Alice"
+- **THEN** some transcript rows revert to "Speaker 0" and others revert to "Speaker 2" (each row has its own `previous_label`)
+- **AND** the two original clusters are restored independently
+
+#### Scenario: Revert disabled for auto-generated labels and legacy manual labels
+
+- **GIVEN** a transcript segment with `speaker_label = "Speaker 0"` (auto-generated) or a manual label from before the `previous_label` migration (where `previous_label IS NULL`)
+- **THEN** the undo icon is not shown on the badge
+
+#### Scenario: Full reset clears previous_label
+
+- **WHEN** the user triggers re-diarization (Speakers button)
+- **THEN** all `previous_label` values are cleared along with `speaker_label` and `speaker_source`
+
 ---
 
-### Requirement: Re-diarization preserves manually corrected labels
+### Requirement: Re-diarization cleans up stale state and resets speaker labels
 
-When the user triggers "re-diarize" on a meeting, the system SHALL re-run offline diarization on the full audio. After re-diarization, the system SHALL match new speaker clusters against existing labeled speakers by embedding similarity. Transcript rows with `speaker_source = "manual"` SHALL NOT be overwritten by the auto-assignment. The system SHALL emit a `diarization-complete` event with the updated speaker assignments.
+When the user triggers "re-diarize" (Speakers button) on a meeting, the system SHALL perform a full reset:
 
-#### Scenario: Re-diarize preserves manual corrections
+1. Clear **all** speaker labels on transcript rows (both `"auto"` and `"manual"`)
+2. Delete all embeddings in `speaker_embeddings` for that meeting (stale centroids from previous runs)
+3. Delete auto-generated speaker rows (`speaker-auto-{meeting_id}-*`) from the `speakers` table
+4. Re-run offline diarization on the full audio
+5. Store fresh centroid embeddings from the new clustering
+6. Match new speaker clusters against existing named speakers by embedding similarity
 
-- **GIVEN** a meeting where the user manually corrected "Speaker 1" → "Bob"
-- **WHEN** the user triggers re-diarization
-- **THEN** the re-diarization runs and produces new speaker clusters
-- **AND** clusters matching "Bob" by embedding similarity keep the "Bob" label
-- **AND** manually corrected rows (`speaker_source = "manual"`) are NOT overwritten
+The system SHALL emit a `diarization-complete` event with the updated speaker assignments.
+
+#### Scenario: Re-diarize resets all labels to fresh cluster labels
+
+- **GIVEN** a meeting where the user manually corrected "Speaker 1" → "Bob" and "Speaker 0" → "Alice"
+- **WHEN** the user triggers re-diarization (Speakers button)
+- **THEN** ALL speaker labels are cleared (including "Bob" and "Alice")
+- **AND** stale embeddings and auto-generated speaker rows are deleted
+- **AND** diarization runs fresh, producing new "Speaker 0", "Speaker 1", etc. labels
+- **AND** if embedding similarity matches a cluster to a known speaker (e.g., "Alice" exists in the registry from another meeting), that label is auto-applied
 
 #### Scenario: Re-diarize re-labels auto-assigned rows
 
 - **GIVEN** a meeting where "Speaker 0" was auto-assigned to "Alice" with `speaker_source = "auto"`
 - **WHEN** the user triggers re-diarization
-- **THEN** "Speaker 0" is re-evaluated against the speaker registry
-- **AND** the label is updated based on the new embedding match
+- **THEN** all labels are cleared and diarization runs fresh
+- **AND** new clusters are labeled based on the fresh embedding match
 
 ---
 
 ### Requirement: Speaker model selection and download
 
-The system SHALL support two embedding models: `3dspeaker` (default, ~26 MB) and `wespeaker` (~90 MB). The pyannote segmentation model (~6 MB) SHALL be a required download. All models SHALL be downloaded during onboarding Step 3 or on first use if skipped during onboarding.
+The system SHALL support four embedding models: `3dspeaker` (default, CAM++ zh-cn, ~39 MB), `nemo_titanet` (NeMo Titanet Small EN VoxCeleb, ~40 MB), `eres2net` (3DSpeaker ERes2Net EN VoxCeleb, ~26 MB), and `wespeaker` (WeSpeaker ResNet34 EN VoxCeleb, ~27 MB). The pyannote segmentation model (~6 MB) SHALL be a required download. All models SHALL be downloaded during onboarding Step 3 or on first use if skipped during onboarding.
 
 The active embedding model SHALL be configurable in settings. Changing the model SHALL NOT trigger re-diarization of existing meetings (user can manually re-diarize).
 
@@ -236,6 +283,21 @@ The clustering merge threshold SHALL default to 0.40 and SHALL be configurable v
 - **GIVEN** a meeting with 3 speakers
 - **WHEN** diarization runs with threshold 0.60
 - **THEN** more than 3 speakers are identified (clusters stay separate)
+
+---
+
+### Requirement: max_speakers cap merges most isolated cluster
+
+When the cluster count after short-speaker merge exceeds the `max_speakers` setting (default 10, range [2, 20]), the system SHALL reduce the count by repeatedly merging the most isolated cluster — the cluster with the lowest nearest-neighbour centroid cosine similarity — into its nearest neighbour. The system SHALL NOT merge the highest-similarity pair, as two real speakers who sound alike can have higher centroid similarity than a noise/outlier cluster, and merging them would destroy separation.
+
+#### Scenario: Excess cluster absorbed without collapsing similar speakers
+
+- **GIVEN** a meeting with 3 speakers where clustering at threshold 0.65 produces 4 clusters
+- **AND** two real speakers have centroid sim 0.473 (highest pair)
+- **AND** the noise cluster has nearest-neighbour sim 0.327 (lowest)
+- **WHEN** max_speakers is set to 3
+- **THEN** the noise cluster is merged into its nearest neighbour
+- **AND** the two real speakers remain separate
 
 ---
 

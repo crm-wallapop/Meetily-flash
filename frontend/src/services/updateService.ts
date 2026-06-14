@@ -39,6 +39,11 @@ export class UpdateService {
    * @returns Promise with update information
    */
   async checkForUpdates(force = false): Promise<UpdateInfo> {
+    // Skip update checks in dev mode
+    if (import.meta.env.DEV) {
+      return { available: false, currentVersion: await getVersion() };
+    }
+
     // Prevent concurrent update checks
     if (this.updateCheckInProgress) {
       throw new Error('Update check already in progress');

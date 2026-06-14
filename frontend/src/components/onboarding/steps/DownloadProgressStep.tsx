@@ -435,8 +435,17 @@ export function DownloadProgressStep() {
       try {
         await completeOnboarding();
 
-        // Small delay to ensure state is saved before reload
-        await new Promise(resolve => setTimeout(resolve, 100));
+        // Verify the store actually persisted completed:true before reloading
+        try {
+          const verified = await invoke<{ completed: boolean } | null>('get_onboarding_status');
+          if (!verified?.completed) {
+            console.error('[DownloadProgressStep] Store verification failed — completed is still false');
+            toast.error('Setup save failed — retrying…', { duration: 3000 });
+            await invoke('complete_onboarding', { model: selectedSummaryModel });
+          }
+        } catch (e) {
+          console.warn('[DownloadProgressStep] Verification check failed:', e);
+        }
 
         window.location.reload();
       } catch (error) {

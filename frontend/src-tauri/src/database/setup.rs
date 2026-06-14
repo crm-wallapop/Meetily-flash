@@ -35,6 +35,7 @@ pub async fn initialize_database_on_startup(app: &AppHandle) -> Result<(), Strin
         let pool = app_state.db_manager.pool().clone();
 
         hydrate_speaker_registry(&pool, &app_state.speaker_registry).await;
+        app_state.sync_threshold_from_db().await;
 
         app.manage(app_state);
         info!("Database initialized successfully");

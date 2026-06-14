@@ -161,7 +161,9 @@ pub async fn import_and_initialize_database(
         })?;
 
     // Update app state with the new manager
-    app.manage(AppState::new(db_manager));
+    let app_state = AppState::new(db_manager);
+    app_state.sync_threshold_from_db().await;
+    app.manage(app_state);
 
     info!("Legacy database imported and initialized successfully");
 
@@ -185,7 +187,9 @@ pub async fn initialize_fresh_database(app: AppHandle) -> Result<(), String> {
         })?;
 
     // Update app state with the new manager
-    app.manage(AppState::new(db_manager.clone()));
+    let app_state = AppState::new(db_manager.clone());
+    app_state.sync_threshold_from_db().await;
+    app.manage(app_state);
 
     // Set default model configuration for fresh installs
     let pool = db_manager.pool();

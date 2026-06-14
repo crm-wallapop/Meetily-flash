@@ -246,3 +246,12 @@
 - [ ] 15.5 Re-transcribe a meeting → verify speaker labels cleared and re-diarized
 - [ ] 15.6 Verify speaker colors persist across meetings (Alice is always the same color)
 - [ ] 15.7 Verify confidence threshold slider in settings updates matching behavior
+
+## 16. Hardening Fixes (2026-06-08/09)
+
+- [x] 16.1 Fix 6 compiler warnings: unused imports, dead code, unnecessary mut in speaker module
+- [x] 16.2 Fix sherpa-onnx crash (STATUS_STACK_BUFFER_OVERRUN): validate segmentation model path exists before C++ FFI call
+- [x] 16.3 Fix stale embedding dimension test: change from 128-dim to 8-dim (128 is valid after variable-dimension fix)
+- [x] 16.4 Fix `auto_label_does_not_overwrite_manual` test: use in-memory SQLite instead of hardcoded production DB path
+- [x] 16.5 Fix re-diarization stale embeddings: delete old embeddings for meeting before re-running diarization
+- [x] 16.6 Document inline suggestion chips as merge actions (not rename) in spec

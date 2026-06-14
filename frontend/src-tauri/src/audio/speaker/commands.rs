@@ -190,6 +190,68 @@ pub async fn rediarize_meeting<R: tauri::Runtime>(
     Ok(0)
 }
 
+#[tauri::command]
+pub async fn reset_speaker_labels<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    app_state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<u64, String> {
+    log::warn!("reset_speaker_labels: CALLED with meeting_id={}", meeting_id);
+    let pool = app_state.db_manager.pool().clone();
+    let threshold_fp = app_state.speaker_merge_threshold_fp.load(Ordering::Relaxed);
+    let registry = app_state.speaker_registry.clone();
+
+    SpeakerRepository::clear_all_speaker_labels(&pool, &meeting_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let app_clone = app.clone();
+    let mid = meeting_id.clone();
+    tokio::spawn(async move {
+        let result = run_diarization_for_meeting(&pool, &mid, threshold_fp, registry).await;
+        match result {
+            Ok(r) => {
+                let _ = app_clone.emit("diarization-complete", serde_json::json!({
+                    "meeting_id": mid,
+                    "speaker_count": r.speaker_count,
+                    "segments_labeled": r.segments_labeled,
+                }));
+                log::warn!("reset_speaker_labels: DONE for {}, {} speakers, {} segments", mid, r.speaker_count, r.segments_labeled);
+            }
+            Err(e) => {
+                log::error!("reset_speaker_labels: FAILED for {}: {}", mid, e);
+            }
+        }
+    }).await.map_err(|e| e.to_string())?;
+
+    Ok(0)
+}
+
+#[tauri::command]
+pub async fn revert_speaker_label(
+    app_state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    speaker_label: String,
+) -> Result<u64, String> {
+    let pool = app_state.db_manager.pool().clone();
+    SpeakerRepository::revert_speaker_label(&pool, &meeting_id, &speaker_label)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_segment_speaker(
+    app_state: tauri::State<'_, AppState>,
+    transcript_id: String,
+    speaker_label: String,
+) -> Result<bool, String> {
+    let pool = app_state.db_manager.pool();
+    let label = sanitize_speaker_name(&speaker_label)?;
+    SpeakerRepository::update_transcript_speaker_manual(pool, &transcript_id, &label)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 pub async fn run_diarization_for_meeting(
     pool: &SqlitePool,
     meeting_id: &str,
@@ -203,6 +265,26 @@ pub async fn run_diarization_for_meeting(
     log::info!(
         "run_diarization_for_meeting: cleared {} auto labels for meeting {}",
         cleared,
+        meeting_id
+    );
+
+    let deleted = SpeakerRepository::delete_embeddings_by_meeting(pool, meeting_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    log::info!(
+        "run_diarization_for_meeting: deleted {} stale embeddings for meeting {}",
+        deleted,
+        meeting_id
+    );
+
+    let removed = SpeakerRepository::remove_auto_speakers_for_meeting(pool, meeting_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    log::info!(
+        "run_diarization_for_meeting: removed {} stale auto speakers for meeting {}",
+        removed,
         meeting_id
     );
 
@@ -230,7 +312,17 @@ pub async fn run_diarization_for_meeting(
     let models_dir = dirs::home_dir()
         .unwrap_or_default()
         .join(".meetily-models");
-    let embedding_path = models_dir.join("3dspeaker-embedding.onnx");
+
+    let active_model = sqlx::query("SELECT speaker_embedding_model FROM settings LIMIT 1")
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| sqlx::Row::try_get::<String, _>(&r, "speaker_embedding_model").ok())
+        .unwrap_or_else(|| "3dspeaker".to_string());
+
+    let embedding_filename = super::model_download::embedding_filename(&active_model);
+    let embedding_path = models_dir.join(embedding_filename);
     let segmentation_path = models_dir.join("pyannote-segmentation.onnx");
 
     if !embedding_path.exists() || !segmentation_path.exists() {
@@ -276,13 +368,83 @@ pub async fn run_diarization_for_meeting(
     let t2 = std::time::Instant::now();
     let diarization = adapter.process(&samples, DIARIZATION_SAMPLE_RATE, &transcript_segments)
         .map_err(|e| format!("Diarization failed: {}", e))?;
-    let segments = diarization.segments;
-    let centroids = diarization.centroids;
+    let mut segments = diarization.segments;
+    let mut centroids = diarization.centroids;
     log::warn!("DIARIZATION: full pipeline: {:.2}s → {} segments", t2.elapsed().as_secs_f64(), segments.len());
 
     if segments.is_empty() {
         log::info!("run_diarization_for_meeting: 0 speakers detected for meeting {}", meeting_id);
         return Ok(DiarizationResult { segments_labeled: cleared, speaker_count: 0 });
+    }
+
+    // Enforce max_speakers cap: merge the MOST ISOLATED cluster (lowest
+    // nearest-neighbour similarity) into its nearest neighbour. Merging the
+    // highest-similarity pair collapses two similar real speakers; merging
+    // the outlier absorbs noise/fragment clusters without touching
+    // well-separated speakers that happen to sound alike.
+    let max_speakers: usize = sqlx::query("SELECT max_speakers FROM settings LIMIT 1")
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| sqlx::Row::try_get::<i64, _>(&r, "max_speakers").ok())
+        .map(|v| v as usize)
+        .unwrap_or(10);
+
+    while centroids.len() > max_speakers.max(2) {
+        let ids: Vec<u32> = centroids.keys().copied().collect();
+
+        let mut durations: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+        for seg in &segments {
+            *durations.entry(seg.speaker_id).or_insert(0.0) += seg.end_seconds - seg.start_seconds;
+        }
+
+        let mut most_isolated = ids[0];
+        let mut lowest_nn_sim = f32::MAX;
+        let mut nn_of_isolated = ids[0];
+
+        for &i in &ids {
+            let mut best_j = ids[0];
+            let mut best_sim = f32::MIN;
+            for &j in &ids {
+                if i == j {
+                    continue;
+                }
+                let sim = cosine_similarity_centroids(&centroids[&i], &centroids[&j]);
+                if sim > best_sim {
+                    best_sim = sim;
+                    best_j = j;
+                }
+            }
+            log::debug!(
+                "DIARIZATION: cluster {} ({:.1}s) nearest={} sim={:.3}",
+                i,
+                durations.get(&i).unwrap_or(&0.0),
+                best_j,
+                best_sim
+            );
+            if best_sim < lowest_nn_sim {
+                lowest_nn_sim = best_sim;
+                most_isolated = i;
+                nn_of_isolated = best_j;
+            }
+        }
+
+        log::warn!(
+            "DIARIZATION: max_speakers={}: merging most-isolated speaker {} ({:.1}s) → speaker {} ({:.1}s) (nn sim={:.3})",
+            max_speakers,
+            most_isolated,
+            durations.get(&most_isolated).unwrap_or(&0.0),
+            nn_of_isolated,
+            durations.get(&nn_of_isolated).unwrap_or(&0.0),
+            lowest_nn_sim
+        );
+        for seg in &mut segments {
+            if seg.speaker_id == most_isolated {
+                seg.speaker_id = nn_of_isolated;
+            }
+        }
+        centroids.remove(&most_isolated);
     }
 
     let num_speakers: std::collections::HashSet<u32> =
@@ -330,7 +492,7 @@ pub async fn run_diarization_for_meeting(
 
         // Cross-meeting matching via registry.
         if let Ok(emb) = EmbeddingVector::from_slice(centroid, centroid.len()) {
-            let matched_name = registry.lock().ok().and_then(|mut guard| {
+            let matched_name = registry.lock().ok().and_then(|guard| {
                 guard.as_ref().and_then(|r| r.search(&emb, 0.60).ok().flatten())
             });
             if let Some(name) = matched_name {
@@ -471,11 +633,11 @@ pub async fn get_diarization_enabled(
     app_state: tauri::State<'_, AppState>,
 ) -> Result<bool, String> {
     let pool = app_state.db_manager.pool();
-    let row = sqlx::query("SELECT diarizationEnabled FROM settings LIMIT 1")
+    let row = sqlx::query("SELECT diarization_enabled FROM settings LIMIT 1")
         .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())?;
-    let enabled: i64 = sqlx::Row::get(&row, "diarizationEnabled");
+    let enabled: i64 = sqlx::Row::get(&row, "diarization_enabled");
     Ok(enabled != 0)
 }
 
@@ -485,7 +647,7 @@ pub async fn set_diarization_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     let pool = app_state.db_manager.pool();
-    sqlx::query("UPDATE settings SET diarizationEnabled = ? WHERE id = '1'")
+    sqlx::query("UPDATE settings SET diarization_enabled = ? WHERE id = '1'")
         .bind(enabled as i64)
         .execute(pool)
         .await
@@ -532,11 +694,11 @@ pub async fn get_speaker_embedding_model(
     app_state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     let pool = app_state.db_manager.pool();
-    let row = sqlx::query("SELECT speakerEmbeddingModel FROM settings LIMIT 1")
+    let row = sqlx::query("SELECT speaker_embedding_model FROM settings LIMIT 1")
         .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())?;
-    let model: String = sqlx::Row::get(&row, "speakerEmbeddingModel");
+    let model: String = sqlx::Row::get(&row, "speaker_embedding_model");
     Ok(model)
 }
 
@@ -545,12 +707,12 @@ pub async fn set_speaker_embedding_model(
     app_state: tauri::State<'_, AppState>,
     model: String,
 ) -> Result<(), String> {
-    let valid = model == "3dspeaker" || model == "wespeaker";
+    let valid = matches!(model.as_str(), "3dspeaker" | "wespeaker" | "nemo_titanet" | "eres2net");
     if !valid {
         return Err(format!("Unknown speaker embedding model: {}", model));
     }
     let pool = app_state.db_manager.pool();
-    sqlx::query("UPDATE settings SET speakerEmbeddingModel = ? WHERE id = '1'")
+    sqlx::query("UPDATE settings SET speaker_embedding_model = ? WHERE id = '1'")
         .bind(&model)
         .execute(pool)
         .await
@@ -564,11 +726,11 @@ pub async fn get_max_speakers(
     app_state: tauri::State<'_, AppState>,
 ) -> Result<i64, String> {
     let pool = app_state.db_manager.pool();
-    let row = sqlx::query("SELECT maxSpeakers FROM settings LIMIT 1")
+    let row = sqlx::query("SELECT max_speakers FROM settings LIMIT 1")
         .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())?;
-    let cap: i64 = sqlx::Row::get(&row, "maxSpeakers");
+    let cap: i64 = sqlx::Row::get(&row, "max_speakers");
     Ok(cap)
 }
 
@@ -581,7 +743,7 @@ pub async fn set_max_speakers(
         return Err("Max speakers must be between 2 and 20".to_string());
     }
     let pool = app_state.db_manager.pool();
-    sqlx::query("UPDATE settings SET maxSpeakers = ? WHERE id = '1'")
+    sqlx::query("UPDATE settings SET max_speakers = ? WHERE id = '1'")
         .bind(cap)
         .execute(pool)
         .await
@@ -637,6 +799,14 @@ fn resolve_label(speaker: &str, label_map: &std::collections::HashMap<u32, Strin
         }
     }
     speaker.to_string()
+}
+
+fn cosine_similarity_centroids(a: &[f32], b: &[f32]) -> f32 {
+    let min_len = a.len().min(b.len());
+    let dot: f32 = a[..min_len].iter().zip(&b[..min_len]).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a[..min_len].iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b[..min_len].iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a > 0.0 && norm_b > 0.0 { dot / (norm_a * norm_b) } else { 0.0 }
 }
 
 #[cfg(test)]
@@ -758,17 +928,99 @@ mod tests {
         assert!(r.segments_labeled > 0, "Should label at least 1 segment");
     }
 
+    /// Re-diarize meeting 95db and VERIFY exactly 3 speakers with clear
+    /// Speaker 1 / Speaker 2 separation on the acceptance lines.
+    ///
+    /// Strategy: nemo_titanet model, threshold 0.50 (gives 4 speakers with
+    /// correct separation), then max_speakers=3 enforcement merges the
+    /// smallest cluster into its nearest neighbour.
+    ///
+    /// Acceptance criteria:
+    ///   seg_6 and seg_7 → same speaker
+    ///   seg_9 and seg_10 → same speaker
+    ///   those two groups → DIFFERENT speakers
+    ///   total speaker count → exactly 3
+    ///
+    /// `cargo test -p meetily-flash --features vulkan -- --ignored test_rediarize_verify_95db`
     #[tokio::test]
-    async fn auto_label_does_not_overwrite_manual() {
+    #[ignore]
+    async fn test_rediarize_verify_95db() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let db_path = r"C:\Users\user\AppData\Roaming\com.meetily.ai\meeting_minutes.sqlite";
         let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=rw", db_path))
             .await
             .expect("DB connect");
 
-        let meeting_id = "meeting-00000000-0000-4000-8000-000000000003";
+        let meeting_id = "meeting-00000000-0000-4000-8000-000000000002";
+
+        sqlx::query("UPDATE settings SET speaker_embedding_model = 'nemo_titanet', max_speakers = 3 WHERE id = '1'")
+            .execute(&pool)
+            .await
+            .expect("set model + max_speakers");
+
+        let threshold_fp = (0.65f32 * 65536.0) as u32;
+        let registry = Arc::new(Mutex::new(None));
+        let result = run_diarization_for_meeting(&pool, meeting_id, threshold_fp, registry)
+            .await
+            .expect("diarization");
+
+        eprintln!("Diarization: {} speakers, {} segments", result.speaker_count, result.segments_labeled);
+
+        #[derive(sqlx::FromRow)]
+        struct LabelRow { id: String, speaker_label: Option<String> }
+        let labels: std::collections::HashMap<String, String> = sqlx::query_as::<_, LabelRow>(
+            "SELECT id, speaker_label FROM transcripts WHERE meeting_id = ? AND id IN ('seg_6','seg_7','seg_9','seg_10')",
+        )
+        .bind(meeting_id)
+        .fetch_all(&pool)
+        .await
+        .expect("fetch labels")
+        .into_iter()
+        .filter_map(|r| r.speaker_label.map(|l| (r.id, l)))
+        .collect();
+
+        let s6 = labels.get("seg_6").cloned().unwrap_or_default();
+        let s7 = labels.get("seg_7").cloned().unwrap_or_default();
+        let s9 = labels.get("seg_9").cloned().unwrap_or_default();
+        let s10 = labels.get("seg_10").cloned().unwrap_or_default();
+
+        eprintln!("seg_6 -> {}", s6);
+        eprintln!("seg_7 -> {}", s7);
+        eprintln!("seg_9 -> {}", s9);
+        eprintln!("seg_10 -> {}", s10);
+
+        assert_eq!(result.speaker_count, 3, "Must detect exactly 3 speakers, got {}", result.speaker_count);
+        assert_eq!(s6, s7, "seg_6 and seg_7 must be the same speaker");
+        assert_eq!(s9, s10, "seg_9 and seg_10 must be the same speaker");
+        assert_ne!(s6, s9, "the two groups must be different speakers");
+    }
+
+    #[tokio::test]
+    async fn auto_label_does_not_overwrite_manual() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("DB connect");
+        sqlx::query(
+            "CREATE TABLE transcripts (
+                id TEXT PRIMARY KEY,
+                meeting_id TEXT NOT NULL,
+                transcript TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                audio_start_time REAL NOT NULL,
+                audio_end_time REAL NOT NULL,
+                duration REAL NOT NULL,
+                speaker_label TEXT,
+                speaker_source TEXT,
+                previous_label TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create table");
+
+        let meeting_id = "meeting-test";
         let transcript_id = format!("test-concurrent-{}", uuid::Uuid::new_v4());
 
-        // Insert a test transcript with manual label
         sqlx::query(
             "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker_label, speaker_source)
              VALUES (?, ?, 'test', '00:00', 0.0, 1.0, 1.0, 'Alice', 'manual')"
@@ -779,14 +1031,12 @@ mod tests {
         .await
         .expect("insert");
 
-        // Try to auto-label the same transcript
         let updated = SpeakerRepository::update_transcript_speaker(
             &pool, &transcript_id, "Speaker 0", "auto",
         )
         .await
         .expect("update");
 
-        // Verify the manual label is intact (before any assertion that could panic)
         let row: (String, String) = sqlx::query_as(
             "SELECT speaker_label, speaker_source FROM transcripts WHERE id = ?"
         )
@@ -794,13 +1044,6 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("fetch");
-
-        // Cleanup first, then assert (so cleanup runs even if update assertion fails)
-        sqlx::query("DELETE FROM transcripts WHERE id = ?")
-            .bind(&transcript_id)
-            .execute(&pool)
-            .await
-            .expect("cleanup");
 
         assert!(!updated, "auto-label should not overwrite manual label");
         assert_eq!(row.0, "Alice");

@@ -76,11 +76,13 @@ The `sherpa-onnx` crate (v1.13.2, Apache-2.0) provides official Rust bindings fo
 ### D9: Model selection
 
 **Embedding models (user-selectable)**:
-- `3dspeaker_speech_campplus_sv_zh-cn_16k-common` (~26 MB, 512-dim) — default, multilingual
-- `wespeaker_zh_cnce_resnet` (~90 MB) — higher accuracy option
+- `3dspeaker` — CAM++ zh-cn (~39 MB, 256-dim) — default
+- `nemo_titanet` — NeMo Titanet Small EN VoxCeleb (~40 MB, 192-dim) — best voice separation for EN/ES
+- `eres2net` — 3DSpeaker ERes2Net EN VoxCeleb (~26 MB, 192-dim)
+- `wespeaker` — WeSpeaker ResNet34 EN VoxCeleb (~27 MB)
 
 **Segmentation model (required)**:
-- Pyannote segmentation model (~50 MB) — always downloaded during onboarding
+- Pyannote segmentation model (~6 MB) — always downloaded during onboarding
 
 ### D10: Single-speaker handling
 
@@ -88,8 +90,16 @@ The `sherpa-onnx` crate (v1.13.2, Apache-2.0) provides official Rust bindings fo
 
 ### D11: Merge threshold calibrated at 0.40
 
-**Choice**: Default merge threshold is 0.40 (range [0.35, 0.70]). Empirically calibrated: 0.45 produces 10 speakers, 0.40 produces 3 main + 4 noise (handled by short-speaker merge).
+**Choice**: Default merge threshold is 0.40 (range [0.40, 0.80]). Empirically calibrated: 0.45 produces 10 speakers, 0.40 produces 3 main + 4 noise (handled by short-speaker merge).
 **Rationale**: The original 0.60 default was too high, producing 53 speakers from a 3-speaker meeting.
+
+### D12: max_speakers enforcement via most-isolated-cluster merging
+
+**Choice**: When the cluster count exceeds the `max_speakers` setting, merge the most isolated cluster (lowest nearest-neighbour centroid similarity) into its nearest neighbour — not the highest-similarity pair.
+
+**Rationale**: Two real speakers who sound alike can have higher centroid similarity than a noise/outlier cluster has to any speaker. Merging the highest-similarity pair collapses those two real speakers together, destroying separation. Merging the most isolated cluster absorbs the outlier without touching well-separated speakers. Since the most-similar pair always has a higher nn-sim than any other cluster, the real speakers are guaranteed to survive.
+
+**Empirical validation**: In a 3-speaker Spanish meeting at threshold 0.65, 4 clusters survive short-speaker merge. The two real speakers have centroid sim 0.473 (highest pair); the noise cluster has nn sim 0.327 (lowest). Old strategy merged the two real speakers; new strategy merges the noise cluster, preserving Speaker 1 / Speaker 2 separation.
 
 ## Risks / Trade-offs
 
@@ -118,3 +128,6 @@ The `sherpa-onnx` crate (v1.13.2, Apache-2.0) provides official Rust bindings fo
 - Speaker count cap: **global setting**.
 - Color palette: **golden-angle HSL** (`hue = index × 137.508 mod 360`), not a fixed 10-color palette.
 - Embedding dimension: **model-dependent** (3DSpeaker outputs 512-dim), accepted range [64, 1024].
+- Re-diarization embedding cleanup: **delete old embeddings** for the meeting before re-running. Previous runs left stale centroids that polluted cross-meeting matching and prevented un-merging.
+- Inline suggestion chips: **merge action**, not rename. Selecting an existing speaker from suggestions merges the cluster into that speaker. To un-merge, re-diarize (which deletes stale embeddings).
+- Sherpa-ONNX FFI safety: **validate model paths in Rust** before reaching C++ code. Sherpa-onnx C++ throws uncatchable exceptions on invalid model files, crashing the Rust process. All model paths are validated with `Path::exists()` before constructing the C++ objects.

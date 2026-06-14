@@ -45,7 +45,8 @@ async fn setup_test_db() -> SqlitePool {
             duration REAL,
             speaker_label TEXT,
             speaker_source TEXT,
-            token_timestamps TEXT
+            token_timestamps TEXT,
+            previous_label TEXT
         )",
     )
     .execute(&pool)

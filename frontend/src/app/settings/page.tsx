@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
-import { ArrowLeft, Settings2, Mic, Database as DatabaseIcon, SparkleIcon, FlaskConical, Cpu } from 'lucide-react';
+import { ArrowLeft, Settings2, Mic, Database as DatabaseIcon, SparkleIcon, FlaskConical, Cpu, Users } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
 import { motion } from 'framer-motion';
@@ -11,7 +11,7 @@ import { PreferenceSettings } from '@/components/PreferenceSettings';
 import { SummaryModelSettings } from '@/components/SummaryModelSettings';
 import { BetaSettings } from '@/components/BetaSettings';
 import { BackgroundProcessingSettings } from '@/components/BackgroundProcessingSettings';
-import { SpeakerMergeThresholdSlider } from '@/components/SpeakerSettings';
+import { SpeakerSettings } from '@/components/SpeakerSettings';
 import { useConfig } from '@/contexts/ConfigContext';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
@@ -31,6 +31,7 @@ const TABS = [
   { value: 'Transcriptionmodels', label: 'Transcription', icon: DatabaseIcon },
   { value: 'summaryModels', label: 'Summary', icon: SparkleIcon },
   { value: 'processing', label: 'Processing', icon: Cpu },
+  { value: 'speakers', label: 'Speakers', icon: Users },
   { value: 'beta', label: 'Beta', icon: FlaskConical }
 ] as const;
 
@@ -132,13 +133,15 @@ export default function SettingsPage() {
                 transcriptModelConfig={transcriptModelConfig}
                 setTranscriptModelConfig={setTranscriptModelConfig}
               />
-              <SpeakerMergeThresholdSlider />
             </TabsContent>
             <TabsContent value="summaryModels">
               <SummaryModelSettings />
             </TabsContent>
             <TabsContent value="processing">
               <BackgroundProcessingSettings />
+            </TabsContent>
+            <TabsContent value="speakers">
+              <SpeakerSettings />
             </TabsContent>
             <TabsContent value="beta" className="mt-6">
               <BetaSettings />

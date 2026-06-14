@@ -209,6 +209,7 @@ mod tests {
                 audio_start_time REAL,
                 audio_end_time REAL,
                 duration REAL,
+                previous_label TEXT,
                 FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
             )",
         )

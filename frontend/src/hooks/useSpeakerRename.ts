@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { labelSpeaker, listSpeakers } from "@/services/speakerService";
+import { labelSpeaker, listSpeakers, revertSpeakerLabel } from "@/services/speakerService";
 
 export function useSpeakerRename(
     meetingId: string | undefined,
@@ -26,5 +26,15 @@ export function useSpeakerRename(
         }
     }, [meetingId, onSpeakersChanged]);
 
-    return { editingSegmentId, setEditingSegmentId, knownSpeakers, handleSpeakerSubmit };
+    const handleSpeakerRevert = useCallback(async (speakerLabel: string) => {
+        if (!meetingId) return;
+        try {
+            await revertSpeakerLabel(meetingId, speakerLabel);
+            await onSpeakersChanged?.();
+        } catch (err) {
+            console.error("Failed to revert speaker:", err);
+        }
+    }, [meetingId, onSpeakersChanged]);
+
+    return { editingSegmentId, setEditingSegmentId, knownSpeakers, handleSpeakerSubmit, handleSpeakerRevert };
 }

@@ -84,6 +84,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     onSpeakerSubmit,
     onSpeakerCancel,
     knownSpeakers,
+    canRevertSpeaker,
+    onSpeakerRevert,
 }: {
     id: string;
     timestamp: number;
@@ -98,6 +100,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     onSpeakerSubmit?: (name: string) => void;
     onSpeakerCancel?: () => void;
     knownSpeakers?: string[];
+    canRevertSpeaker?: boolean;
+    onSpeakerRevert?: () => void;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
 
@@ -130,6 +134,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
                                     name={speaker}
                                     colorIndex={speakerIndex ?? 0}
                                     onClick={onSpeakerClick}
+                                    canRevert={canRevertSpeaker}
+                                    onRevert={onSpeakerRevert}
                                 />
                             )}
                         </div>
@@ -164,7 +170,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     meetingId,
     onSpeakersChanged,
 }) => {
-    const { editingSegmentId, setEditingSegmentId, knownSpeakers, handleSpeakerSubmit } = useSpeakerRename(meetingId, onSpeakersChanged);
+    const { editingSegmentId, setEditingSegmentId, knownSpeakers, handleSpeakerSubmit, handleSpeakerRevert } = useSpeakerRename(meetingId, onSpeakersChanged);
     // Create scroll ref first - shared between virtualizer and auto-scroll hook
     const scrollRef = useRef<HTMLDivElement>(null);
     // Ref for infinite scroll trigger element
@@ -358,6 +364,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         onSpeakerSubmit={(name) => segment.speaker && handleSpeakerSubmit(segment.speaker, name)}
                                         onSpeakerCancel={() => setEditingSegmentId(null)}
                                         knownSpeakers={knownSpeakers}
+                                        canRevertSpeaker={!!segment.speaker && !segment.speaker.startsWith("Speaker ") && !segment.speaker.startsWith("Unknown")}
+                                        onSpeakerRevert={segment.speaker ? () => handleSpeakerRevert(segment.speaker!) : undefined}
                                     />
                                 </div>
                             );
@@ -421,6 +429,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         onSpeakerSubmit={(name) => segment.speaker && handleSpeakerSubmit(segment.speaker, name)}
                                         onSpeakerCancel={() => setEditingSegmentId(null)}
                                         knownSpeakers={knownSpeakers}
+                                        canRevertSpeaker={!!segment.speaker && !segment.speaker.startsWith("Speaker ") && !segment.speaker.startsWith("Unknown")}
+                                        onSpeakerRevert={segment.speaker ? () => handleSpeakerRevert(segment.speaker!) : undefined}
                                     />
                                 </motion.div>
                             );

@@ -7,7 +7,7 @@ import { Copy, FolderOpen, RefreshCw, Users } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
-import { rediarizeMeeting } from '@/services/speakerService';
+import { resetSpeakerLabels } from '@/services/speakerService';
 import { toast } from 'sonner';
 
 
@@ -50,7 +50,7 @@ export function TranscriptButtonGroup({
         }
       );
 
-      await rediarizeMeeting(meetingId);
+      await resetSpeakerLabels(meetingId);
     } catch (e) {
       console.error('Re-diarization failed:', e);
       toast.error('Re-diarization failed', {

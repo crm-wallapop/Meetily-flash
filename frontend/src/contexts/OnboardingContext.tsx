@@ -412,11 +412,12 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
       setCompleted(true);
       console.log('[OnboardingContext] Onboarding completed with model:', selectedSummaryModel);
 
-      // Reset the flag so subsequent state updates can be saved
-      isCompletingRef.current = false;
+      // Guard stays up — the page reloads immediately after this,
+      // so lowering it would only open a window for auto-save to
+      // overwrite `completed: true` with a stale `completed: false`.
     } catch (error) {
       console.error('[OnboardingContext] Failed to complete onboarding:', error);
-      isCompletingRef.current = false; // Reset flag on error
+      isCompletingRef.current = false;
       throw error; // Re-throw so PermissionsStep can handle it
     }
   };

@@ -1,4 +1,5 @@
 import React from "react";
+import { Undo2 } from "lucide-react";
 import { getSpeakerColor } from "@/services/speakerService";
 
 interface SpeakerBadgeProps {
@@ -6,6 +7,8 @@ interface SpeakerBadgeProps {
   colorIndex?: number;
   color?: string;
   isSuggestion?: boolean;
+  canRevert?: boolean;
+  onRevert?: () => void;
   onClick?: () => void;
 }
 
@@ -24,6 +27,8 @@ export function SpeakerBadge({
   colorIndex = 0,
   color,
   isSuggestion = false,
+  canRevert = false,
+  onRevert,
   onClick,
 }: SpeakerBadgeProps) {
   const displayName = name?.trim() || "Unknown Speaker";
@@ -31,13 +36,13 @@ export function SpeakerBadge({
   const textColor = textColorForBackground(bgColor);
 
   const baseClasses =
-    "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium max-w-[200px] truncate";
+    "inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium max-w-[200px] truncate";
   const cursorClass = onClick ? "cursor-pointer hover:opacity-80" : "";
   const suggestionClass = isSuggestion ? "italic opacity-70" : "";
 
   return (
     <span
-      className={`${baseClasses} ${cursorClass} ${suggestionClass}`}
+      className={`${baseClasses} ${cursorClass} ${suggestionClass} group`}
       style={{
         backgroundColor: toHsla(bgColor, 0.19),
         color: textColor,
@@ -54,7 +59,30 @@ export function SpeakerBadge({
           : undefined
       }
     >
-      {displayName}
+      <span className="truncate">{displayName}</span>
+      {canRevert && onRevert && (
+        <span className="w-0 overflow-hidden group-hover:w-3.5 transition-[width] duration-200 ease-[cubic-bezier(0.34,1.56,0.64,1)] flex-shrink-0">
+          <button
+            type="button"
+            className="opacity-60 hover:!opacity-100 transition-opacity duration-150"
+            style={{ color: textColor }}
+            onClick={(e) => {
+              e.stopPropagation();
+              onRevert();
+            }}
+            aria-label={`Revert ${displayName} to original label`}
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.stopPropagation();
+                onRevert();
+              }
+            }}
+          >
+            <Undo2 size={12} />
+          </button>
+        </span>
+      )}
     </span>
   );
 }

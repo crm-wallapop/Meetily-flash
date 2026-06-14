@@ -7,8 +7,6 @@ use crate::audio::speaker::alignment::{
     align_transcripts_with_diarization, DiarizationSegment, TranscriptInput,
 };
 use crate::audio::speaker::diarization::{DiarizationOutput, DiarizationPort};
-use crate::audio::speaker::embedding::SpeakerEmbeddingPort;
-use crate::audio::speaker::registry::SpeakerIdentificationPort;
 use crate::database::repositories::speaker::SpeakerRepository;
 use sqlx::SqlitePool;
 
@@ -87,25 +85,16 @@ pub struct DiarizationCompletePayload {
 
 pub struct DiarizationProcessor {
     diarization: Arc<dyn DiarizationPort>,
-    embedding: Arc<dyn SpeakerEmbeddingPort>,
-    registry: Arc<dyn SpeakerIdentificationPort>,
-    confidence_threshold: f32,
     max_speakers: u32,
 }
 
 impl DiarizationProcessor {
     pub fn new(
         diarization: Arc<dyn DiarizationPort>,
-        embedding: Arc<dyn SpeakerEmbeddingPort>,
-        registry: Arc<dyn SpeakerIdentificationPort>,
-        confidence_threshold: f32,
         max_speakers: u32,
     ) -> Self {
         Self {
             diarization,
-            embedding,
-            registry,
-            confidence_threshold,
             max_speakers,
         }
     }
@@ -229,64 +218,6 @@ impl DiarizationProcessor {
         Ok(count)
     }
 
-    async fn extract_and_store_embeddings(
-        &self,
-        pool: &SqlitePool,
-        meeting_id: &str,
-        segments: &[crate::audio::speaker::types::SpeakerSegment],
-        audio: &[f32],
-        sample_rate: u32,
-    ) -> Result<()> {
-        let mut per_speaker: std::collections::HashMap<u32, Vec<f32>> =
-            std::collections::HashMap::new();
-
-        for seg in segments {
-            let start_sample = (seg.start_seconds * sample_rate as f64) as usize;
-            let end_sample = (seg.end_seconds * sample_rate as f64).min(audio.len() as f64) as usize;
-            if start_sample >= audio.len() || end_sample <= start_sample {
-                continue;
-            }
-            let segment_audio = &audio[start_sample..end_sample];
-            let min_samples = (sample_rate as usize) / 2;
-            if segment_audio.len() < min_samples {
-                continue;
-            }
-
-            match self.embedding.extract(segment_audio, sample_rate) {
-                Ok(vec) => {
-                    let entry = per_speaker.entry(seg.speaker_id).or_insert_with(|| {
-                        vec![0.0; self.embedding.dim()]
-                    });
-                    for (i, &v) in vec.as_slice().iter().enumerate() {
-                        entry[i] += v;
-                    }
-                }
-                Err(_) => continue,
-            }
-        }
-
-        // Average and store
-        for (speaker_id, summed) in &per_speaker {
-            let count = segments.iter().filter(|s| s.speaker_id == *speaker_id).count();
-            if count == 0 {
-                continue;
-            }
-            let avg: Vec<f32> = summed.iter().map(|v| v / count as f32).collect();
-            let id = uuid::Uuid::new_v4().to_string();
-            SpeakerRepository::store_embedding(
-                pool,
-                &id,
-                None,
-                &avg,
-                meeting_id,
-                &format!("Speaker {}", speaker_id),
-            )
-            .await?;
-        }
-
-        Ok(())
-    }
-
     async fn match_speakers(
         &self,
         segments: &[crate::audio::speaker::types::SpeakerSegment],
@@ -328,21 +259,14 @@ fn resolve_label(speaker: &str, label_map: &std::collections::HashMap<u32, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::speaker::mocks::{
-        MockDiarizationPort, MockEmbeddingPort, MockIdentificationPort,
-    };
+    use crate::audio::speaker::mocks::MockDiarizationPort;
     use std::collections::HashMap;
 
     fn make_processor(
         diarization: MockDiarizationPort,
-        embedding: MockEmbeddingPort,
-        registry: MockIdentificationPort,
     ) -> DiarizationProcessor {
         DiarizationProcessor::new(
             Arc::new(diarization),
-            Arc::new(embedding),
-            Arc::new(registry),
-            0.6,
             20,
         )
     }

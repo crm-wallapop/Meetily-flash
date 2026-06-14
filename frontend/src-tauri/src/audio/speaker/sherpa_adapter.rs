@@ -77,7 +77,6 @@ impl SpeakerEmbeddingPort for SherpaOnnxEmbeddingAdapter {
 
 pub struct SherpaOnnxDiarizationAdapter {
     extractor: SpeakerEmbeddingExtractor,
-    dim: usize,
     merge_threshold_fp: Arc<AtomicU32>,
 }
 
@@ -95,7 +94,10 @@ impl SherpaOnnxDiarizationAdapter {
         if !mp.exists() {
             return Err(anyhow!("diarization model not found: {}", model_path));
         }
-        let _sp = PathBuf::from(segmentation_model_path);
+        let sp = PathBuf::from(segmentation_model_path);
+        if !sp.exists() {
+            return Err(anyhow!("segmentation model not found: {}", segmentation_model_path));
+        }
 
         let emb_config = SpeakerEmbeddingExtractorConfig {
             model: Some(mp.to_string_lossy().to_string()),
@@ -105,11 +107,9 @@ impl SherpaOnnxDiarizationAdapter {
         };
         let extractor = SpeakerEmbeddingExtractor::create(&emb_config)
             .ok_or_else(|| anyhow!("failed to create embedding extractor for diarization"))?;
-        let dim = extractor.dim() as usize;
 
         Ok(Self {
             extractor,
-            dim,
             merge_threshold_fp: threshold_fp,
         })
     }
@@ -255,7 +255,7 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
         let threshold = self.merge_threshold();
         let (labels, cluster_centroids) = cluster_by_centroids(&chunks, threshold);
         let n_clusters: std::collections::HashSet<u32> = labels.iter().copied().collect();
-        log::warn!(
+        log::info!(
             "DIARIZATION: clustering produced {} speakers from {} chunks in {:.2}s (threshold={:.2})",
             n_clusters.len(),
             chunks.len(),
@@ -383,7 +383,7 @@ fn merge_short_speakers(
             .map(|(id, _)| id);
         if let Some(target) = best {
             remap.insert(*short_id, target);
-            log::warn!(
+            log::debug!(
                 "DIARIZATION: merging short speaker {} ({:.1}s) → speaker {}",
                 short_id,
                 speaker_dur[short_id],

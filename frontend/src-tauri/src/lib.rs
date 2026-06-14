@@ -1125,6 +1125,9 @@ pub fn run() {
             audio::speaker::commands::list_speakers_cmd,
             audio::speaker::commands::remove_speaker_cmd,
             audio::speaker::commands::rediarize_meeting,
+            audio::speaker::commands::reset_speaker_labels,
+            audio::speaker::commands::revert_speaker_label,
+            audio::speaker::commands::set_segment_speaker,
             audio::speaker::commands::get_speaker_merge_threshold,
             audio::speaker::commands::set_speaker_merge_threshold,
             audio::speaker::commands::get_speaker_embedding_model,
@@ -1133,6 +1136,8 @@ pub fn run() {
             audio::speaker::commands::set_max_speakers,
             audio::speaker::model_download::download_speaker_models,
             audio::speaker::model_download::check_speaker_models_available,
+            audio::speaker::model_download::check_embedding_model_available,
+            audio::speaker::model_download::download_embedding_model,
             audio::speaker::commands::get_diarization_enabled,
             audio::speaker::commands::set_diarization_enabled,
         ])
