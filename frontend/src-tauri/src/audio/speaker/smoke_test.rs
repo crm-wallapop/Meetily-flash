@@ -29,7 +29,7 @@ fn meeting_audio_path() -> String {
 #[ignore]
 fn diarization_smoke_test() -> Result<()> {
     let models = models_dir();
-    let embedding_path = format!("{}/3dspeaker-embedding.onnx", models);
+    let embedding_path = format!("{}/nemo-titanet-embedding.onnx", models);
     let segmentation_path = format!("{}/pyannote-segmentation.onnx", models);
     let audio_path = meeting_audio_path();
 

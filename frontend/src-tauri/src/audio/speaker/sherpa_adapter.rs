@@ -134,11 +134,11 @@ fn from_fp(v: u32) -> f32 {
     v as f32 / 65536.0
 }
 
-struct Chunk {
-    start_sample: usize,
-    end_sample: usize,
-    duration_secs: f64,
-    embedding: Vec<f32>,
+pub(crate) struct Chunk {
+    pub(crate) start_sample: usize,
+    pub(crate) end_sample: usize,
+    pub(crate) duration_secs: f64,
+    pub(crate) embedding: Vec<f32>,
 }
 
 impl DiarizationPort for SherpaOnnxDiarizationAdapter {
@@ -171,73 +171,7 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
         }
 
         // Step 1: Create audio chunks from transcript segments.
-        let t_chunk = std::time::Instant::now();
-        let mut chunks: Vec<Chunk> = Vec::new();
-
-        for &(start_s, end_s) in &segments {
-            let dur = end_s - start_s;
-            if dur < MIN_SPEECH_SECS {
-                continue;
-            }
-
-            if dur <= MAX_CHUNK_SECS {
-                let start = ((start_s * sr_f) as usize).min(samples.len());
-                let end = ((end_s * sr_f) as usize).min(samples.len());
-                if end <= start {
-                    continue;
-                }
-                let audio = &samples[start..end];
-                if let Some(emb) = self.extract_embedding(audio, sample_rate) {
-                    chunks.push(Chunk {
-                        start_sample: start,
-                        end_sample: end,
-                        duration_secs: dur,
-                        embedding: emb,
-                    });
-                }
-            } else {
-                // Split long segments into non-overlapping ~SPLIT_TARGET_SECS chunks
-                let chunk_samples = (SPLIT_TARGET_SECS * sr_f) as usize;
-                let start_base = (start_s * sr_f) as usize;
-                let end_limit = ((end_s * sr_f) as usize).min(samples.len());
-                let mut pos = start_base;
-                while pos + chunk_samples <= end_limit {
-                    let audio = &samples[pos..pos + chunk_samples];
-                    let chunk_dur = chunk_samples as f64 / sr_f;
-                    if let Some(emb) = self.extract_embedding(audio, sample_rate) {
-                        chunks.push(Chunk {
-                            start_sample: pos,
-                            end_sample: pos + chunk_samples,
-                            duration_secs: chunk_dur,
-                            embedding: emb,
-                        });
-                    }
-                    pos += chunk_samples;
-                }
-                // Handle remaining tail if it's long enough
-                if pos < end_limit {
-                    let tail_dur = (end_limit - pos) as f64 / sr_f;
-                    if tail_dur >= MIN_SPEECH_SECS {
-                        let audio = &samples[pos..end_limit];
-                        if let Some(emb) = self.extract_embedding(audio, sample_rate) {
-                            chunks.push(Chunk {
-                                start_sample: pos,
-                                end_sample: end_limit,
-                                duration_secs: tail_dur,
-                                embedding: emb,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        log::warn!(
-            "DIARIZATION: chunked + embedded {} chunks from {} segments in {:.2}s",
-            chunks.len(),
-            segments.len(),
-            t_chunk.elapsed().as_secs_f64(),
-        );
+        let chunks = self.build_chunks(samples, sample_rate, &segments);
 
         if chunks.is_empty() {
             return Ok(DiarizationOutput {
@@ -333,6 +267,84 @@ impl SherpaOnnxDiarizationAdapter {
             return None;
         }
         self.extractor.compute(&stream)
+    }
+
+    pub(crate) fn build_chunks(
+        &self,
+        samples: &[f32],
+        sample_rate: u32,
+        segments: &[(f64, f64)],
+    ) -> Vec<Chunk> {
+        let sr_f = sample_rate as f64;
+        let t_chunk = std::time::Instant::now();
+        let mut chunks: Vec<Chunk> = Vec::new();
+
+        for &(start_s, end_s) in segments {
+            let dur = end_s - start_s;
+            if dur < MIN_SPEECH_SECS {
+                continue;
+            }
+
+            if dur <= MAX_CHUNK_SECS {
+                let start = ((start_s * sr_f) as usize).min(samples.len());
+                let end = ((end_s * sr_f) as usize).min(samples.len());
+                if end <= start {
+                    continue;
+                }
+                let audio = &samples[start..end];
+                if let Some(emb) = self.extract_embedding(audio, sample_rate) {
+                    chunks.push(Chunk {
+                        start_sample: start,
+                        end_sample: end,
+                        duration_secs: dur,
+                        embedding: emb,
+                    });
+                }
+            } else {
+                // Split long segments into non-overlapping ~SPLIT_TARGET_SECS chunks
+                let chunk_samples = (SPLIT_TARGET_SECS * sr_f) as usize;
+                let start_base = (start_s * sr_f) as usize;
+                let end_limit = ((end_s * sr_f) as usize).min(samples.len());
+                let mut pos = start_base;
+                while pos + chunk_samples <= end_limit {
+                    let audio = &samples[pos..pos + chunk_samples];
+                    let chunk_dur = chunk_samples as f64 / sr_f;
+                    if let Some(emb) = self.extract_embedding(audio, sample_rate) {
+                        chunks.push(Chunk {
+                            start_sample: pos,
+                            end_sample: pos + chunk_samples,
+                            duration_secs: chunk_dur,
+                            embedding: emb,
+                        });
+                    }
+                    pos += chunk_samples;
+                }
+                // Handle remaining tail if it's long enough
+                if pos < end_limit {
+                    let tail_dur = (end_limit - pos) as f64 / sr_f;
+                    if tail_dur >= MIN_SPEECH_SECS {
+                        let audio = &samples[pos..end_limit];
+                        if let Some(emb) = self.extract_embedding(audio, sample_rate) {
+                            chunks.push(Chunk {
+                                start_sample: pos,
+                                end_sample: end_limit,
+                                duration_secs: tail_dur,
+                                embedding: emb,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        log::warn!(
+            "DIARIZATION: chunked + embedded {} chunks from {} segments in {:.2}s",
+            chunks.len(),
+            segments.len(),
+            t_chunk.elapsed().as_secs_f64(),
+        );
+
+        chunks
     }
 }
 

@@ -5,16 +5,10 @@ import { toast } from 'sonner';
 import {
   getSpeakerMergeThreshold,
   setSpeakerMergeThreshold,
-  getSpeakerEmbeddingModel,
-  setSpeakerEmbeddingModel,
-  checkEmbeddingModelAvailable,
-  downloadEmbeddingModel,
   getMaxSpeakers,
   setMaxSpeakers,
   getDiarizationEnabled,
   setDiarizationEnabled,
-  SPEAKER_EMBEDDING_MODELS,
-  type SpeakerEmbeddingModel,
 } from '@/services/speakerService';
 
 const MERGE_MIN = 0.35;
@@ -105,75 +99,6 @@ export function SpeakerMergeThresholdSlider() {
       <p className="text-sm text-gray-500" aria-live="polite">
         {hintFor(threshold)}
       </p>
-    </div>
-  );
-}
-
-function SpeakerModelSelect() {
-  const [model, setModel] = useState<SpeakerEmbeddingModel>('3dspeaker');
-  const [loading, setLoading] = useState(true);
-  const [downloading, setDownloading] = useState(false);
-
-  useEffect(() => {
-    getSpeakerEmbeddingModel()
-      .then(setModel)
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
-
-  const handleChange = useCallback(async (value: string) => {
-    const m = value as SpeakerEmbeddingModel;
-    try {
-      const available = await checkEmbeddingModelAvailable(m);
-      if (!available) {
-        setDownloading(true);
-        toast.info(`Downloading ${m} model…`);
-        await downloadEmbeddingModel(m);
-        toast.success(`${m} model downloaded`);
-        setDownloading(false);
-      }
-      await setSpeakerEmbeddingModel(m);
-      setModel(m);
-      toast.success('Speaker model updated');
-    } catch (err) {
-      setDownloading(false);
-      toast.error('Failed to switch speaker model', {
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }, []);
-
-  if (loading) {
-    return (
-      <div className="animate-pulse space-y-3">
-        <div className="h-4 bg-gray-200 rounded w-1/4" />
-        <div className="h-9 bg-gray-200 rounded-lg w-80" />
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-2">
-      <label className="text-sm font-medium text-gray-700">
-        Embedding model
-      </label>
-      <div className="flex items-center gap-3">
-        <select
-          value={model}
-          onChange={(e) => handleChange(e.target.value)}
-          disabled={downloading}
-          className="w-full max-w-xs px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50"
-        >
-          {SPEAKER_EMBEDDING_MODELS.map((m) => (
-            <option key={m.value} value={m.value}>
-              {m.label}
-            </option>
-          ))}
-        </select>
-        {downloading && (
-          <div className="w-4 h-4 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin flex-shrink-0" />
-        )}
-      </div>
     </div>
   );
 }
@@ -305,10 +230,7 @@ export function SpeakerSettings() {
           </div>
 
           {enabled && (
-            <>
-              <SpeakerModelSelect />
-              <MaxSpeakersInput />
-            </>
+            <MaxSpeakersInput />
           )}
         </div>
       )}

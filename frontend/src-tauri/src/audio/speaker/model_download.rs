@@ -5,46 +5,14 @@ use tauri::AppHandle;
 
 const SEGMENTATION_MODEL_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-reconstruction-models/pyannote-segmentation-3.0.onnx";
-const EMBEDDING_MODEL_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx";
-const WESPEAKER_EMBEDDING_MODEL_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34.onnx";
 const NEMO_TITANET_EMBEDDING_MODEL_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx";
-const ERES2NET_EMBEDDING_MODEL_URL: &str =
-    "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx";
 
 const SEGMENTATION_FILENAME: &str = "pyannote-segmentation.onnx";
-const EMBEDDING_FILENAME: &str = "3dspeaker-embedding.onnx";
-const WESPEAKER_EMBEDDING_FILENAME: &str = "wespeaker-embedding.onnx";
 const NEMO_TITANET_EMBEDDING_FILENAME: &str = "nemo-titanet-embedding.onnx";
-const ERES2NET_EMBEDDING_FILENAME: &str = "eres2net-embedding.onnx";
 
-pub fn embedding_filename(model: &str) -> &'static str {
-    match model {
-        "wespeaker" => WESPEAKER_EMBEDDING_FILENAME,
-        "nemo_titanet" => NEMO_TITANET_EMBEDDING_FILENAME,
-        "eres2net" => ERES2NET_EMBEDDING_FILENAME,
-        _ => EMBEDDING_FILENAME,
-    }
-}
-
-fn embedding_url(model: &str) -> &'static str {
-    match model {
-        "wespeaker" => WESPEAKER_EMBEDDING_MODEL_URL,
-        "nemo_titanet" => NEMO_TITANET_EMBEDDING_MODEL_URL,
-        "eres2net" => ERES2NET_EMBEDDING_MODEL_URL,
-        _ => EMBEDDING_MODEL_URL,
-    }
-}
-
-fn embedding_display_name(model: &str) -> &'static str {
-    match model {
-        "wespeaker" => "wespeaker-embedding",
-        "nemo_titanet" => "nemo-titanet-embedding",
-        "eres2net" => "eres2net-embedding",
-        _ => "3dspeaker-embedding",
-    }
+pub fn embedding_filename() -> &'static str {
+    NEMO_TITANET_EMBEDDING_FILENAME
 }
 
 fn models_dir() -> PathBuf {
@@ -55,12 +23,7 @@ fn models_dir() -> PathBuf {
 
 pub fn speaker_models_exist() -> bool {
     let dir = models_dir();
-    dir.join(EMBEDDING_FILENAME).exists() && dir.join(SEGMENTATION_FILENAME).exists()
-}
-
-pub fn embedding_model_exists(model: &str) -> bool {
-    let dir = models_dir();
-    dir.join(embedding_filename(model)).exists()
+    dir.join(NEMO_TITANET_EMBEDDING_FILENAME).exists() && dir.join(SEGMENTATION_FILENAME).exists()
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -179,7 +142,6 @@ async fn download_file<R: Runtime>(
 pub async fn download_speaker_models<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<(), String> {
-    // Download segmentation model
     if let Err(e) = download_file(&app, SEGMENTATION_MODEL_URL, SEGMENTATION_FILENAME, "pyannote-segmentation").await {
         let _ = app.emit(
             "speaker-model-download-error",
@@ -191,12 +153,11 @@ pub async fn download_speaker_models<R: Runtime>(
         log::warn!("Failed to download segmentation model: {}", e);
     }
 
-    // Download embedding model
-    if let Err(e) = download_file(&app, EMBEDDING_MODEL_URL, EMBEDDING_FILENAME, "3dspeaker-embedding").await {
+    if let Err(e) = download_file(&app, NEMO_TITANET_EMBEDDING_MODEL_URL, NEMO_TITANET_EMBEDDING_FILENAME, "nemo-titanet-embedding").await {
         let _ = app.emit(
             "speaker-model-download-error",
             SpeakerModelDownloadError {
-                model: "3dspeaker-embedding".to_string(),
+                model: "nemo-titanet-embedding".to_string(),
                 error: e.to_string(),
             },
         );
@@ -209,28 +170,6 @@ pub async fn download_speaker_models<R: Runtime>(
 #[tauri::command]
 pub async fn check_speaker_models_available() -> bool {
     speaker_models_exist()
-}
-
-#[tauri::command]
-pub async fn check_embedding_model_available(model: String) -> bool {
-    embedding_model_exists(&model)
-}
-
-#[tauri::command]
-pub async fn download_embedding_model<R: Runtime>(
-    app: AppHandle<R>,
-    model: String,
-) -> Result<(), String> {
-    let valid = matches!(model.as_str(), "3dspeaker" | "wespeaker" | "nemo_titanet" | "eres2net");
-    if !valid {
-        return Err(format!("Unknown speaker embedding model: {}", model));
-    }
-
-    let url = embedding_url(&model);
-    let filename = embedding_filename(&model);
-    let display_name = embedding_display_name(&model);
-
-    download_file(&app, url, filename, display_name).await.map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -246,12 +185,12 @@ mod tests {
     #[test]
     fn urls_are_valid_https() {
         assert!(SEGMENTATION_MODEL_URL.starts_with("https://"));
-        assert!(EMBEDDING_MODEL_URL.starts_with("https://"));
+        assert!(NEMO_TITANET_EMBEDDING_MODEL_URL.starts_with("https://"));
     }
 
     #[test]
     fn filenames_match_convention() {
         assert!(SEGMENTATION_FILENAME.ends_with(".onnx"));
-        assert!(EMBEDDING_FILENAME.ends_with(".onnx"));
+        assert!(NEMO_TITANET_EMBEDDING_FILENAME.ends_with(".onnx"));
     }
 }

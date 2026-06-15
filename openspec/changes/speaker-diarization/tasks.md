@@ -255,3 +255,16 @@
 - [x] 16.4 Fix `auto_label_does_not_overwrite_manual` test: use in-memory SQLite instead of hardcoded production DB path
 - [x] 16.5 Fix re-diarization stale embeddings: delete old embeddings for meeting before re-running diarization
 - [x] 16.6 Document inline suggestion chips as merge actions (not rename) in spec
+
+## 17. Single embedding model (2026-06-15)
+
+- [x] 17.1 Collapse `model_download.rs` to nemo_titanet only: remove 3dspeaker/nemo_titanet_large/eres2net constants, match arms, validators, and per-model download/check commands
+- [x] 17.2 Hardcode `embedding_filename()` (no-arg) and call site in `run_diarization_for_meeting`; remove the `speaker_embedding_model` read from settings
+- [x] 17.3 Remove `get_speaker_embedding_model` / `set_speaker_embedding_model` Tauri commands and their `lib.rs` registrations (plus `check_embedding_model_available`, `download_embedding_model`)
+- [x] 17.4 Delete the three dead comparison tests (`test_compare_embedding_models_95db`, `test_compare_models_no_cap_95db`, `test_compare_models_raw_95db`) — they reference removed models
+- [x] 17.5 Migration `20260615000000_default_nemo_titanet.sql`: UPDATE any non-nemo_titanet value to `nemo_titanet`
+- [x] 17.6 Frontend: remove `SpeakerModelSelect` component, its render call, and the model-related exports from `speakerService.ts`; trim the model-validation tests to max_speakers only
+- [x] 17.7 Update smoke_test.rs and speaker_diarization_integration.rs to the new `nemo-titanet-embedding.onnx` filename
+- [x] 17.8 Rewrite spec.md D9 requirement + design.md D9 section to single hardcoded model
+- [x] 17.9 Spectral eigengap spike (2026-06-15): dumped 350 nemo_titanet chunk embeddings from meeting 95db, tested eigengap / silhouette / Davies-Bouldin / BIC / ECAPA-TDNN — all converge on k=4 (structural truth: 3 speakers + 1 noise cluster), not k=3. Added D13 to design.md documenting the rejection. The AHC + threshold + merge_short_speakers pipeline is confirmed correct.
+

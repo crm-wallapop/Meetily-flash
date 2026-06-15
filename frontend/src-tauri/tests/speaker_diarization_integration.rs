@@ -124,7 +124,7 @@ fn create_test_wav() -> Vec<u8> {
 #[ignore]
 async fn test_full_pipeline_with_test_audio() -> Result<()> {
     let models = models_dir();
-    let embedding_path = format!("{}/3dspeaker-embedding.onnx", models);
+    let embedding_path = format!("{}/nemo-titanet-embedding.onnx", models);
     let segmentation_path = format!("{}/pyannote-segmentation.onnx", models);
 
     if !std::path::Path::new(&embedding_path).exists() {
@@ -203,7 +203,7 @@ async fn test_full_pipeline_with_test_audio() -> Result<()> {
 #[ignore]
 async fn test_pipeline_with_silence_audio() -> Result<()> {
     let models = models_dir();
-    let embedding_path = format!("{}/3dspeaker-embedding.onnx", models);
+    let embedding_path = format!("{}/nemo-titanet-embedding.onnx", models);
     let segmentation_path = format!("{}/pyannote-segmentation.onnx", models);
 
     if !std::path::Path::new(&embedding_path).exists() {

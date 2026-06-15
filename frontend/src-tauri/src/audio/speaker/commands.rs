@@ -313,16 +313,7 @@ pub async fn run_diarization_for_meeting(
         .unwrap_or_default()
         .join(".meetily-models");
 
-    let active_model = sqlx::query("SELECT speaker_embedding_model FROM settings LIMIT 1")
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|r| sqlx::Row::try_get::<String, _>(&r, "speaker_embedding_model").ok())
-        .unwrap_or_else(|| "3dspeaker".to_string());
-
-    let embedding_filename = super::model_download::embedding_filename(&active_model);
-    let embedding_path = models_dir.join(embedding_filename);
+    let embedding_path = models_dir.join(super::model_download::embedding_filename());
     let segmentation_path = models_dir.join("pyannote-segmentation.onnx");
 
     if !embedding_path.exists() || !segmentation_path.exists() {
@@ -686,38 +677,6 @@ pub async fn set_speaker_merge_threshold(
     let fp = (threshold as f32 * 65536.0) as u32;
     app_state.speaker_merge_threshold_fp.store(fp, Ordering::Relaxed);
     log::info!("set_speaker_merge_threshold: updated to {}", threshold);
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn get_speaker_embedding_model(
-    app_state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
-    let pool = app_state.db_manager.pool();
-    let row = sqlx::query("SELECT speaker_embedding_model FROM settings LIMIT 1")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    let model: String = sqlx::Row::get(&row, "speaker_embedding_model");
-    Ok(model)
-}
-
-#[tauri::command]
-pub async fn set_speaker_embedding_model(
-    app_state: tauri::State<'_, AppState>,
-    model: String,
-) -> Result<(), String> {
-    let valid = matches!(model.as_str(), "3dspeaker" | "wespeaker" | "nemo_titanet" | "eres2net");
-    if !valid {
-        return Err(format!("Unknown speaker embedding model: {}", model));
-    }
-    let pool = app_state.db_manager.pool();
-    sqlx::query("UPDATE settings SET speaker_embedding_model = ? WHERE id = '1'")
-        .bind(&model)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    log::info!("set_speaker_embedding_model: updated to {}", model);
     Ok(())
 }
 

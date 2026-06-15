@@ -54,31 +54,6 @@ export async function setSpeakerMergeThreshold(threshold: number): Promise<void>
   return invoke<void>("set_speaker_merge_threshold", { threshold });
 }
 
-export type SpeakerEmbeddingModel = "3dspeaker" | "wespeaker" | "nemo_titanet" | "eres2net";
-
-export const SPEAKER_EMBEDDING_MODELS: { value: SpeakerEmbeddingModel; label: string }[] = [
-  { value: "3dspeaker", label: "3DSpeaker CAM++ (zh-cn, ~38 MB)" },
-  { value: "nemo_titanet", label: "NeMo Titanet Small (EN VoxCeleb, ~38 MB)" },
-  { value: "eres2net", label: "3DSpeaker ERes2Net (EN VoxCeleb, ~25 MB)" },
-  { value: "wespeaker", label: "WeSpeaker ResNet34 (EN VoxCeleb, ~25 MB)" },
-];
-
-export async function getSpeakerEmbeddingModel(): Promise<SpeakerEmbeddingModel> {
-  return invoke<SpeakerEmbeddingModel>("get_speaker_embedding_model");
-}
-
-export async function setSpeakerEmbeddingModel(model: SpeakerEmbeddingModel): Promise<void> {
-  return invoke<void>("set_speaker_embedding_model", { model });
-}
-
-export async function checkEmbeddingModelAvailable(model: SpeakerEmbeddingModel): Promise<boolean> {
-  return invoke<boolean>("check_embedding_model_available", { model });
-}
-
-export async function downloadEmbeddingModel(model: SpeakerEmbeddingModel): Promise<void> {
-  return invoke<void>("download_embedding_model", { model });
-}
-
 export async function getMaxSpeakers(): Promise<number> {
   return invoke<number>("get_max_speakers");
 }

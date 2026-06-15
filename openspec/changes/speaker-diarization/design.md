@@ -13,7 +13,7 @@ The `sherpa-onnx` crate (v1.13.2, Apache-2.0) provides official Rust bindings fo
 - Token-level timestamp alignment between Whisper segments and diarization speaker boundaries
 - Cross-meeting speaker identification via embedding matching
 - Retroactive speaker labeling with persistent per-speaker colors
-- User-selectable embedding models (3dspeaker/wespeaker) and pyannote segmentation model
+- Single embedding model (nemo_titanet) and pyannote segmentation model
 - Diarization for both recorded and imported audio
 
 **Non-Goals:**
@@ -75,11 +75,12 @@ The `sherpa-onnx` crate (v1.13.2, Apache-2.0) provides official Rust bindings fo
 
 ### D9: Model selection
 
-**Embedding models (user-selectable)**:
-- `3dspeaker` — CAM++ zh-cn (~39 MB, 256-dim) — default
-- `nemo_titanet` — NeMo Titanet Small EN VoxCeleb (~40 MB, 192-dim) — best voice separation for EN/ES
-- `eres2net` — 3DSpeaker ERes2Net EN VoxCeleb (~26 MB, 192-dim)
-- `wespeaker` — WeSpeaker ResNet34 EN VoxCeleb (~27 MB)
+**Embedding model (single, hardcoded)**:
+- `nemo_titanet` — NeMo Titanet Small EN VoxCeleb (~40 MB, 192-dim) — the only shipped embedding model.
+
+Empirical comparison on meeting 95db (3-speaker ES/EN meeting) showed nemo_titanet small ties nemo_titanet_large on quality (identical speaker counts and acceptance at threshold 0.65 and 1.0) at less than half the model size (40 MB vs 96 MB), and is more robust than eres2net (3 vs 4 speakers at threshold 0.65 without the max_speakers cap). It is the centrist on per-segment agreement: it agrees with both other models more often than they agree with each other. 3dspeaker (the prior default) is trained on Mandarin and was the wrong choice for an ES/EN/CA user.
+
+Speaker counting is handled by the clustering step (AHC with a cosine-similarity threshold), not the embedding model — the model is a feature extractor. The threshold and max_speakers settings are the speaker-count mechanism and must remain configurable. Spectral eigengap / silhouette / BIC auto-count was explored and rejected — see D13.
 
 **Segmentation model (required)**:
 - Pyannote segmentation model (~6 MB) — always downloaded during onboarding
@@ -100,6 +101,14 @@ The `sherpa-onnx` crate (v1.13.2, Apache-2.0) provides official Rust bindings fo
 **Rationale**: Two real speakers who sound alike can have higher centroid similarity than a noise/outlier cluster has to any speaker. Merging the highest-similarity pair collapses those two real speakers together, destroying separation. Merging the most isolated cluster absorbs the outlier without touching well-separated speakers. Since the most-similar pair always has a higher nn-sim than any other cluster, the real speakers are guaranteed to survive.
 
 **Empirical validation**: In a 3-speaker Spanish meeting at threshold 0.65, 4 clusters survive short-speaker merge. The two real speakers have centroid sim 0.473 (highest pair); the noise cluster has nn sim 0.327 (lowest). Old strategy merged the two real speakers; new strategy merges the noise cluster, preserving Speaker 1 / Speaker 2 separation.
+
+### D13: Auto-count via spectral eigengap / silhouette / BIC — rejected
+
+**Choice**: Speaker counting stays in the AHC + cosine-threshold + max_speakers pipeline. Spectral eigengap, silhouette, Davies-Bouldin, and BIC auto-count methods were explored (2026-06-15) and rejected.
+
+**Rationale**: On meeting 95db (350 chunks, 192-dim nemo_titanet embeddings), all methods converge on k=4 — the structural truth (3 speakers + 1 short-duration noise cluster), not the desired k=3. Dense eigengap → k=1 (98% of cosine pairs positive, graph fully connected). kNN(10) eigengap → k=4 (stable across k=3..50). Silhouette and Davies-Bouldin both peak at k=4. BIC+PCA-20 picks k=3 but only in a narrow PCA range (fragile). ECAPA-TDNN (SOTA AAM-Softmax verification model) produces the same 4-cluster structure with nearly identical k=3 cluster sizes ([94, 136, 120] vs nemo's [93, 137, 120]) — the 4th cluster is in the audio data, not the embedding model.
+
+The 4→3 reduction is handled by merge_short_speakers (D5, 2% duration floor), which absorbs the short-duration noise cluster. This is the correct mechanism: it is principled (duration is observable), robust (no fragile matrix operations), and transparent (the user sees the merge in speaker settings).
 
 ## Risks / Trade-offs
 

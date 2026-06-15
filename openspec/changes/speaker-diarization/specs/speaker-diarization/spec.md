@@ -225,14 +225,16 @@ The system SHALL emit a `diarization-complete` event with the updated speaker as
 
 ### Requirement: Speaker model selection and download
 
-The system SHALL support four embedding models: `3dspeaker` (default, CAM++ zh-cn, ~39 MB), `nemo_titanet` (NeMo Titanet Small EN VoxCeleb, ~40 MB), `eres2net` (3DSpeaker ERes2Net EN VoxCeleb, ~26 MB), and `wespeaker` (WeSpeaker ResNet34 EN VoxCeleb, ~27 MB). The pyannote segmentation model (~6 MB) SHALL be a required download. All models SHALL be downloaded during onboarding Step 3 or on first use if skipped during onboarding.
+The system SHALL use a single embedding model: `nemo_titanet` (NeMo Titanet Small EN VoxCeleb, ~40 MB). The pyannote segmentation model (~6 MB) SHALL be a required download. Both models SHALL be downloaded during onboarding Step 3 or on first use if skipped during onboarding.
 
-The active embedding model SHALL be configurable in settings. Changing the model SHALL NOT trigger re-diarization of existing meetings (user can manually re-diarize).
+No user-facing model selector SHALL exist. The embedding model is hardcoded; speaker count is controlled by the merge threshold and max_speakers settings, not by model choice.
+
+Existing databases with a `speaker_embedding_model` column holding a legacy value (e.g., `3dspeaker`) SHALL be migrated to `nemo_titanet` on upgrade. The column is retained for backward compatibility but no longer read by the diarization code.
 
 #### Scenario: Onboarding downloads required models
 
 - **WHEN** the user reaches onboarding Step 3
-- **THEN** the pyannote segmentation model and the default embedding model are downloaded alongside Parakeet and Gemma
+- **THEN** the pyannote segmentation model and the nemo_titanet embedding model are downloaded alongside Parakeet and Gemma
 
 #### Scenario: Model download failure is graceful
 
@@ -241,12 +243,12 @@ The active embedding model SHALL be configurable in settings. Changing the model
 - **AND** the diarization phase is skipped for subsequent recordings until the model is downloaded
 - **AND** a warning is logged
 
-#### Scenario: User switches embedding model
+#### Scenario: Legacy model value migrated on upgrade
 
-- **WHEN** the user selects `wespeaker` in settings
-- **THEN** the model is downloaded if not already present
-- **AND** subsequent diarization jobs use the new model
-- **AND** existing meetings retain their current labels
+- **GIVEN** an existing database where `settings.speaker_embedding_model = '3dspeaker'`
+- **WHEN** the migration runs on upgrade
+- **THEN** the value is updated to `nemo_titanet`
+- **AND** subsequent diarization jobs load the nemo_titanet model file
 
 ---
 
