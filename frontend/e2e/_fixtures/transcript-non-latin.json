@@ -1,0 +1,55 @@
+{
+  "meeting_id": "meet-non-latin",
+  "segments": [
+    {
+      "id": "seg-es-001",
+      "text": "Buenos días a todos. Empezamos con la revisión del proyecto.",
+      "audio_start_time": 0.0,
+      "audio_end_time": 3.5,
+      "duration": 3.5,
+      "display_time": "00:00",
+      "confidence": 0.92,
+      "sequence_id": 0
+    },
+    {
+      "id": "seg-ca-001",
+      "text": "Bon dia! Abans de començar, algú ha revisat els pressupostos?",
+      "audio_start_time": 3.8,
+      "audio_end_time": 7.5,
+      "duration": 3.7,
+      "display_time": "00:03",
+      "confidence": 0.88,
+      "sequence_id": 1
+    },
+    {
+      "id": "seg-mixed-001",
+      "text": "Sí, els he revisat. The Q3 numbers look solid — els ingressos han pujat un 12%.",
+      "audio_start_time": 7.8,
+      "audio_end_time": 13.0,
+      "duration": 5.2,
+      "display_time": "00:07",
+      "confidence": 0.85,
+      "sequence_id": 2
+    },
+    {
+      "id": "seg-ca-002",
+      "text": "Perfecte. Ens falta tancar el disseny de la campanya de Nadal.",
+      "audio_start_time": 13.2,
+      "audio_end_time": 17.0,
+      "duration": 3.8,
+      "display_time": "00:13",
+      "confidence": 0.9,
+      "sequence_id": 3
+    },
+    {
+      "id": "seg-es-002",
+      "text": "De acuerdo. Lo revisamos el jueves con todo el equipo.",
+      "audio_start_time": 17.2,
+      "audio_end_time": 20.0,
+      "duration": 2.8,
+      "display_time": "00:17",
+      "confidence": 0.94,
+      "sequence_id": 4
+    }
+  ]
+}

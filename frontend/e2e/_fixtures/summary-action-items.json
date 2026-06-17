@@ -1,0 +1,35 @@
+{
+  "meeting_id": "meet-30s-multi",
+  "blocks": [
+    {
+      "id": "blk-heading-001",
+      "type": "heading",
+      "content": "Q3 Review — Key Decisions",
+      "color": "default"
+    },
+    {
+      "id": "blk-action-001",
+      "type": "action_item",
+      "content": "Carol to draft the Q3 board update and circulate by Thursday for review",
+      "color": "red"
+    },
+    {
+      "id": "blk-action-002",
+      "type": "action_item",
+      "content": "Bob to prepare the churn-analysis appendix for the board deck",
+      "color": "red"
+    },
+    {
+      "id": "blk-decision-001",
+      "type": "decision",
+      "content": "Onboarding rewrite confirmed as the primary churn-reduction lever for Q4",
+      "color": "green"
+    },
+    {
+      "id": "blk-key-point-001",
+      "type": "key_point",
+      "content": "Revenue up 12% QoQ, driven by enterprise tier; SMB churn down from 5% to 3%",
+      "color": "blue"
+    }
+  ]
+}

@@ -4,5 +4,27 @@
     "@typescript-eslint/no-explicit-any": "error",
     "@typescript-eslint/no-unused-vars": "warn",
     "react/no-unescaped-entities": "warn"
-  }
+  },
+  "overrides": [
+    {
+      "files": ["e2e/**/*.spec.ts"],
+      "rules": {
+        "no-restricted-syntax": [
+          "error",
+          {
+            "selector": "CallExpression[callee.property.name='waitForTimeout']",
+            "message": "Use auto-waiting primitives (page.waitForSelector, expect(locator).toBeVisible()) instead of page.waitForTimeout — fixed sleeps cause flaky tests."
+          },
+          {
+            "selector": "CallExpression[callee.name='setTimeout']",
+            "message": "Use auto-waiting primitives instead of setTimeout in e2e specs — fixed waits cause flaky tests."
+          },
+          {
+            "selector": "CallExpression[callee.name='sleep']",
+            "message": "Use auto-waiting primitives instead of sleep() in e2e specs — fixed waits cause flaky tests."
+          }
+        ]
+      }
+    }
+  ]
 }

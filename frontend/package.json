@@ -26,7 +26,10 @@
         "tauri:build:openblas": "tauri build -- --features openblas",
         "tauri:build:hipblas": "tauri build -- --features hipblas",
         "test": "vitest run --passWithNoTests",
-        "lint": "next lint"
+        "test:e2e": "playwright test",
+        "test:smoke": "playwright test e2e/smoke/",
+        "lint": "next lint",
+        "prepare": "node scripts/install-smoke-hook.mjs"
     },
     "dependencies": {
         "@blocknote/core": "0.36.0",
@@ -88,6 +91,7 @@
         "zod": "^3.25.71"
     },
     "devDependencies": {
+        "@playwright/test": "^1.61.0",
         "@tailwindcss/typography": "^0.5.15",
         "@tauri-apps/cli": "^2.1.0",
         "@tauri-apps/plugin-fs": "~2.4.0",

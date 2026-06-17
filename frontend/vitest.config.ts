@@ -9,5 +9,13 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    exclude: [
+      '**/node_modules/**',
+      '**/dist/**',
+      '**/.next/**',
+      '**/.{idea,git,cache,output,temp}/**',
+      '**/src-tauri/**',
+      'e2e/**/*.spec.ts',
+    ],
   },
 });

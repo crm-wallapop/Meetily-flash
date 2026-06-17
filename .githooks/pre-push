@@ -1,0 +1,49 @@
+#!/usr/bin/env sh
+# Pre-push smoke gate — cross-platform-automated-smoke-tests.
+# Runs Vitest plus the branch-scoped Playwright smoke spec (derived from the
+# fix/<change> | enhance/<change> branch convention) before a push reaches the remote.
+# Bypass for WIP/emergency pushes: SKIP_SMOKE=1 git push
+
+if [ -n "$SKIP_SMOKE" ]; then
+  echo "[smoke] SKIP_SMOKE set — pre-push gate skipped."
+  exit 0
+fi
+
+# Run from the git work-tree root regardless of where the user pushed from.
+REPO_ROOT=$(git rev-parse --show-toplevel) || exit 0
+FRONTEND="$REPO_ROOT/frontend"
+[ -d "$FRONTEND" ] || exit 0
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+# Only fix/|enhance/ branches carry a change name; anything else gets Vitest only.
+CHANGE=""
+case "$BRANCH" in
+  fix/*) CHANGE="${BRANCH#fix/}" ;;
+  enhance/*) CHANGE="${BRANCH#enhance/}" ;;
+esac
+
+echo "[smoke] pre-push gate — branch '$BRANCH'"
+
+echo "[smoke] -> Vitest"
+( cd "$FRONTEND" && pnpm test ) || {
+  echo "[smoke] Vitest failed — push aborted. Bypass: SKIP_SMOKE=1 git push"
+  exit 1
+}
+
+if [ -n "$CHANGE" ]; then
+  SPEC="e2e/smoke/${CHANGE}.spec.ts"
+  if [ -f "$FRONTEND/$SPEC" ]; then
+    echo "[smoke] -> Playwright $SPEC"
+    ( cd "$FRONTEND" && pnpm exec playwright test "$SPEC" ) || {
+      echo "[smoke] smoke spec failed — push aborted. Bypass: SKIP_SMOKE=1 git push"
+      exit 1
+    }
+  else
+    echo "[smoke] no scoped spec at $SPEC — Vitest-only gate."
+  fi
+else
+  echo "[smoke] branch has no fix/|enhance/ prefix — Vitest-only gate."
+fi
+
+echo "[smoke] gate passed."

@@ -1,0 +1,65 @@
+{
+  "meeting_id": "meet-30s-multi",
+  "segments": [
+    {
+      "id": "seg-001",
+      "text": "Alice: Alright, let's get started. Bob, can you walk us through the Q3 numbers?",
+      "audio_start_time": 0.0,
+      "audio_end_time": 4.2,
+      "duration": 4.2,
+      "display_time": "00:00",
+      "confidence": 0.94,
+      "sequence_id": 0
+    },
+    {
+      "id": "seg-002",
+      "text": "Bob: Sure. Revenue is up twelve percent quarter over quarter, mostly driven by the enterprise tier.",
+      "audio_start_time": 4.3,
+      "audio_end_time": 10.1,
+      "duration": 5.8,
+      "display_time": "00:04",
+      "confidence": 0.91,
+      "sequence_id": 1
+    },
+    {
+      "id": "seg-003",
+      "text": "Carol: That's great. What's the churn look like for the SMB segment?",
+      "audio_start_time": 10.5,
+      "audio_end_time": 14.0,
+      "duration": 3.5,
+      "display_time": "00:10",
+      "confidence": 0.96,
+      "sequence_id": 2
+    },
+    {
+      "id": "seg-004",
+      "text": "Bob: Churn actually dropped to three percent, down from five last quarter. The onboarding rewrite is paying off.",
+      "audio_start_time": 14.2,
+      "audio_end_time": 21.0,
+      "duration": 6.8,
+      "display_time": "00:14",
+      "confidence": 0.89,
+      "sequence_id": 3
+    },
+    {
+      "id": "seg-005",
+      "text": "Alice: Excellent. Let's carry this momentum into Q4. Carol, draft the board update by Friday.",
+      "audio_start_time": 21.3,
+      "audio_end_time": 27.5,
+      "duration": 6.2,
+      "display_time": "00:21",
+      "confidence": 0.93,
+      "sequence_id": 4
+    },
+    {
+      "id": "seg-006",
+      "text": "Carol: Will do. I'll circulate a draft Thursday for review.",
+      "audio_start_time": 27.8,
+      "audio_end_time": 30.0,
+      "duration": 2.2,
+      "display_time": "00:27",
+      "confidence": 0.97,
+      "sequence_id": 5
+    }
+  ]
+}

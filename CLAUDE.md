@@ -134,6 +134,8 @@ Proposals must include:
 
 **Before `/opsx:archive`:** re-read `specs/<capability>/spec.md` and `design.md`. If the implementation evolved during apply, amend the delta spec and design first — then archive. Gates (`cargo test`, `pytest`, `pnpm test`) do not catch spec drift. Read the spec, not just the diff.
 
+**Smoke-test deliverable for UI-affecting changes.** Any OpenSpec change that touches user-visible frontend behavior SHALL add `frontend/e2e/smoke/<change-name>.spec.ts` as an explicit `tasks.md` deliverable. The local pre-push hook (`.githooks/pre-push`, self-installed via the `prepare` script on `pnpm install`) derives the spec filename from the branch name (`fix/<change>` / `enhance/<change>` → `e2e/smoke/<change>.spec.ts`) and runs Vitest plus only that spec; `SKIP_SMOKE=1 git push` bypasses. Backfill of smoke tests for pre-existing capabilities is **opportunistic** — added when a capability is next touched, not big-bang; do not block a change on missing coverage elsewhere.
+
 ---
 
 ## 4. Adversarial TDD — Mandatory Test Categories
@@ -194,9 +196,24 @@ pytest backend/                     # unit + integration
 pytest backend/ -m "not slow"       # fast tests only
 
 # TypeScript (frontend)
-pnpm test                           # unit tests
-pnpm test:e2e                       # end-to-end (when added)
+pnpm test                           # unit tests (Vitest)
+pnpm test:smoke                     # Playwright UI smoke specs (e2e/smoke/)
+pnpm test:e2e                       # full Playwright e2e corpus (e2e/)
 ```
+
+**Smoke test engine-per-OS.** `playwright.config.ts` selects the browser channel by
+`process.platform`: **chromium** on Windows (WebView2), **webkit** on macOS (WKWebView)
+and Linux (WebKitGTK). Running `pnpm test:smoke` locally exercises only your host OS's
+engine. `e2e/smoke/engine-discriminator.spec.ts` asserts a CSS value that differs
+between engine families, proving the channel selection actually discriminates. There is
+no hosted CI matrix — each developer runs only their host OS's engine, so cross-OS
+coverage relies on developers on each OS running the suite (and the pre-push hook)
+locally.
+
+**Local smoke gotcha.** The webpack mock-alias seam is gated on `PLAYWRIGHT_E2E=1`,
+which `playwright.config.ts` injects into the dev-server process it spawns. If a plain
+`pnpm dev` is already running on :3118 it will be reused *without* the mock — kill it
+first (`playwright.config.ts` sets `reuseExistingServer: !CI`).
 
 ---
 
@@ -237,6 +254,16 @@ pnpm test:e2e                       # end-to-end (when added)
 - `main` — stable releases
 - `fix/<change-name>` — bug fixes
 - `enhance/<change-name>` — features and improvements
+
+---
+
+## 8. Deferred Follow-ups
+
+Tracked-but-blocked OpenSpec changes. Surface these here so a new proposal doesn't re-derive the blocking rationale. Each was scoped **out** of the `cross-platform-automated-smoke-tests` change to keep that change to one concern (Playwright UI smoke v1); open a dedicated change when the blocker clears.
+
+- **`hexagonal-port-traits`** — introduce the `ports/` trait layer for the Tauri Rust app (§2a) so adapters can be swapped in tests. Blocked: several adapters currently call Tauri/cpal directly from inside logic that should be a use case. This is the prerequisite for the two below.
+- **`frontend-zod-schemas`** — derive frontend domain types from Zod schemas (`z.output<typeof MySchema>`), replacing the hand-written type guards in `e2e/_fixtures/loader.ts` with `Schema.parse` (one-for-one swap) and enabling `fast-check` property tests on the loader.
+- **`cargo-integration-test-depth`** — `tauri::test::mock_app` + fake-port integration tests for Rust command depth (device-disconnect, permission-denied, sample-rate-mismatch, LLM timeout/malformed/schema-mismatch per §4). Blocked on `hexagonal-port-traits` (needs swappable ports to fake).
 
 ---
 
