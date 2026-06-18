@@ -219,6 +219,22 @@ fn signal_cancel_detection(
 #[tauri::command]
 fn signal_cancel_detection() {}
 
+/// Dev/test-only (compiled under `dev-detector` only): inject a synthetic
+/// meeting-detection observation so the auto-detect flow runs without a real
+/// Google Meet call. `state` is `"joined"` or `"left"`; any other value is
+/// rejected before the shared observation is touched. The `__` prefix is a
+/// documentation convention only — `generate_handler!` exposes no command-hiding,
+/// so the off-by-default Cargo feature is the sole compile-time gate.
+#[cfg(feature = "dev-detector")]
+#[tauri::command]
+fn __dev_simulate_meeting(
+    state: String,
+    title: Option<String>,
+    handle: tauri::State<'_, detection::fake::FakeDetectorHandle>,
+) -> Result<(), String> {
+    handle.apply(&state, title.as_deref())
+}
+
 #[tauri::command]
 fn get_transcription_status() -> TranscriptionStatus {
     TranscriptionStatus {
@@ -763,7 +779,6 @@ pub fn run() {
                     use std::sync::atomic::AtomicBool;
                     use std::sync::Arc;
                     use std::time::Duration;
-                    use detection::windows::{FocusHistory, WindowsMeetingDetector, spawn_focus_tracker};
                     use use_cases::meeting_detection::{DetectorSettings, spawn_detector, DetectorEventEmitter};
                     use tauri::Emitter;
 
@@ -782,10 +797,20 @@ pub fn run() {
                     app_for_gc_and_detector.manage(SuppressDetectionSignal(suppress_signal.clone()));
 
                     if auto_detect {
-                        let focus_history: FocusHistory = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
-                        let _focus_task = spawn_focus_tracker(focus_history.clone());
-
-                        let detector = WindowsMeetingDetector::new(focus_history.clone());
+                        #[cfg(not(feature = "dev-detector"))]
+                        let detector = {
+                            use detection::windows::{FocusHistory, WindowsMeetingDetector, spawn_focus_tracker};
+                            let focus_history: FocusHistory = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+                            let _focus_task = spawn_focus_tracker(focus_history.clone());
+                            WindowsMeetingDetector::new(focus_history.clone())
+                        };
+                        #[cfg(feature = "dev-detector")]
+                        let detector = {
+                            let fake = detection::fake::FakeMeetingDetector::new();
+                            app_for_gc_and_detector
+                                .manage(detection::fake::FakeDetectorHandle(fake.handle()));
+                            fake
+                        };
 
                         struct AppEmitter<R: tauri::Runtime>(tauri::AppHandle<R>);
                         impl<R: tauri::Runtime> DetectorEventEmitter for AppEmitter<R> {
@@ -897,6 +922,8 @@ pub fn run() {
             cancel_recording,
             set_active_meeting_name,
             signal_cancel_detection,
+            #[cfg(feature = "dev-detector")]
+            __dev_simulate_meeting,
             is_recording,
             get_transcription_status,
             read_audio_file,

@@ -52,6 +52,12 @@ hipblas = ["whisper-rs/hipblas"]   # Linux: AMD ROCm HIP
 openblas = ["whisper-rs/openblas"] # Optimized BLAS (Auto-enabled on Windows/Linux)
 openmp = ["whisper-rs/openmp"]     # OpenMP parallel processing
 
+# Dev/test-only: compiles a fake MeetingDetectorPort + the __dev_simulate_meeting
+# command so the auto-detect flow can be smoke-tested without a real Meet call.
+# OFF by default — never enable in release/production build scripts. The seam
+# (fake adapter, controller, command) is absent from the binary unless this is on.
+dev-detector = []
+
 [build-dependencies]
 tauri-build = { version = "2.3.0", features = [] }
 reqwest = { version = "0.11", features = ["blocking", "multipart", "json", "stream"] }
