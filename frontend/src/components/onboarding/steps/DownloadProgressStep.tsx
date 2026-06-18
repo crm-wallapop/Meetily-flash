@@ -314,10 +314,7 @@ export function DownloadProgressStep() {
 
   // Listen to speaker model download progress
   useEffect(() => {
-    let unlistenProgress: Promise<() => void>;
-    let unlistenError: Promise<() => void>;
-
-    unlistenProgress = listen<{
+    const unlistenProgress = listen<{
       model: string;
       progress: number;
       downloaded_mb: number;
@@ -333,7 +330,7 @@ export function DownloadProgressStep() {
       }));
     });
 
-    unlistenError = listen<{
+    const unlistenError = listen<{
       model: string;
       error: string;
     }>('speaker-model-download-error', () => {
