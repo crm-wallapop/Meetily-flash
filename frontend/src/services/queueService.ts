@@ -51,8 +51,25 @@ export async function resumeAllBackgroundWork(): Promise<void> {
   await invoke("resume_all_background_work");
 }
 
+/**
+ * Coerce an untrusted IPC payload into a well-formed QueueSnapshot.
+ * Rust always emits both fields, but the IPC boundary is untrusted (§9):
+ * a partial or version-skewed payload must not crash `.find` on `jobs`.
+ */
+export function normalizeQueueSnapshot(payload: unknown): QueueSnapshot {
+  if (!payload || typeof payload !== "object") {
+    return { jobs: [], manual_pause_all: false };
+  }
+  const raw = payload as Partial<QueueSnapshot>;
+  return {
+    jobs: Array.isArray(raw.jobs) ? raw.jobs : [],
+    manual_pause_all:
+      typeof raw.manual_pause_all === "boolean" ? raw.manual_pause_all : false,
+  };
+}
+
 export async function getQueueState(): Promise<QueueSnapshot> {
-  return invoke<QueueSnapshot>("get_queue_state");
+  return normalizeQueueSnapshot(await invoke<QueueSnapshot>("get_queue_state"));
 }
 
 export async function cancelQueuedJob(meetingId: string): Promise<void> {
@@ -67,6 +84,6 @@ export function onQueueChanged(
   callback: (snapshot: QueueSnapshot) => void
 ): Promise<UnlistenFn> {
   return listen<QueueSnapshot>("transcription-queue-changed", (event) => {
-    callback(event.payload);
+    callback(normalizeQueueSnapshot(event.payload));
   });
 }
