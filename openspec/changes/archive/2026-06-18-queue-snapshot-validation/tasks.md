@@ -15,4 +15,4 @@
 ## 3. OpenSpec workflow
 
 - [x] 3.1 `openspec validate queue-snapshot-validation` passes.
-- [ ] 3.2 Archive the change once tasks are green; the delta spec syncs into `openspec/specs/post-meeting-pipeline/spec.md`.
+- [x] 3.2 Archive the change once tasks are green; the delta spec syncs into `openspec/specs/post-meeting-pipeline/spec.md`. NOTE: the existing `post-meeting-pipeline` living spec was in delta format (`## ADDED Requirements`, no `## Purpose`) — a pre-existing malformation from when `post-meeting-transcription` was archived. Converted it to living format (`## Purpose` + `## Requirements`) so this change's delta could merge; the new requirement landed as `+ 1 added`.

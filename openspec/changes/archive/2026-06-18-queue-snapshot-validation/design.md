@@ -90,3 +90,19 @@ follow-up. Guard the structurally-observed failure, not hypothetical ones.
 Purely additive boundary normalization; no schema or behavior change for valid
 payloads. Rollback: revert `queueService.ts`; the crash returns but no state
 is corrupted.
+
+## Resolved during apply
+
+- **Smoke spec trigger.** The home page is gated behind a no-microphone
+  permissions alert in the smoke environment, so meeting items don't render on
+  `/` and a DOM "meeting item visible" assertion is unreliable (the
+  `recording-basic` spec hit the same limitation and used a data-layer
+  assertion for the same reason). The spec instead emits a malformed
+  `transcription-queue-changed` event through the mock bus: the
+  `useRetranscriptionProgress` listener's `snapshot.jobs.filter(...)` is the
+  reliable crash trigger, and the spec captures any throw from the emit.
+  Verified RED→GREEN: reverting the `onQueueChanged` normalization fails the
+  spec with `Cannot read properties of undefined (reading 'filter')`;
+  restoring it passes. The `renderItem` (`.find`) crash site is covered
+  transitively — the normalizer guarantees `jobs` is always an array for every
+  consumer, including `renderItem` — and is locked by the unit tests.
