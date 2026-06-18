@@ -8,6 +8,7 @@ import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
 import { resetSpeakerLabels } from '@/services/speakerService';
+import { MeetingMaxSpeakersControl } from './MeetingMaxSpeakersControl';
 import { toast } from 'sonner';
 
 
@@ -128,6 +129,10 @@ export function TranscriptButtonGroup({
           </Button>
         )}
       </ButtonGroup>
+
+      {meetingId && transcriptCount > 0 && (
+        <MeetingMaxSpeakersControl meetingId={meetingId} />
+      )}
 
       {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
         <RetranscribeDialog

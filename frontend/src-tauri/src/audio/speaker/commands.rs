@@ -2,7 +2,7 @@ use crate::audio::speaker::alignment::TranscriptInput;
 use crate::audio::speaker::diarization::DiarizationPort;
 use crate::audio::speaker::registry::SpeakerIdentificationPort;
 use crate::audio::speaker::sherpa_adapter::SherpaOnnxRegistryAdapter;
-use crate::audio::speaker::types::EmbeddingVector;
+use crate::audio::speaker::types::{EmbeddingVector, SpeakerSegment};
 use crate::database::repositories::speaker::SpeakerRepository;
 use crate::state::AppState;
 use sqlx::SqlitePool;
@@ -373,70 +373,12 @@ pub async fn run_diarization_for_meeting(
     // highest-similarity pair collapses two similar real speakers; merging
     // the outlier absorbs noise/fragment clusters without touching
     // well-separated speakers that happen to sound alike.
-    let max_speakers: usize = sqlx::query("SELECT max_speakers FROM settings LIMIT 1")
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|r| sqlx::Row::try_get::<i64, _>(&r, "max_speakers").ok())
-        .map(|v| v as usize)
-        .unwrap_or(10);
-
-    while centroids.len() > max_speakers.max(2) {
-        let ids: Vec<u32> = centroids.keys().copied().collect();
-
-        let mut durations: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
-        for seg in &segments {
-            *durations.entry(seg.speaker_id).or_insert(0.0) += seg.end_seconds - seg.start_seconds;
-        }
-
-        let mut most_isolated = ids[0];
-        let mut lowest_nn_sim = f32::MAX;
-        let mut nn_of_isolated = ids[0];
-
-        for &i in &ids {
-            let mut best_j = ids[0];
-            let mut best_sim = f32::MIN;
-            for &j in &ids {
-                if i == j {
-                    continue;
-                }
-                let sim = cosine_similarity_centroids(&centroids[&i], &centroids[&j]);
-                if sim > best_sim {
-                    best_sim = sim;
-                    best_j = j;
-                }
-            }
-            log::debug!(
-                "DIARIZATION: cluster {} ({:.1}s) nearest={} sim={:.3}",
-                i,
-                durations.get(&i).unwrap_or(&0.0),
-                best_j,
-                best_sim
-            );
-            if best_sim < lowest_nn_sim {
-                lowest_nn_sim = best_sim;
-                most_isolated = i;
-                nn_of_isolated = best_j;
-            }
-        }
-
-        log::warn!(
-            "DIARIZATION: max_speakers={}: merging most-isolated speaker {} ({:.1}s) → speaker {} ({:.1}s) (nn sim={:.3})",
-            max_speakers,
-            most_isolated,
-            durations.get(&most_isolated).unwrap_or(&0.0),
-            nn_of_isolated,
-            durations.get(&nn_of_isolated).unwrap_or(&0.0),
-            lowest_nn_sim
-        );
-        for seg in &mut segments {
-            if seg.speaker_id == most_isolated {
-                seg.speaker_id = nn_of_isolated;
-            }
-        }
-        centroids.remove(&most_isolated);
-    }
+    let effective_cap = resolve_effective_cap_for_meeting(pool, meeting_id).await;
+    log::info!(
+        "DIARIZATION: effective max_speakers cap for meeting {} = {}",
+        meeting_id, effective_cap
+    );
+    enforce_max_speakers_cap(&mut centroids, &mut segments, effective_cap);
 
     let num_speakers: std::collections::HashSet<u32> =
         segments.iter().map(|s| s.speaker_id).collect();
@@ -711,6 +653,87 @@ pub async fn set_max_speakers(
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+pub struct MeetingMaxSpeakers {
+    r#override: Option<i32>,
+    effective: i64,
+    global_default: i64,
+}
+
+fn validate_meeting_cap(cap: i32) -> Result<(), String> {
+    if !(2..=20).contains(&cap) {
+        return Err("Max speakers must be between 2 and 20".to_string());
+    }
+    Ok(())
+}
+
+async fn set_meeting_max_speakers_inner(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    cap: Option<i32>,
+) -> Result<(), String> {
+    if let Some(c) = cap {
+        validate_meeting_cap(c)?;
+    }
+    let exists = sqlx::query("SELECT 1 FROM meetings WHERE id = ?")
+        .bind(meeting_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    if exists.is_none() {
+        return Err(format!("Meeting not found: {}", meeting_id));
+    }
+    sqlx::query("UPDATE meetings SET max_speakers = ? WHERE id = ?")
+        .bind(cap)
+        .bind(meeting_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    log::info!("set_meeting_max_speakers: meeting {} cap = {:?}", meeting_id, cap);
+    Ok(())
+}
+
+async fn get_meeting_max_speakers_inner(
+    pool: &SqlitePool,
+    meeting_id: &str,
+) -> Result<MeetingMaxSpeakers, String> {
+    let row = sqlx::query(
+        "SELECT m.max_speakers AS meeting_cap, \
+         (SELECT max_speakers FROM settings LIMIT 1) AS global_cap \
+         FROM meetings m WHERE m.id = ?",
+    )
+    .bind(meeting_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let row = row.ok_or_else(|| format!("Meeting not found: {}", meeting_id))?;
+    let meeting_cap: Option<i64> =
+        sqlx::Row::try_get(&row, "meeting_cap").map_err(|e| e.to_string())?;
+    let global_cap: i64 = sqlx::Row::try_get(&row, "global_cap").map_err(|e| e.to_string())?;
+    Ok(MeetingMaxSpeakers {
+        r#override: meeting_cap.map(|v| v as i32),
+        effective: resolve_effective_cap(meeting_cap, global_cap) as i64,
+        global_default: global_cap,
+    })
+}
+
+#[tauri::command]
+pub async fn get_meeting_max_speakers(
+    app_state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<MeetingMaxSpeakers, String> {
+    get_meeting_max_speakers_inner(app_state.db_manager.pool(), &meeting_id).await
+}
+
+#[tauri::command]
+pub async fn set_meeting_max_speakers(
+    app_state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    cap: Option<i32>,
+) -> Result<(), String> {
+    set_meeting_max_speakers_inner(app_state.db_manager.pool(), &meeting_id, cap).await
+}
+
 async fn fetch_transcripts_for_alignment(
     pool: &SqlitePool,
     meeting_id: &str,
@@ -766,6 +789,94 @@ fn cosine_similarity_centroids(a: &[f32], b: &[f32]) -> f32 {
     let norm_a: f32 = a[..min_len].iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b[..min_len].iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm_a > 0.0 && norm_b > 0.0 { dot / (norm_a * norm_b) } else { 0.0 }
+}
+
+fn resolve_effective_cap(meeting_override: Option<i64>, global_default: i64) -> usize {
+    meeting_override.unwrap_or(global_default) as usize
+}
+
+async fn resolve_effective_cap_for_meeting(pool: &SqlitePool, meeting_id: &str) -> usize {
+    let row = sqlx::query(
+        "SELECT m.max_speakers AS meeting_cap, \
+         (SELECT max_speakers FROM settings LIMIT 1) AS global_cap \
+         FROM meetings m WHERE m.id = ?",
+    )
+    .bind(meeting_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    match row {
+        Some(r) => {
+            let meeting_cap: Option<i64> =
+                sqlx::Row::try_get(&r, "meeting_cap").unwrap_or(None);
+            let global_cap: i64 = sqlx::Row::try_get(&r, "global_cap").unwrap_or(10);
+            resolve_effective_cap(meeting_cap, global_cap)
+        }
+        None => 10,
+    }
+}
+
+fn enforce_max_speakers_cap(
+    centroids: &mut std::collections::HashMap<u32, Vec<f32>>,
+    segments: &mut Vec<SpeakerSegment>,
+    cap: usize,
+) {
+    while centroids.len() > cap.max(2) {
+        let ids: Vec<u32> = centroids.keys().copied().collect();
+
+        let mut durations: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+        for seg in segments.iter() {
+            *durations.entry(seg.speaker_id).or_insert(0.0) += seg.end_seconds - seg.start_seconds;
+        }
+
+        let mut most_isolated = ids[0];
+        let mut lowest_nn_sim = f32::MAX;
+        let mut nn_of_isolated = ids[0];
+
+        for &i in &ids {
+            let mut best_j = ids[0];
+            let mut best_sim = f32::MIN;
+            for &j in &ids {
+                if i == j {
+                    continue;
+                }
+                let sim = cosine_similarity_centroids(&centroids[&i], &centroids[&j]);
+                if sim > best_sim {
+                    best_sim = sim;
+                    best_j = j;
+                }
+            }
+            log::debug!(
+                "DIARIZATION: cluster {} ({:.1}s) nearest={} sim={:.3}",
+                i,
+                durations.get(&i).unwrap_or(&0.0),
+                best_j,
+                best_sim
+            );
+            if best_sim < lowest_nn_sim {
+                lowest_nn_sim = best_sim;
+                most_isolated = i;
+                nn_of_isolated = best_j;
+            }
+        }
+
+        log::warn!(
+            "DIARIZATION: cap={}: merging most-isolated speaker {} ({:.1}s) → speaker {} ({:.1}s) (nn sim={:.3})",
+            cap,
+            most_isolated,
+            durations.get(&most_isolated).unwrap_or(&0.0),
+            nn_of_isolated,
+            durations.get(&nn_of_isolated).unwrap_or(&0.0),
+            lowest_nn_sim
+        );
+        for seg in segments.iter_mut() {
+            if seg.speaker_id == most_isolated {
+                seg.speaker_id = nn_of_isolated;
+            }
+        }
+        centroids.remove(&most_isolated);
+    }
 }
 
 #[cfg(test)]
@@ -954,6 +1065,69 @@ mod tests {
         assert_ne!(s6, s9, "the two groups must be different speakers");
     }
 
+    /// Per-meeting max_speakers override takes precedence over the global default.
+    /// Sets the global cap wide (10) and the per-meeting override narrow (3), then
+    /// asserts diarization yields <= 3 speakers — proving the override, not the
+    /// global, drove the merge. Restores both values afterwards.
+    ///
+    /// `cargo test -p meetily-flash --features vulkan -- --ignored test_per_meeting_override_caps_speakers`
+    #[tokio::test]
+    #[ignore]
+    async fn test_per_meeting_override_caps_speakers() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let db_path = r"C:\Users\user\AppData\Roaming\com.meetily.ai\meeting_minutes.sqlite";
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=rw", db_path))
+            .await
+            .expect("DB connect");
+
+        let meeting_id = "meeting-00000000-0000-4000-8000-000000000002";
+
+        let (original_global, original_model): (i64, String) =
+            sqlx::query_as("SELECT max_speakers, speaker_embedding_model FROM settings LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .expect("read global");
+
+        sqlx::query("UPDATE settings SET speaker_embedding_model = 'nemo_titanet', max_speakers = 10 WHERE id = '1'")
+            .execute(&pool)
+            .await
+            .expect("set global wide");
+        sqlx::query("UPDATE meetings SET max_speakers = 3 WHERE id = ?")
+            .bind(meeting_id)
+            .execute(&pool)
+            .await
+            .expect("set per-meeting override");
+
+        let threshold_fp = (0.65f32 * 65536.0) as u32;
+        let registry = Arc::new(Mutex::new(None));
+        let result = run_diarization_for_meeting(&pool, meeting_id, threshold_fp, registry)
+            .await
+            .expect("diarization");
+
+        eprintln!(
+            "per-meeting override=3, global=10 -> {} speakers",
+            result.speaker_count
+        );
+
+        sqlx::query("UPDATE settings SET max_speakers = ?, speaker_embedding_model = ? WHERE id = '1'")
+            .bind(original_global)
+            .bind(&original_model)
+            .execute(&pool)
+            .await
+            .expect("restore global");
+        sqlx::query("UPDATE meetings SET max_speakers = NULL WHERE id = ?")
+            .bind(meeting_id)
+            .execute(&pool)
+            .await
+            .expect("clear override");
+
+        assert!(
+            result.speaker_count <= 3,
+            "per-meeting override of 3 must cap the result (global was 10), got {}",
+            result.speaker_count
+        );
+    }
+
     #[tokio::test]
     async fn auto_label_does_not_overwrite_manual() {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:")
@@ -1007,5 +1181,308 @@ mod tests {
         assert!(!updated, "auto-label should not overwrite manual label");
         assert_eq!(row.0, "Alice");
         assert_eq!(row.1, "manual");
+    }
+
+    async fn setup_meeting_cap_db() -> SqlitePool {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("DB connect");
+        sqlx::query("CREATE TABLE meetings (id TEXT PRIMARY KEY, max_speakers INTEGER)")
+            .execute(&pool)
+            .await
+            .expect("create meetings");
+        sqlx::query("CREATE TABLE settings (id TEXT PRIMARY KEY, max_speakers INTEGER NOT NULL DEFAULT 10)")
+            .execute(&pool)
+            .await
+            .expect("create settings");
+        sqlx::query("INSERT INTO settings (id, max_speakers) VALUES ('1', 10)")
+            .execute(&pool)
+            .await
+            .expect("seed settings");
+        pool
+    }
+
+    #[tokio::test]
+    async fn migration_adds_nullable_max_speakers_column() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("DB connect");
+        sqlx::query("CREATE TABLE meetings (id TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .expect("create meetings");
+        let sql = include_str!("../../../migrations/20260616000000_per_meeting_max_speakers.sql");
+        sqlx::query(sql)
+            .execute(&pool)
+            .await
+            .expect("migration applies");
+        sqlx::query("INSERT INTO meetings (id) VALUES ('m1')")
+            .execute(&pool)
+            .await
+            .expect("insert");
+        let (cap,): (Option<i64>,) =
+            sqlx::query_as("SELECT max_speakers FROM meetings WHERE id = 'm1'")
+                .fetch_one(&pool)
+                .await
+                .expect("fetch");
+        assert_eq!(cap, None, "freshly inserted meeting must default to NULL (inherit global)");
+    }
+
+    #[test]
+    fn resolve_effective_cap_override_wins() {
+        assert_eq!(resolve_effective_cap(Some(3), 10), 3);
+    }
+
+    #[test]
+    fn resolve_effective_cap_falls_back_to_global() {
+        assert_eq!(resolve_effective_cap(None, 6), 6);
+        assert_eq!(resolve_effective_cap(None, 10), 10);
+    }
+
+    #[tokio::test]
+    async fn resolve_effective_cap_for_meeting_reads_override_then_global() {
+        let pool = setup_meeting_cap_db().await;
+        sqlx::query("INSERT INTO meetings (id, max_speakers) VALUES ('m1', 3)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO meetings (id) VALUES ('m2')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolve_effective_cap_for_meeting(&pool, "m1").await,
+            3,
+            "per-meeting override 3 beats global 10"
+        );
+        assert_eq!(
+            resolve_effective_cap_for_meeting(&pool, "m2").await,
+            10,
+            "NULL override falls back to global 10"
+        );
+        sqlx::query("UPDATE settings SET max_speakers = 6 WHERE id = '1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolve_effective_cap_for_meeting(&pool, "m1").await,
+            3,
+            "override is unaffected by a global change"
+        );
+        assert_eq!(
+            resolve_effective_cap_for_meeting(&pool, "m2").await,
+            6,
+            "non-overridden meeting tracks the new global"
+        );
+    }
+
+    #[test]
+    fn enforce_cap_is_noop_below_threshold() {
+        let mut centroids = std::collections::HashMap::<u32, Vec<f32>>::new();
+        centroids.insert(0, vec![1.0, 0.0]);
+        centroids.insert(1, vec![0.0, 1.0]);
+        centroids.insert(2, vec![1.0, 1.0]);
+        let mut segments = vec![
+            SpeakerSegment { start_seconds: 0.0, end_seconds: 1.0, speaker_id: 0 },
+            SpeakerSegment { start_seconds: 1.0, end_seconds: 2.0, speaker_id: 1 },
+            SpeakerSegment { start_seconds: 2.0, end_seconds: 3.0, speaker_id: 2 },
+        ];
+        let before = centroids.len();
+        enforce_max_speakers_cap(&mut centroids, &mut segments, 5);
+        assert_eq!(centroids.len(), before, "cap above cluster count must not merge");
+        assert_eq!(segments[0].speaker_id, 0);
+        assert_eq!(segments[1].speaker_id, 1);
+        assert_eq!(segments[2].speaker_id, 2);
+    }
+
+    #[test]
+    fn enforce_cap_merges_most_isolated_cluster() {
+        let mut centroids = std::collections::HashMap::<u32, Vec<f32>>::new();
+        centroids.insert(0, vec![1.0, 0.0]);
+        centroids.insert(1, vec![0.95, 0.05]);
+        centroids.insert(2, vec![0.0, 1.0]);
+        let mut segments = vec![
+            SpeakerSegment { start_seconds: 0.0, end_seconds: 1.0, speaker_id: 0 },
+            SpeakerSegment { start_seconds: 1.0, end_seconds: 2.0, speaker_id: 2 },
+        ];
+        enforce_max_speakers_cap(&mut centroids, &mut segments, 2);
+        assert_eq!(centroids.len(), 2, "cap=2 must merge 3 clusters down to 2");
+        assert!(!centroids.contains_key(&2), "most-isolated cluster 2 must be absorbed");
+        assert_eq!(
+            segments.iter().filter(|s| s.speaker_id == 2).count(),
+            0,
+            "segments must be relabelled away from the absorbed cluster"
+        );
+    }
+
+    // Integration: wires the REAL AHC clustering (cluster_by_centroids) into the REAL
+    // override cap (enforce_max_speakers_cap). The unit tests above exercise each in
+    // isolation on hand-built centroids; this proves they compose to enforce a
+    // per-meeting override on actual clustering output — no model, no GPU, no audio.
+    // The embedding-inference step that needs vulkan stays in the #[ignore] test.
+    fn four_speaker_chunks() -> Vec<crate::audio::speaker::sherpa_adapter::Chunk> {
+        use crate::audio::speaker::sherpa_adapter::Chunk;
+        let a = vec![1.0, 0.0, 0.0, 0.0];
+        vec![
+            Chunk { start_sample: 0, end_sample: 48000, duration_secs: 3.0, embedding: a.clone() },
+            Chunk { start_sample: 48000, end_sample: 96000, duration_secs: 3.0, embedding: a.clone() },
+            Chunk { start_sample: 96000, end_sample: 144000, duration_secs: 3.0, embedding: vec![0.0, 1.0, 0.0, 0.0] },
+            Chunk { start_sample: 144000, end_sample: 192000, duration_secs: 3.0, embedding: vec![0.0, 0.0, 1.0, 0.0] },
+            Chunk { start_sample: 192000, end_sample: 240000, duration_secs: 3.0, embedding: vec![0.0, 0.0, 0.0, 1.0] },
+        ]
+    }
+
+    fn segments_from_labels(
+        labels: &[u32],
+    ) -> Vec<SpeakerSegment> {
+        labels
+            .iter()
+            .enumerate()
+            .map(|(i, &sid)| SpeakerSegment {
+                start_seconds: i as f64,
+                end_seconds: i as f64 + 3.0,
+                speaker_id: sid,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cluster_then_cap_enforces_override_on_real_clustering() {
+        let chunks = four_speaker_chunks();
+        let (labels, mut centroids) =
+            crate::audio::speaker::sherpa_adapter::cluster_by_centroids(&chunks, 0.5);
+        assert_eq!(
+            centroids.len(),
+            4,
+            "real AHC yields 4 clusters for 4 orthogonal speakers"
+        );
+        let mut segments = segments_from_labels(&labels);
+        enforce_max_speakers_cap(&mut centroids, &mut segments, 3);
+        let speakers: std::collections::HashSet<u32> =
+            segments.iter().map(|s| s.speaker_id).collect();
+        assert_eq!(
+            speakers.len(),
+            3,
+            "per-meeting cap=3 must reduce the real 4-cluster output to 3"
+        );
+    }
+
+    #[test]
+    fn cluster_then_cap_is_noop_when_cap_above_cluster_count() {
+        let chunks = four_speaker_chunks();
+        let (labels, mut centroids) =
+            crate::audio::speaker::sherpa_adapter::cluster_by_centroids(&chunks, 0.5);
+        let mut segments = segments_from_labels(&labels);
+        let before = centroids.len();
+        enforce_max_speakers_cap(&mut centroids, &mut segments, 10);
+        assert_eq!(
+            centroids.len(),
+            before,
+            "cap above cluster count is an upper bound, not a target"
+        );
+    }
+
+    #[test]
+    fn validate_meeting_cap_rejects_out_of_range() {
+        assert!(validate_meeting_cap(1).is_err());
+        assert!(validate_meeting_cap(21).is_err());
+        assert!(validate_meeting_cap(0).is_err());
+        assert!(validate_meeting_cap(2).is_ok());
+        assert!(validate_meeting_cap(20).is_ok());
+    }
+
+    #[tokio::test]
+    async fn set_meeting_cap_rejects_unknown_meeting() {
+        let pool = setup_meeting_cap_db().await;
+        let err = set_meeting_max_speakers_inner(&pool, "nonexistent", Some(3)).await;
+        assert!(err.is_err(), "unknown meeting id must be rejected");
+    }
+
+    #[tokio::test]
+    async fn set_meeting_cap_rejects_invalid_range() {
+        let pool = setup_meeting_cap_db().await;
+        sqlx::query("INSERT INTO meetings (id) VALUES ('m1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(set_meeting_max_speakers_inner(&pool, "m1", Some(1)).await.is_err());
+        assert!(set_meeting_max_speakers_inner(&pool, "m1", Some(21)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn set_meeting_cap_none_clears_override_to_null() {
+        let pool = setup_meeting_cap_db().await;
+        sqlx::query("INSERT INTO meetings (id, max_speakers) VALUES ('m1', 3)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        set_meeting_max_speakers_inner(&pool, "m1", None)
+            .await
+            .expect("clear");
+        let (cap,): (Option<i64>,) =
+            sqlx::query_as("SELECT max_speakers FROM meetings WHERE id = 'm1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(cap, None, "None must clear the override to NULL");
+    }
+
+    #[tokio::test]
+    async fn set_meeting_cap_persists_value() {
+        let pool = setup_meeting_cap_db().await;
+        sqlx::query("INSERT INTO meetings (id) VALUES ('m1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        set_meeting_max_speakers_inner(&pool, "m1", Some(4))
+            .await
+            .expect("set");
+        let (cap,): (Option<i64>,) =
+            sqlx::query_as("SELECT max_speakers FROM meetings WHERE id = 'm1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(cap, Some(4));
+    }
+
+    #[tokio::test]
+    async fn get_meeting_max_speakers_returns_effective_and_global() {
+        let pool = setup_meeting_cap_db().await;
+        sqlx::query("INSERT INTO meetings (id) VALUES ('m1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO meetings (id, max_speakers) VALUES ('m2', 3)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let r1 = get_meeting_max_speakers_inner(&pool, "m1").await.expect("get m1");
+        assert_eq!(r1.r#override, None);
+        assert_eq!(r1.effective, 10);
+        assert_eq!(r1.global_default, 10);
+        let r2 = get_meeting_max_speakers_inner(&pool, "m2").await.expect("get m2");
+        assert_eq!(r2.r#override, Some(3));
+        assert_eq!(r2.effective, 3);
+        assert_eq!(r2.global_default, 10);
+    }
+
+    #[tokio::test]
+    async fn effective_cap_reflects_global_change_when_override_null() {
+        let pool = setup_meeting_cap_db().await;
+        sqlx::query("INSERT INTO meetings (id) VALUES ('m1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = get_meeting_max_speakers_inner(&pool, "m1").await.unwrap();
+        assert_eq!(before.effective, 10);
+        sqlx::query("UPDATE settings SET max_speakers = 6 WHERE id = '1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let after = get_meeting_max_speakers_inner(&pool, "m1").await.unwrap();
+        assert_eq!(
+            after.effective, 6,
+            "changing global default must immediately affect non-overridden meetings"
+        );
     }
 }

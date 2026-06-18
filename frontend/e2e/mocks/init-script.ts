@@ -60,6 +60,12 @@ export const TAURI_MOCK_INIT_SCRIPT = `
       var arr = listeners.get(event) || [];
       arr.forEach(function (l) { l.fn({ event: event, payload: payload, id: 0 }); });
     },
+    // Read-only probe so a spec can wait until the UI has subscribed before
+    // emitting — the dialog registers its completion listener asynchronously
+    // on open, and emitting before subscription silently drops the event.
+    listenerCount: function (event) {
+      return (listeners.get(event) || []).length;
+    },
   };
   Object.defineProperty(window, '__tauriMockEventBus', {
     value: eventBus,

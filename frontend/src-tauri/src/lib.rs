@@ -1132,6 +1132,8 @@ pub fn run() {
             audio::speaker::commands::set_speaker_merge_threshold,
             audio::speaker::commands::get_max_speakers,
             audio::speaker::commands::set_max_speakers,
+            audio::speaker::commands::get_meeting_max_speakers,
+            audio::speaker::commands::set_meeting_max_speakers,
             audio::speaker::model_download::download_speaker_models,
             audio::speaker::model_download::check_speaker_models_available,
             audio::speaker::commands::get_diarization_enabled,

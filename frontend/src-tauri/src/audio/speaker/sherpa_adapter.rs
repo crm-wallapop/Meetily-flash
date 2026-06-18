@@ -53,6 +53,11 @@ impl SpeakerEmbeddingPort for SherpaOnnxEmbeddingAdapter {
                 sample_rate
             ));
         }
+        if is_effectively_silent(audio) {
+            return Err(anyhow!(
+                "audio is silent (near-zero energy); cannot extract a meaningful speaker embedding"
+            ));
+        }
 
         let stream = self.extractor.create_stream()
             .ok_or_else(|| anyhow!("failed to create online stream"))?;
@@ -261,6 +266,9 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
 
 impl SherpaOnnxDiarizationAdapter {
     fn extract_embedding(&self, audio: &[f32], sample_rate: u32) -> Option<Vec<f32>> {
+        if is_effectively_silent(audio) {
+            return None;
+        }
         let stream = self.extractor.create_stream()?;
         stream.accept_waveform(sample_rate as i32, audio);
         if !self.extractor.is_ready(&stream) {
@@ -451,7 +459,7 @@ fn merge_adjacent(mut segments: Vec<SpeakerSegment>) -> Vec<SpeakerSegment> {
     merged
 }
 
-fn cluster_by_centroids(chunks: &[Chunk], threshold: f32) -> (Vec<u32>, HashMap<u32, Vec<f32>>) {
+pub(crate) fn cluster_by_centroids(chunks: &[Chunk], threshold: f32) -> (Vec<u32>, HashMap<u32, Vec<f32>>) {
     let n = chunks.len();
     if n == 0 {
         return (Vec::new(), HashMap::new());
@@ -533,6 +541,18 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (norm_a * norm_b)
+}
+
+// The diarization pipeline strips silence earlier via energy VAD, but the
+// extractor guards again: a direct caller must not feed the model silence and
+// get back a degenerate vector that corrupts centroid clustering. Threshold is
+// mean-square energy; RMS < 1e-5 is ~-100 dBFS, far below any real speech.
+fn is_effectively_silent(audio: &[f32]) -> bool {
+    if audio.is_empty() {
+        return true;
+    }
+    let sum_sq: f32 = audio.iter().map(|&s| s * s).sum();
+    (sum_sq / audio.len() as f32) < 1e-10
 }
 
 fn renumber_speakers(segments: Vec<SpeakerSegment>) -> (Vec<SpeakerSegment>, HashMap<u32, u32>) {
@@ -810,6 +830,22 @@ mod tests {
         let a = vec![1.0, 0.0];
         let b = vec![0.0, 0.0];
         assert!((cosine_similarity(&a, &b)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn is_effectively_silent_rejects_all_zeros() {
+        assert!(is_effectively_silent(&vec![0.0f32; 16000]));
+    }
+
+    #[test]
+    fn is_effectively_silent_rejects_empty() {
+        assert!(is_effectively_silent(&[]));
+    }
+
+    #[test]
+    fn is_effectively_silent_accepts_real_audio() {
+        let audio: Vec<f32> = (0..16000).map(|i| ((i as f32) * 0.001).sin() * 0.1).collect();
+        assert!(!is_effectively_silent(&audio));
     }
 
     #[test]

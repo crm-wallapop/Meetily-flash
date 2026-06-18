@@ -62,6 +62,25 @@ export async function setMaxSpeakers(cap: number): Promise<void> {
   return invoke<void>("set_max_speakers", { cap });
 }
 
+export interface MeetingMaxSpeakers {
+  override: number | null;
+  effective: number;
+  global_default: number;
+}
+
+export async function getMeetingMaxSpeakers(
+  meetingId: string,
+): Promise<MeetingMaxSpeakers> {
+  return invoke<MeetingMaxSpeakers>("get_meeting_max_speakers", { meetingId });
+}
+
+export async function setMeetingMaxSpeakers(
+  meetingId: string,
+  cap: number | null,
+): Promise<void> {
+  return invoke<void>("set_meeting_max_speakers", { meetingId, cap });
+}
+
 export async function getDiarizationEnabled(): Promise<boolean> {
   return invoke<boolean>("get_diarization_enabled");
 }
