@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { isOllamaNotInstalledError } from '../lib/utils';
 import {
   getModelIcon,
@@ -179,8 +179,14 @@ describe('loadBetaFeatures (localStorage path)', () => {
   });
 
   it('falls back to defaults on corrupted JSON', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     localStorage.setItem('betaFeatures', 'NOT JSON {{}}');
     expect(loadBetaFeatures()).toEqual(DEFAULT_BETA_FEATURES);
+    expect(spy).toHaveBeenCalledWith(
+      '[BetaFeatures] Failed to load from localStorage:',
+      expect.any(SyntaxError),
+    );
+    spy.mockRestore();
   });
 
   it('returns defaults when window is undefined (SSR)', () => {
