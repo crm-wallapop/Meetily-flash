@@ -6,24 +6,33 @@
 
 ---
 
-## Requirement: System audio is mixed at 70 % of microphone level
+## Purpose
+
+Governs the professional audio mixing, loudness normalization (EBU R128 short-term), noise gating, gain cap, and recording-capture pipeline that produce the saved audio file. The recording path encodes audio to MP4 only; no VAD or Whisper inference runs during capture.
+
+## Requirements
+
+### Requirement: System audio is mixed at 70 % of microphone level
 
 In the `ProfessionalAudioMixer`, system audio (WASAPI loopback) SHALL be scaled to
 0.7 before being summed with the microphone signal. This prevents system audio
 (notifications, music, other participants) from drowning out the local microphone.
 
-### Scenario: System audio is present at full scale
+#### Scenario: System audio is present at full scale
 - **WHEN** system audio samples arrive at amplitude 1.0 AND microphone is silent
 - **THEN** the mixed output amplitude is ≤ 0.7
 
-### Scenario: Mix does not clip
+#### Scenario: Mix does not clip
 - **WHEN** both mic and system audio arrive at amplitude 1.0 simultaneously
 - **THEN** the mixed output is clamped and does not exceed ±1.0
   (the mixer applies soft clip / normalisation before writing to disk)
 
 ---
 
-## Requirement: RNNoise suppression is applied to the microphone channel
+### Requirement: RNNoise suppression is applied to the microphone channel
+
+
+When enabled, the mic channel SHALL pass through RNNoise before being mixed, reducing steady-state background noise (fan, HVAC) in recordings.
 
 > **Status: implementation flag `RNNOISE_APPLY_ENABLED` is currently `false` in
 > `ffmpeg_mixer.rs`. This requirement documents the intended behaviour when enabled.**
@@ -31,98 +40,111 @@ In the `ProfessionalAudioMixer`, system audio (WASAPI loopback) SHALL be scaled 
 > **Forward reference:** This flag will be flipped to `true` with calibrated Silero VAD
 > threshold tuning in the `tune-vad-rnnoise` in-flight change.
 
-When enabled, the mic channel SHALL pass through RNNoise before being mixed, reducing
-steady-state background noise (fan, HVAC) in recordings.
-
-### Scenario: Suppression is enabled
+#### Scenario: Suppression is enabled
 - **WHEN** `RNNOISE_APPLY_ENABLED = true`
 - **THEN** the mic channel processed by RNNoise before mixing has lower noise floor
   than the raw mic channel for steady-state background noise
 
-### Scenario: Suppression is disabled (current default)
+#### Scenario: Suppression is disabled (current default)
 - **WHEN** `RNNOISE_APPLY_ENABLED = false`
 - **THEN** the mic signal is passed through unchanged; no RNNoise processing occurs
 
 ---
 
-## Requirement: EBU R128 short-term normalization targets −23 LUFS
+### Requirement: EBU R128 short-term normalization targets −23 LUFS
 
-The `LoudnessNormalizer` in `audio_processing.rs` uses EBU R128 **short-term mode** (3-second
+The `LoudnessNormalizer` in `audio_processing.rs` SHALL use EBU R128 **short-term mode** (3-second
 window) to measure loudness and drive gain toward −23 LUFS. Integrated (cumulative) mode is NOT
 used for the normalization gain decision; it is measured only for reference.
 
-### Scenario: Short-term mode is active
+#### Scenario: Short-term mode is active
 - **WHEN** `LoudnessNormalizer::new()` is called
 - **THEN** the internal `EbuR128` instance is constructed with `Mode::S | Mode::TRUE_PEAK`
   so that `loudness_shortterm()` returns `Ok` once ≥ 3 s of audio has been fed
 
-### Scenario: Quiet phase does not cause clipping on loud speech
+#### Scenario: Quiet phase does not cause clipping on loud speech
 - **GIVEN** 60 s of −50 dBFS noise followed by 1 s of −20 dBFS speech
 - **WHEN** the normalizer processes this sequence
 - **THEN** output peak does not exceed 0.891 (−1 dBFS true-peak limit) AND gain never exceeds 3.98× (+12 dB cap)
 
-### Scenario: Clean speech output matches target LUFS
+#### Scenario: Clean speech output matches target LUFS
 - **WHEN** a 5 s sine sweep at −20 dBFS is processed
 - **THEN** output integrated LUFS is within ±2 LU of −23 LUFS AND the FFT magnitude profile
   matches the input within tolerance (the gate does not strip quiet onsets)
 
 ---
 
-## Requirement: Gain cap of +12 dB prevents excessive amplification
+### Requirement: Gain cap of +12 dB prevents excessive amplification
 
-After computing the normalization gain from `loudness_shortterm()`, `gain_linear` is clamped
+After computing the normalization gain from `loudness_shortterm()`, `gain_linear` SHALL be clamped
 to ≤ 3.981 (= +12 dB). There is no minimum clamp — attenuation is unlimited.
 
-### Scenario: Gain cap is enforced
+#### Scenario: Gain cap is enforced
 - **WHEN** `loudness_shortterm()` returns a value ≤ −60 LUFS (e.g., near-silence)
-- **THEN** `gain_linear` is clamped to 3.981_071_7, never exceeds it
+- **THEN** `gain_linear` SHALL be clamped to 3.981_071_7, never exceeds it
 
 ---
 
-## Requirement: Noise gate suppresses sub-threshold loudness measurement
+### Requirement: Noise gate suppresses sub-threshold loudness measurement
 
-A 100ms RMS window (4 800 samples at 48 kHz) is accumulated before each `ebur128.add_frames_f32()`
+A 100ms RMS window (4 800 samples at 48 kHz) SHALL be accumulated before each `ebur128.add_frames_f32()`
 call. If the window RMS is below `gate_floor_dbfs`, the EBU R128 measurement is skipped for that
 window; gain from the previous measured window is applied to the output samples unchanged. The
 gate floor defaults to −30 dBFS and is configurable per-recording.
 
-### Scenario: Sub-threshold window skips measurement but still applies gain
+#### Scenario: Sub-threshold window skips measurement but still applies gain
 - **WHEN** a 100ms chunk whose RMS is below the gate floor is processed
 - **THEN** `ebur128.add_frames_f32()` is NOT called AND output samples still receive the current `gain_linear`
 
-### Scenario: Noise floor is not lifted
+#### Scenario: Noise floor is not lifted
 - **WHEN** 30 s of −40 dBFS ambient noise is processed
 - **THEN** output RMS stays below −28 LUFS (noise gate suppresses measurement, gain stays at 1.0×)
 
-### Scenario: Loud speaker is attenuated
+#### Scenario: Loud speaker is attenuated
 - **WHEN** 5 s of −5 dBFS speech is processed
 - **THEN** `gain_linear < 1.0` (attenuates) AND output stays below the TruePeak limit
 
 ---
 
-## Requirement: Gate floor is configurable and persisted
+### Requirement: Gate floor is configurable and persisted
 
-The user can set `noise_gate_floor_dbfs` (range −60 to −20 dBFS) in Recording Settings. The
+The user SHALL be able to set `noise_gate_floor_dbfs` (range −60 to −20 dBFS) in Recording Settings. The
 value is persisted in `recording_preferences.json` via `set_recording_preferences` / `get_recording_preferences`.
 A change takes effect on the **next recording start**; it does not affect a recording already in progress.
 
+#### Scenario: Persisted value survives restart
+
+- **GIVEN** the user sets `noise_gate_floor_dbfs` to -35 dBFS during a session
+- **WHEN** the app is restarted and a new recording begins
+- **THEN** the gate floor for the new recording is -35 dBFS (read from `recording_preferences.json`)
+
+#### Scenario: Change does not affect an in-progress recording
+
+- **GIVEN** a recording is in progress with gate floor -30 dBFS
+- **WHEN** the user changes `noise_gate_floor_dbfs` to -25 dBFS mid-recording
+- **THEN** the in-progress recording continues using -30 dBFS
+- **AND** the next recording uses -25 dBFS
+
 ---
 
-## Requirement: Normalizer emits real-time gain diagnostics
+### Requirement: Normalizer emits real-time gain diagnostics
 
-During an active recording, the `LoudnessNormalizer` emits a Tauri `audio-normalizer-gain` event
+During an active recording, the `LoudnessNormalizer` SHALL emit a Tauri `audio-normalizer-gain` event
 once per second carrying `{ gain_db: f32 }`, where `gain_db` is the dB-domain mean of the last
 ≤ 30 gain observations (3 s at one observation per 100ms gate window). The channel is torn down
 on `stop_recording()`; no events are emitted outside of an active recording.
 
-### Scenario: Gain readout updates live in status bar
+#### Scenario: Gain readout updates live in status bar
 - **WHEN** a recording is active
 - **THEN** `RecordingStatusBar` shows `Gain: +X.X dB` (or `Gain: —` before the first event)
   and the value updates approximately once per second
 
 ---
 
-## Requirement: GPU backends use flash attention; CPU and OpenCL do not
+### Requirement: GPU backends use flash attention; CPU and OpenCL do not
+
+
+Flash attention SHALL be enabled for Metal, CUDA, and Vulkan. It SHALL be disabled for CPU and OpenCL, which lack the fp16 shader infrastructure required.
 
 > **Status: RESOLVED 2026-05-13.** Vulkan flash attention re-enabled after diagnosis confirmed
 > the 2026-05-12 regression was a hallucination artefact (Whisper receiving isolated noise bursts
@@ -131,18 +153,13 @@ on `stop_recording()`; no events are emitted outside of an active recording.
 > This requirement now governs the **post-meeting retranscription path** exclusively — VAD runs
 > in `retranscription.rs`, not during recording capture.
 
-Flash attention is enabled for Metal, CUDA, and Vulkan. It is disabled for CPU and OpenCL,
-which lack the fp16 shader infrastructure required.
-
-### Scenario: Metal, CUDA, and Vulkan use flash attention
+#### Scenario: Metal, CUDA, and Vulkan use flash attention
 - **WHEN** the backend is Metal, CUDA, or Vulkan
 - **THEN** `WhisperContextParameters { flash_attn: true }` is used
 
-### Scenario: CPU and OpenCL do not use flash attention
+#### Scenario: CPU and OpenCL do not use flash attention
 - **WHEN** no GPU is detected or the backend is OpenCL
 - **THEN** `WhisperContextParameters { flash_attn: false }` is used
-
-## ADDED Requirements
 
 ### Requirement: Recording start is synchronous — no pre-flight model checks
 

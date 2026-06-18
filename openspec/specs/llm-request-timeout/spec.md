@@ -1,3 +1,9 @@
+# LLM Request Timeout — Capability Spec
+
+## Purpose
+
+Governs the maximum HTTP request timeout the Rust Tauri process applies to every LLM provider call, ensuring summary generation cannot hang indefinitely.
+
 ## Requirements
 
 ### Requirement: Per-request LLM timeout

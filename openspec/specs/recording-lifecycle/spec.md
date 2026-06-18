@@ -6,7 +6,11 @@
 
 ---
 
-## Requirement: Status bar clears within 1 s of stop command
+## Purpose
+
+The recording lifecycle governs start, stop, and shutdown of meeting capture. It guarantees the UI reflects recording state changes within strict time bounds while the remaining shutdown work (audio flush, SQLite save, phase reset, scheduler gate release) proceeds asynchronously in `background_shutdown`.
+## Requirements
+### Requirement: Status bar clears within 1 s of stop command
 
 When the user invokes `stop_recording`, the `RecordingStatusBar` SHALL disappear
 (i.e., `isRecording` becomes `false` in the frontend) no later than **1 second**
@@ -14,7 +18,7 @@ after the audio streams are released. The remaining shutdown work — MP4 flush 
 finalization, SQLite row creation, phase reset, scheduler gate release — runs in the
 background (`background_shutdown` task) and does NOT block the UI update.
 
-### Scenario: UI state is unambiguous immediately after Stop
+#### Scenario: UI state is unambiguous immediately after Stop
 
 - **GIVEN** a recording is active
 - **WHEN** `stop_recording` is invoked
@@ -24,7 +28,7 @@ background (`background_shutdown` task) and does NOT block the UI update.
 - **AND** the disabled Stop button and the status label convey the SAME message:
   recording has ended, background work is in progress
 
-### Scenario: Stop with a background_shutdown task in flight
+#### Scenario: Stop with a background_shutdown task in flight
 
 - **GIVEN** a recording is active
 - **WHEN** `stop_recording` is invoked
@@ -37,14 +41,11 @@ background (`background_shutdown` task) and does NOT block the UI update.
 
 ---
 
-## Requirement: Stop command is idempotent
+#### Requirement: Stop command is idempotent
 
-A second invocation of `stop_recording` while the first is still in progress
-SHALL be a no-op: the audio streams, transcription task, and file saver are owned
-by exactly one shutdown sequence; a concurrent second call finds them already
-released.
+A second `stop_recording` invocation while the first is still in progress SHALL be a no-op. The audio streams, transcription task, and file saver are owned by exactly one shutdown sequence, so a concurrent second call finds them already released.
 
-### Scenario: User double-presses the Stop button
+#### Scenario: User double-presses the Stop button
 
 - **WHEN** the user presses Stop AND immediately presses Stop again before the
   status bar has cleared
@@ -54,19 +55,19 @@ released.
 
 ---
 
-## Requirement: Audio capture halts within 1 second of stop command
+#### Requirement: Audio capture halts within 1 second of stop command
 
 No audio samples recorded after the CPAL streams are released SHALL appear in
 the saved file. The incremental saver flushes its in-memory buffer before
 finalizing, but the flush boundary is the moment of stream release.
 
-### Scenario: User speaks immediately after pressing Stop
+#### Scenario: User speaks immediately after pressing Stop
 
 - **GIVEN** the user presses Stop at time T
 - **WHEN** the user speaks at time T + 2 s (after streams are released)
 - **THEN** that speech is NOT present in the saved audio file
 
-### Scenario: User speaks in the 1-second window while streams are closing
+#### Scenario: User speaks in the 1-second window while streams are closing
 
 - **GIVEN** the user presses Stop at time T
 - **WHEN** the user speaks at time T + 0.5 s (streams may still be draining)
@@ -74,8 +75,6 @@ finalizing, but the flush boundary is the moment of stream release.
   duration of the capture window SHALL NOT exceed 1 second from the stop command
 
 ---
-
-## ADDED Requirements
 
 ### Requirement: `start_recording` generates and returns the meeting identifier
 
@@ -302,3 +301,47 @@ If `folder_path` is `None` or the folder does not exist on disk, the deletion su
 - **THEN** the DB rows are deleted
 - **AND** the folder deletion is skipped with a logged warning
 - **AND** no filesystem operation is performed outside the recordings root
+
+### Requirement: Diarization queue phase does not delay the recording-stop status bar guarantee
+
+The `Diarizing` queue phase SHALL run as a separate job after `background_shutdown` completes. It SHALL NOT block or delay the existing 1-second status-bar-clear guarantee of `stop_recording`: the `RecordingStatusBar` disappears within 1 second of stream release regardless of whether diarization is enabled or still queued.
+
+#### Scenario: Diarization phase does not delay the 1-second status bar clear
+
+- **GIVEN** a recording is active and speaker diarization is enabled
+- **WHEN** `stop_recording` is invoked
+- **THEN** the status bar still clears within 1 second of stream release
+- **AND** the `Diarizing` queue phase runs later as a separate job, after `background_shutdown` completes, and never blocks the status bar UI
+
+---
+
+### Requirement: TranscriptSegment and TranscriptUpdate carry an optional speaker field
+
+`TranscriptSegment` (Rust) and `TranscriptUpdate` (Tauri event) SHALL include an optional `speaker: Option<String>` field. The field SHALL be `None` during recording (no speaker labels available in offline-only mode) and SHALL be populated after the `Diarizing` queue phase completes.
+
+`TranscriptUpdate` SHALL also include an optional `token_timestamps: Option<String>` field containing a JSON array of `{word: string, start_ms: i64, end_ms: i64}` objects, populated when the transcription provider supports token-level timestamps (Whisper). The field SHALL be `None` for providers that do not support token timestamps (Parakeet).
+
+#### Scenario: TranscriptUpdate during recording has no speaker
+
+- **WHEN** a `TranscriptUpdate` event is emitted during recording
+- **THEN** `speaker` is `None`
+- **AND** `token_timestamps` is populated if the Whisper provider is active
+
+#### Scenario: TranscriptUpdate speaker populated after diarization
+
+- **WHEN** the `Diarizing` phase completes for a meeting
+- **THEN** the transcript rows in the database have `speaker` set to the assigned label
+- **AND** the frontend receives a `diarization-complete` event with `{meeting_id, speakers: [{label, name, color}]}`
+
+---
+
+### Requirement: `diarization-complete` event updates frontend speaker state
+
+After the `Diarizing` phase completes, the Rust side SHALL emit a `diarization-complete` Tauri event with the meeting ID and an array of speaker assignments (cluster label, resolved name, color). The frontend SHALL update the transcript view with speaker badges for the meeting.
+
+#### Scenario: Frontend receives diarization-complete
+
+- **WHEN** the `Diarizing` phase completes for meeting `M`
+- **THEN** a `diarization-complete` event is emitted with `{meeting_id: "M", speakers: [{label: "Speaker 1", name: "Alice", color: "#0EA5E9"}, {label: "Speaker 2", name: null, color: "#F97316"}]}`
+- **AND** the frontend updates the meeting's transcript view with speaker badges
+

@@ -5,17 +5,20 @@
 
 ---
 
-## MODIFIED Requirements
+## ADDED Requirements
 
-### Requirement: Status bar clears within 1 s of stop command
+### Requirement: Diarization queue phase does not delay the recording-stop status bar guarantee
 
-When the user invokes `stop_recording`, the `RecordingStatusBar` SHALL disappear (i.e., `isRecording` becomes `false` in the frontend) no later than **1 second** after the audio streams are released. The remaining shutdown work — MP4 flush and finalization, SQLite row creation, phase reset, scheduler gate release — runs in the background (`background_shutdown` task) and does NOT block the UI update.
+The `Diarizing` queue phase SHALL run as a separate job after `background_shutdown` completes. It SHALL NOT block or delay the existing 1-second status-bar-clear guarantee of `stop_recording`: the `RecordingStatusBar` disappears within 1 second of stream release regardless of whether diarization is enabled or still queued.
 
-*(No behavior change — the existing requirement text is unchanged. The diarization phase runs as a separate queue job after `background_shutdown` completes and does not affect the 1-second status bar guarantee.)*
+#### Scenario: Diarization phase does not delay the 1-second status bar clear
+
+- **GIVEN** a recording is active and speaker diarization is enabled
+- **WHEN** `stop_recording` is invoked
+- **THEN** the status bar still clears within 1 second of stream release
+- **AND** the `Diarizing` queue phase runs later as a separate job, after `background_shutdown` completes, and never blocks the status bar UI
 
 ---
-
-## ADDED Requirements
 
 ### Requirement: TranscriptSegment and TranscriptUpdate carry an optional speaker field
 

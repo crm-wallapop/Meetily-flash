@@ -1,3 +1,9 @@
+# Meeting Auto-Detect — Capability Spec
+
+## Purpose
+
+Governs automatic detection of active Google Meet calls on Windows (window-title, TCP, and WASAPI signals), auto-start and auto-stop of recordings, smart title resolution, per-call cancel suppression, transcription-queue gating during calls, and the startup GC pass.
+
 ## Requirements
 
 ### Requirement: Detect active Google Meet calls on Windows
@@ -66,9 +72,10 @@ On the `InCall → Idle` transition, `MeetingDetectorPort::notify_exit()` is cal
 
 ### Requirement: Meeting detection gates the transcription queue
 
-> **Status: implemented 2026-05-18** — wired in `lib.rs` as part of `post-meeting-transcription`.
 
 On `meeting-detected`, the system SHALL set `scheduler.meeting_busy = true` and `SHOULD_YIELD = true` so that any in-flight transcription chunk is interrupted at the next yield point and no new jobs are dispatched while a call is active.
+
+> **Status: implemented 2026-05-18** — wired in `lib.rs` as part of `post-meeting-transcription`.
 
 On `meeting-ended`, the system SHALL clear `scheduler.meeting_busy = false`. If `manual_pause_all` is not set, the system SHALL call `queue.resume_all()` (in a spawned async task) to allow queued jobs to continue. If `manual_pause_all` is set (user deliberately paused all background work), the worker SHALL NOT be resumed — only the `meeting_busy` gate is cleared.
 

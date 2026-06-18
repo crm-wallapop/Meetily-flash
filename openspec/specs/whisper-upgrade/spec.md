@@ -1,3 +1,9 @@
+# Whisper Upgrade — Capability Spec
+
+## Purpose
+
+Governs the whisper-rs upgrade: the Rust build must succeed on Windows MSVC, and transcription behaviour must be preserved for existing models.
+
 ## Requirements
 
 ### Requirement: Rust build succeeds on Windows MSVC

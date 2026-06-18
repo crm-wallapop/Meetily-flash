@@ -13,7 +13,7 @@ After the transcription and summarisation phases complete, the system SHALL run 
 1. Decode the audio to 16kHz mono f32 samples via `DecodedAudio::to_whisper_format()`
 2. Read transcript timestamps from the `transcripts` table to define speech segments
 3. Chunk each segment into `SPLIT_TARGET_SECS`-sized pieces (range [`MIN_SPEECH_SECS`, `MAX_CHUNK_SECS`])
-4. Extract a 3DSpeaker embedding for each chunk via `SpeakerEmbeddingExtractor`
+4. Extract a speaker embedding for each chunk via `SpeakerEmbeddingExtractor` (nemo_titanet; see model-selection requirement)
 5. Cluster chunks using centroid-based agglomerative clustering with duration-weighted averaging
 6. Merge short-duration speakers into their cosine-nearest larger cluster
 7. Align transcript rows with diarization speaker segments

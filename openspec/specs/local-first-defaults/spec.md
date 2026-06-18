@@ -1,3 +1,9 @@
+# Local-First Defaults — Capability Spec
+
+## Purpose
+
+Governs the default settings seeded on first boot and the fallback defaults used on edge-case paths, ensuring the app starts local-first (Ollama) with no cloud provider configured.
+
 ## Requirements
 
 ### Requirement: Settings table is seeded on first boot
