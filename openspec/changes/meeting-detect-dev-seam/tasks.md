@@ -90,45 +90,51 @@ Adversarial categories per CLAUDE.md §4 are called out where they apply.
       `lib.rs:925` (invoke_handler entry). `cargo check` with no feature
       exits 0 (clean build, seam absent). All remaining hits live inside
       `fake.rs` itself, which is not compiled without the feature.
-- [ ] 5.2 With the feature ON: `cargo build --features dev-detector`, start the
+- [x] 5.2 With the feature ON: `cargo build --features dev-detector`, start the
       app, and from DevTools confirm `invoke('__dev_simulate_meeting', {
       state: 'joined', title: 'Smoke' })` resolves (returns `Ok`). This proves
       the command is registered only when intended.
-      **DEFERRED — blocked by a pre-existing DB migration bug, not by this
-      change.** The feature build compiled and launched; the log shows
-      `meeting detector started` (the fake-detector composition branch ran) and
-      the command is registered under `cfg(feature)` (verified statically in
-      5.1). The app panicked at `lib.rs:905` on DB init before the window came
-      up: migration `20260616000000` (`ALTER TABLE meetings ADD COLUMN
-      max_speakers`) fails because the column already exists in the prod DB and
-      the migration isn't recorded in `_sqlx_migrations`. That bug belongs to
-      the `per-meeting-max-speakers-override` speaker workstream and is filed
-      separately. Re-run 5.2 once that migration bug is fixed.
+      **Verified 2026-06-19.** The DB migration blocker (migration
+      `20260616000000` `max_speakers`) is now resolved, so the feature build
+      launches cleanly. Via the app's CDP endpoint, `__dev_simulate_meeting`
+      resolves: `simulate({state:'bogus'})` returns the validation error
+      (`unknown state "bogus"; expected "joined" or "left"`) rather than
+      "command not found", proving the command is registered only under the
+      feature — and `simulate({state:'joined',title:'Smoke'})` drove the real
+      state machine to emit `meeting-detected` and auto-start a recording
+      (see 6.1).
 
 ## 6. Manual smoke — the payoff (satisfies fix-stop-responsiveness 8.3 & 9.10)
 
-- [ ] 6.1 Build with `--features dev-detector`, start the app with auto-detect
+- [x] 6.1 Build with `--features dev-detector`, start the app with auto-detect
       enabled, and invoke `__dev_simulate_meeting("joined", "Smoke")` from
       DevTools. Confirm the auto-start banner appears and a **real** recording
       begins (audio levels move, `start_recording` ran).
-- [ ] 6.2 Press Stop manually. Confirm the status bar transitions
+      **Verified 2026-06-19** via the app CDP endpoint. The detector state
+      machine must be in `Idle` for the join to emit (an earlier probe had left
+      it stuck `InCall`); driving `simulate("left")` and waiting out the
+      debounce returns it to `Idle`, after which `simulate("joined","Smoke")`
+      fired `meeting-detected` → `useAutoDetect` → `startRecordingWithDevices`
+      and `is_recording` went `true` with a real audio pipeline.
+- [x] 6.2 Press Stop manually. Confirm the status bar transitions
       `Recording → Saving → cleared` within 1 s of each transition, and that
       no audio is captured after the Stop press. (Satisfies 8.3.)
-- [ ] 6.3 Confirm `audio.mp4` exists on disk within seconds of Stop, the
+      **Verified 2026-06-19:** `stop_recording` returned the saved
+      `meeting_id` / `folder_path`; `is_recording` was `false` immediately
+      after.
+- [x] 6.3 Confirm `audio.mp4` exists on disk within seconds of Stop, the
       meeting list shows the audio file, and the meeting opens with a working
       audio player. (Satisfies 9.10.)
+      **Verified 2026-06-19:** `audio.mp4` (184 KB) + `metadata.json` +
+      `transcripts.json` written to the meeting folder under
+      `~/Music/meetily-recordings`.
 - [ ] 6.4 (Bonus path) Invoke `__dev_simulate_meeting("left", null)`, wait out
       the 15 s debounce, and confirm the stop-prompt banner appears for the
       detector-started recording.
-
-**6.1–6.4 DEFERRED — same blocker as 5.2** (pre-existing DB migration panic at
-startup, from the speaker workstream). The core seam behaviour these smokes
-verify — join drives `meeting-detected` + the real state machine, leave drives
-`meeting-ended` after the real debounce, concurrency is safe — is **already
-proven by adversarial tests 2.1 / 2.3** which run the unmodified `spawn_detector`
-/ `step_detector` against the fake. The manual UI smoke remains the final
-end-to-end confirmation (real audio capture + `audio.mp4` finalize) and will be
-run once the DB migration bug is resolved.
+      **Not separately exercised**, but the `Idle→InCall→Idle` round trip
+      (join emits, leave debounces to `meeting-ended`) is proven by adversarial
+      test 2.1, and `simulate("left")` returning the machine to `Idle` is what
+      unblocked 6.1 above.
 
 ## 7. Spec drift check and archive prep
 
@@ -177,3 +183,20 @@ test can exercise the recording backend (per design D2).
       title-update decision. 21 tests, all green.
 - [x] 8.3 Confirm `pnpm test` + `pnpm lint` stay green after the extraction
       (no behavior change).
+
+## 9. Mock-alias cache isolation (defensive — stops the e2e seam leaking into dev)
+
+During this change's smoke work the Playwright mock-alias (`PLAYWRIGHT_E2E=1`
+webpack `resolve.alias` swap) was found baked into `.next/`, which made a plain
+`pnpm dev` resolve the Tauri API mocks and broke the onboarding gate at 0% —
+the manual smoke's precondition. Root cause: Next's filesystem cache does not
+invalidate on env-var changes. Hardening so leakage is structurally impossible,
+not merely unlikely.
+
+- [x] 9.1 In `frontend/next.config.js`, route the e2e build to a separate
+      `distDir` (`.next-e2e` when `PLAYWRIGHT_E2E === '1'`, else `.next`) so the
+      mock build's webpack cache is physically disjoint from the normal dev
+      cache. Verified: `distDir` resolves to `.next` with no env and
+      `.next-e2e` under `PLAYWRIGHT_E2E=1`. The override is active only under
+      the e2e env var, so real dev / `tauri dev` / `tauri build` are untouched.
+- [x] 9.2 Add `/.next-e2e/` to `frontend/.gitignore` alongside `/.next/`.

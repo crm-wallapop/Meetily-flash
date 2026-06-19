@@ -1,7 +1,16 @@
 const path = require('path');
 
+// The Playwright mock-alias (webpack resolve.alias swap below) must never leak
+// into the normal dev cache: Next's filesystem cache does not invalidate on
+// env-var changes, so a mock build baked into .next/ would later make a plain
+// `pnpm dev` resolve the Tauri API mocks too (the onboarding gate breaks).
+// Routing the e2e build to a separate distDir makes the two caches physically
+// disjoint, so leakage is impossible rather than merely unlikely.
+const isE2E = process.env.PLAYWRIGHT_E2E === '1';
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  distDir: isE2E ? '.next-e2e' : '.next',
   reactStrictMode: false, // Disabled for BlockNote compatibility
   output: 'export',
   images: {
