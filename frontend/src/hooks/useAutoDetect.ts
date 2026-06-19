@@ -28,6 +28,61 @@ interface UseAutoDetectProps {
 const DETECT_TIMEOUT_SECONDS = 10;
 const STOP_TIMEOUT_SECONDS = 10;
 
+// ── Pure decision helpers ──────────────────────────────────────────────────
+// Extracted so the regression-prone auto-detect guard logic is testable without
+// mounting the hook. The hook passes its current ref/state values; these never
+// touch refs, effects, or Tauri.
+
+/** D16/D17: a meeting-detected event should auto-start a recording iff the
+ *  feature is on and nothing is already recording. */
+export function shouldStartOnDetected(opts: {
+  autoDetectMeetings: boolean;
+  isRecording: boolean;
+}): boolean {
+  return opts.autoDetectMeetings && !opts.isRecording;
+}
+
+/** D17: when a meeting re-engages mid stop-prompt debounce, the stop-prompt is
+ *  dismissed before deciding whether to (re)start. */
+export function isStopPromptActiveForRedetect(banner: AutoDetectBannerState): boolean {
+  return banner.visible && banner.mode === 'stop-prompt';
+}
+
+/** Task 7.5: a meeting-ended event should show the stop-prompt only for a
+ *  detector-started recording the user hasn't chosen to keep. */
+export function shouldShowStopPrompt(opts: {
+  autoDetectMeetings: boolean;
+  isRecording: boolean;
+  isDetectorStarted: boolean;
+  isUserManaged: boolean;
+}): boolean {
+  return (
+    opts.autoDetectMeetings &&
+    opts.isRecording &&
+    opts.isDetectorStarted &&
+    !opts.isUserManaged
+  );
+}
+
+export function detectPromptBanner(payload: MeetingDetectedPayload): AutoDetectBannerState {
+  return {
+    visible: true,
+    mode: 'detect-prompt',
+    initialTitle: payload.default_title,
+    candidateTitles: payload.candidate_titles,
+  };
+}
+
+export function stopPromptBanner(): AutoDetectBannerState {
+  return { visible: true, mode: 'stop-prompt', initialTitle: '', candidateTitles: [] };
+}
+
+/** On detect-prompt confirm, push the edited title to the recording manager
+ *  only when it actually changed. */
+export function shouldPushTitleUpdate(title: string, currentInitial: string): boolean {
+  return !!title && title !== currentInitial;
+}
+
 // ── Hook ───────────────────────────────────────────────────────────────────
 
 export function useAutoDetect({
@@ -83,44 +138,35 @@ export function useAutoDetect({
     if (!autoDetectMeetings) return;
 
     // D17 / Task 7.4: dismiss an active stop-prompt — the call re-engaged within the debounce window
-    if (bannerRef.current.visible && bannerRef.current.mode === 'stop-prompt') {
+    if (isStopPromptActiveForRedetect(bannerRef.current)) {
       setBanner(prev => ({ ...prev, visible: false }));
       isUserManagedRef.current = false;
       // Don't return — fall through: if we're still recording, guard below will catch it
     }
 
     // D17 / Task 7.5: don't double-start if already recording (manual or detector)
-    if (isRecordingRef.current) return;
+    if (!shouldStartOnDetected({ autoDetectMeetings, isRecording: isRecordingRef.current })) return;
 
     try {
       await handleRecordingStart(payload.default_title);
       isDetectorStartedRef.current = true;
 
       // Show the detect-prompt banner so the user can review/edit the title
-      setBanner({
-        visible: true,
-        mode: 'detect-prompt',
-        initialTitle: payload.default_title,
-        candidateTitles: payload.candidate_titles,
-      });
+      setBanner(detectPromptBanner(payload));
     } catch (err) {
       console.error('[useAutoDetect] Failed to auto-start recording:', err);
     }
   }, [autoDetectMeetings, handleRecordingStart]);
 
   const handleEnded = useCallback(() => {
-    if (!autoDetectMeetings) return;
-    if (!isRecordingRef.current) return;
-    if (!isDetectorStartedRef.current) return; // Task 7.5: only prompt for detector-started recordings
-    if (isUserManagedRef.current) return;       // User opted out via "Keep Recording"
+    if (!shouldShowStopPrompt({
+      autoDetectMeetings,
+      isRecording: isRecordingRef.current,
+      isDetectorStarted: isDetectorStartedRef.current,
+      isUserManaged: isUserManagedRef.current,
+    })) return;
 
-    setBanner(prev => ({
-      ...prev,
-      visible: true,
-      mode: 'stop-prompt',
-      initialTitle: '',
-      candidateTitles: [],
-    }));
+    setBanner(stopPromptBanner());
   }, [autoDetectMeetings]);
 
   // ── Banner action handlers ─────────────────────────────────────────────────
@@ -133,7 +179,7 @@ export function useAutoDetect({
 
     if (currentMode === 'detect-prompt') {
       // If user edited the title, push update to the Rust recording manager
-      if (title && title !== currentInitial) {
+      if (shouldPushTitleUpdate(title, currentInitial)) {
         setMeetingTitle(title);
         try {
           await invoke('set_active_meeting_name', { name: title });

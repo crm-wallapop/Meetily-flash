@@ -154,3 +154,26 @@ run once the DB migration bug is resolved.
       use `SKIP_SMOKE=1 git push` (per the local smoke-gate convention) since
       no Playwright spec applies to a non-shipping dev command. Document this
       in the archive note.
+
+## 8. Automated frontend smoke (added — replaces the manual DOM checks in 5.2/6.1/6.4)
+
+The manual smoke's DOM-observable parts (when to auto-start, which banner to
+show, and the guards that prevent the subtle regressions) are now covered by
+adversarial Vitest tests that run in the always-on `pnpm test` gate — no
+feature flag, no manual DevTools step. The real-audio `audio.mp4` finalize
+timing (6.2/6.3) still needs a live device and stays manual; no browser-level
+test can exercise the recording backend (per design D2).
+
+- [x] 8.1 Extract the regression-prone decision logic from `useAutoDetect` into
+      exported pure helpers — `shouldStartOnDetected`,
+      `isStopPromptActiveForRedetect`, `shouldShowStopPrompt`,
+      `detectPromptBanner`, `stopPromptBanner`, `shouldPushTitleUpdate`.
+      Behavior-preserving: the hook passes its current ref/state values; the
+      helpers never touch refs, effects, or Tauri.
+- [x] 8.2 Write `src/__tests__/useAutoDetect.test.ts` importing the REAL
+      helpers (not mirrors): detect→start guards (disabled / already-recording),
+      stop-prompt guards (not-recording stale-ref / not-detector-started manual
+      / user-managed), D17 re-engage dismiss, banner factories, and the
+      title-update decision. 21 tests, all green.
+- [x] 8.3 Confirm `pnpm test` + `pnpm lint` stay green after the extraction
+      (no behavior change).

@@ -60,6 +60,14 @@ The composition root (`lib.rs:788`) constructs `WindowsMeetingDetector::new(focu
 
 **On the `__` prefix:** it is a documentation convention only. Tauri's `generate_handler!` exposes no command-hiding mechanism — any frontend JS (or a compromised renderer) can `invoke('__dev_simulate_meeting', …)` whenever the feature is compiled in. The sole protection against the command appearing in a shipped binary is the off-by-default `dev-detector` Cargo feature; the prefix must never be read as defense-in-depth.
 
+### D7 — Frontend decision coverage via extracted pure helpers (added)
+
+**Decision:** the regression-prone auto-detect guard logic in the `useAutoDetect` hook (when to auto-start, when to show the detect- vs stop-prompt, the no-double-start / no-auto-stop-a-manual-recording / user-managed-keep guards, and the D17 stop-prompt-dismiss-on-re-engage) is extracted into exported pure functions (`shouldStartOnDetected`, `isStopPromptActiveForRedetect`, `shouldShowStopPrompt`, `detectPromptBanner`, `stopPromptBanner`, `shouldPushTitleUpdate`). The hook calls them with its current ref/state values; the helpers are pure (no refs, effects, or Tauri). `src/__tests__/useAutoDetect.test.ts` imports the REAL helpers and asserts them adversarially.
+
+**Why over a Playwright smoke spec or hand-mirrored contracts:** a Playwright spec can't run in the default pre-push gate (the `__dev_simulate_meeting` command only exists under `--features dev-detector`), and a hand-mirrored contract test (cf. `useRecordingStop-fixes.test.ts`) tests its own copy of the logic, so it does not catch regressions in the hook. Importing the real extracted helpers gives a true regression net in the always-on `pnpm test` gate. The repo has no `@testing-library/react` and deliberately never mounts hooks, so extraction is the lightest way to make the hook's logic importable.
+
+**Scope honesty:** this automates the DOM-observable manual checks (5.2 / 6.1 / 6.4). It does NOT exercise real audio capture or the `audio.mp4` finalize timing (6.2 / 6.3) — those need a live device and stay manual. The event-subscription wiring (`listen` → handler) is straightforward React-effect code and the events themselves are proven to fire by the Rust seam tests 2.1 / 2.3.
+
 ## Risks / Trade-offs
 
 - **[Feature enabled in a release build]** → The feature is off by default in `Cargo.toml`; release/production build scripts must never pass `--features dev-detector`. Add a `cfg`-gated `compile_error!` is **not** used (feature-gating is sufficient and a compile error would complicate legitimate local release builds for testing). Mitigation: document the feature as dev-only in `Cargo.toml` and this design; the command does nothing destructive (it only flips a detector observation).
