@@ -124,13 +124,13 @@ impl<R: Runtime> NotificationManager<R> {
     }
 
     /// Show a recording stopped notification
-    pub async fn show_recording_stopped(&self) -> Result<()> {
+    pub async fn show_recording_stopped(&self, meeting_name: Option<String>) -> Result<()> {
         let settings = self.settings.read().await;
         if !settings.notification_preferences.show_recording_stopped {
             return Ok(());
         }
 
-        let notification = Notification::recording_stopped();
+        let notification = Notification::recording_stopped(meeting_name);
         self.show_notification(notification).await
     }
 

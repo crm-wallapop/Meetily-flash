@@ -202,20 +202,22 @@ impl Notification {
             .add_action(NotificationAction::button("continue", "Continue", Some(URI_CONTINUE.to_string())))
     }
 
-    pub fn recording_stopped() -> Self {
-        Notification::new(
-            "Meetily",
-            "Recording has been stopped and saved",
-            NotificationType::RecordingStopped,
-        )
-        .with_priority(NotificationPriority::Normal)
-        .with_timeout(NotificationTimeout::Seconds(3))
-        .add_action(NotificationAction::button(
-            "continue",
-            "Continue recording",
-            Some(URI_CONTINUE.to_string()),
-        ))
-        .add_action(NotificationAction::button("dismiss", "Dismiss", None))
+    /// Recording-stopped toast: "Recording saved: \<title\>" + `[Continue recording]` / `[Dismiss]`.
+    /// The title names the saved meeting so the user can tell which session was persisted.
+    pub fn recording_stopped(meeting_name: Option<String>) -> Self {
+        let body = match meeting_name.as_deref() {
+            Some(title) => format!("Recording saved: {}", title),
+            None => "Recording saved".to_string(),
+        };
+        Notification::new("Meetily", body, NotificationType::RecordingStopped)
+            .with_priority(NotificationPriority::Normal)
+            .with_timeout(NotificationTimeout::Seconds(3))
+            .add_action(NotificationAction::button(
+                "continue",
+                "Continue recording",
+                Some(URI_CONTINUE.to_string()),
+            ))
+            .add_action(NotificationAction::button("dismiss", "Dismiss", None))
     }
 
     pub fn recording_paused() -> Self {
@@ -332,13 +334,20 @@ mod tests {
 
     #[test]
     fn recording_stopped_carries_continue_and_dismiss() {
-        let n = Notification::recording_stopped();
+        let n = Notification::recording_stopped(Some("Standup".into()));
+        assert_eq!(n.body, "Recording saved: Standup");
         assert_eq!(n.actions.len(), 2);
         assert_eq!(n.actions[0].title, "Continue recording");
         assert_eq!(n.actions[0].launch_uri.as_deref(), Some(URI_CONTINUE));
         // Dismiss is default dismissal: no launch URI.
         assert_eq!(n.actions[1].title, "Dismiss");
         assert!(n.actions[1].launch_uri.is_none());
+    }
+
+    #[test]
+    fn recording_stopped_without_title_uses_generic_body() {
+        let n = Notification::recording_stopped(None);
+        assert_eq!(n.body, "Recording saved");
     }
 
     #[test]

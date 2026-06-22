@@ -20,7 +20,7 @@ export interface AutoDetectBannerState {
 
 interface UseAutoDetectProps {
   isRecording: boolean;
-  handleRecordingStart: (overrideTitle?: string) => Promise<void>;
+  handleRecordingStart: (overrideTitle?: string, detectorStarted?: boolean) => Promise<void>;
   handleRecordingStop: (callApi: boolean) => Promise<void>;
   setIsRecording: (value: boolean) => void;
 }
@@ -148,7 +148,7 @@ export function useAutoDetect({
     if (!shouldStartOnDetected({ autoDetectMeetings, isRecording: isRecordingRef.current })) return;
 
     try {
-      await handleRecordingStart(payload.default_title);
+      await handleRecordingStart(payload.default_title, true);
       isDetectorStartedRef.current = true;
 
       // Show the detect-prompt banner so the user can review/edit the title

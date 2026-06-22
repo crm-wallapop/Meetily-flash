@@ -1,7 +1,5 @@
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
-// Removed unused import
 
 // Performance optimization: Conditional logging macros for hot paths
 #[cfg(debug_assertions)]
@@ -68,8 +66,6 @@ use use_cases::scheduler_settings::SchedulerLiveConfig;
 pub type TranscriptionQueueState = Arc<TranscriptionQueue>;
 pub type SchedulerConfigState = Arc<SchedulerLiveConfig>;
 
-static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
-
 // Remembers the last saved meeting title so the stopped toast's [Continue recording]
 // can restart a fresh session with the same name — the meetily:// URI carries no title.
 static LAST_MEETING_TITLE: StdMutex<Option<String>> = StdMutex::new(None);
@@ -114,18 +110,19 @@ async fn start_recording<R: Runtime>(
     .await
     {
         Ok(result) => {
-            RECORDING_FLAG.store(true, Ordering::SeqCst);
             tray::update_tray_menu(&app);
 
             log_info!("Recording started successfully with meeting_id: {}", result.meeting_id);
 
             // Show recording started notification through NotificationManager
-            // This respects user's notification preferences
+            // This respects user's notification preferences. The legacy no-devices
+            // start path is always manual.
             let notification_manager_state = app.state::<NotificationManagerState<R>>();
             if let Err(e) = notifications::commands::show_recording_started_notification(
                 &app,
                 &notification_manager_state,
                 meeting_name.clone(),
+                notifications::types::RecordStartSource::Manual,
             )
             .await
             {
@@ -164,7 +161,6 @@ async fn stop_recording<R: Runtime>(
     match audio::recording_commands::stop_recording(app.clone()).await
     {
         Ok(result) => {
-            RECORDING_FLAG.store(false, Ordering::SeqCst);
             tray::update_tray_menu(&app);
 
             if let Some(name) = result.meeting_name.as_ref() {
@@ -177,6 +173,7 @@ async fn stop_recording<R: Runtime>(
             if let Err(e) = notifications::commands::show_recording_stopped_notification(
                 &app,
                 &notification_manager_state,
+                result.meeting_name.clone(),
             )
             .await
             {
@@ -187,18 +184,22 @@ async fn stop_recording<R: Runtime>(
         }
         Err(e) => {
             log_error!("Failed to stop audio recording: {}", e);
-            RECORDING_FLAG.store(false, Ordering::SeqCst);
             tray::update_tray_menu(&app);
             Err(format!("Failed to stop recording: {}", e))
         }
     }
 }
 
-/// Read-only recording state backing the deep-link dispatch guards with the global flag.
+/// Read-only recording state backing the deep-link dispatch guards. Reads the
+/// authoritative `RecordingPhase` from the audio layer — NOT a separate flag — so the
+/// dispatch guards stay in sync with the real recording lifecycle across every start
+/// path (the production `start_recording_with_devices_and_meeting` command does not
+/// touch any standalone flag, only the phase).
 struct LiveRecordingState;
 impl use_cases::notification_action::RecordingStatePort for LiveRecordingState {
     fn is_recording(&self) -> bool {
-        RECORDING_FLAG.load(std::sync::atomic::Ordering::SeqCst)
+        audio::recording_commands::current_phase()
+            == audio::recording_commands::RecordingPhase::Recording
     }
 }
 
@@ -395,7 +396,7 @@ async fn start_recording_with_devices<R: Runtime>(
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
 ) -> Result<audio::recording_commands::StartRecordingResult, String> {
-    start_recording_with_devices_and_meeting(app, mic_device_name, system_device_name, None).await
+    start_recording_with_devices_and_meeting(app, mic_device_name, system_device_name, None, None).await
 }
 
 #[tauri::command]
@@ -404,9 +405,13 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
     meeting_name: Option<String>,
+    // `Some(true)` marks a detector-started recording so the record-start toast reads
+    // "Meeting detected — recording: <title>" instead of the manual wording. Threaded
+    // from the frontend auto-detect hook (useAutoDetect) through the recording service.
+    detector_started: Option<bool>,
 ) -> Result<audio::recording_commands::StartRecordingResult, String> {
-    log_info!("🚀 CALLED start_recording_with_devices_and_meeting - Mic: {:?}, System: {:?}, Meeting: {:?}",
-             mic_device_name, system_device_name, meeting_name);
+    log_info!("🚀 CALLED start_recording_with_devices_and_meeting - Mic: {:?}, System: {:?}, Meeting: {:?}, detector_started: {:?}",
+             mic_device_name, system_device_name, meeting_name, detector_started);
 
     // Clone meeting_name for notification use later
     let meeting_name_for_notification = meeting_name.clone();
@@ -438,6 +443,12 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
         }
     };
 
+    let source = if detector_started == Some(true) {
+        notifications::types::RecordStartSource::Detector
+    } else {
+        notifications::types::RecordStartSource::Manual
+    };
+
     match recording_result {
         Ok(result) => {
             log_info!("Recording started successfully via tauri command, meeting_id: {}", result.meeting_id);
@@ -449,6 +460,7 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 &app,
                 &notification_manager_state,
                 meeting_name_for_notification.clone(),
+                source,
             )
             .await
             {
@@ -1306,4 +1318,46 @@ pub fn run() {
                 log::info!("Application cleanup complete");
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::recording_commands::{set_phase, RecordingPhase};
+    use use_cases::notification_action::RecordingStatePort;
+
+    // Restores RecordingPhase to Idle on scope exit (including panic) so one test's
+    // phase mutation cannot leak into another. The global static makes fully-isolated
+    // tests impossible without serial_test, but this guard keeps the window minimal.
+    struct PhaseGuard;
+    impl Drop for PhaseGuard {
+        fn drop(&mut self) {
+            set_phase(RecordingPhase::Idle);
+        }
+    }
+
+    // This test would have caught C1-correctness: LiveRecordingState must reflect the
+    // authoritative RecordingPhase, not a stale flag set by only one start path.
+    #[test]
+    fn live_recording_state_reflects_authoritative_phase() {
+        let _guard = PhaseGuard;
+
+        set_phase(RecordingPhase::Recording);
+        assert!(
+            LiveRecordingState.is_recording(),
+            "LiveRecordingState must report recording when RecordingPhase == Recording"
+        );
+
+        set_phase(RecordingPhase::Idle);
+        assert!(
+            !LiveRecordingState.is_recording(),
+            "LiveRecordingState must report idle when RecordingPhase == Idle"
+        );
+
+        set_phase(RecordingPhase::Saving);
+        assert!(
+            !LiveRecordingState.is_recording(),
+            "LiveRecordingState must report idle during Saving (not Recording)"
+        );
+    }
 }

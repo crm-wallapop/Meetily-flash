@@ -9,7 +9,7 @@ import Analytics from '@/lib/analytics';
 import { showRecordingNotification } from '@/lib/recordingNotification';
 
 interface UseRecordingStartReturn {
-  handleRecordingStart: (overrideTitle?: string) => Promise<void>;
+  handleRecordingStart: (overrideTitle?: string, detectorStarted?: boolean) => Promise<void>;
   isAutoStarting: boolean;
 }
 
@@ -36,7 +36,7 @@ export function useRecordingStart(
     return `Meeting ${day}_${month}_${year}_${hours}_${minutes}_${seconds}`;
   }, []);
 
-  const handleRecordingStart = useCallback(async (overrideTitle?: string) => {
+  const handleRecordingStart = useCallback(async (overrideTitle?: string, detectorStarted: boolean = false) => {
     try {
       const title = overrideTitle || generateMeetingTitle();
       setMeetingTitle(title);
@@ -45,7 +45,8 @@ export function useRecordingStart(
       const result = await recordingService.startRecordingWithDevices(
         selectedDevices?.micDevice || null,
         selectedDevices?.systemDevice || null,
-        title
+        title,
+        detectorStarted
       );
       setActiveMeetingId(result.meeting_id);
 

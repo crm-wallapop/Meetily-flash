@@ -144,23 +144,18 @@ fn xml_escape(s: &str) -> String {
     out
 }
 
-/// Build and show a Windows toast with protocol-activation action buttons via raw WinRT
-/// XML. Buttons with a `launch_uri` activate the registered `meetily://` scheme, which
-/// the deep-link plugin delivers to the running instance (or cold-starts it). Buttons
-/// without a `launch_uri` use system dismissal. `aumid` is the AppUserModelID the toast
-/// notifier is branded under (`com.meetily.ai`); it must have a DisplayName/IconUri
-/// registry entry or Windows silently drops the toast.
+/// Build the ToastGeneric XML for an action toast. Pure (no I/O) so the escaping and
+/// structure can be unit-tested independently of WinRT. Titles, bodies, and action labels
+/// reach here from untrusted boundary input (meeting names, window titles); `xml_escape`
+/// prevents element breakout or action injection. An empty `actions` slice omits the
+/// `<actions>` block entirely (actionless toast).
 #[cfg(target_os = "windows")]
-pub fn show_action_toast(
+pub(crate) fn build_action_toast_xml(
     title: &str,
     body: &str,
     actions: &[crate::notifications::types::NotificationAction],
-    aumid: &str,
-) -> Result<()> {
+) -> String {
     use std::fmt::Write;
-    use windows::core::HSTRING;
-    use windows::Data::Xml::Dom::XmlDocument;
-    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 
     let mut actions_xml = String::new();
     if !actions.is_empty() {
@@ -187,13 +182,33 @@ pub fn show_action_toast(
         actions_xml.push_str("</actions>");
     }
 
-    let xml = format!(
+    format!(
         "<toast><visual><binding template='ToastGeneric'>\
          <text>{}</text><text>{}</text></binding></visual>{}</toast>",
         xml_escape(title),
         xml_escape(body),
         actions_xml
-    );
+    )
+}
+
+/// Build and show a Windows toast with protocol-activation action buttons via raw WinRT
+/// XML. Buttons with a `launch_uri` activate the registered `meetily://` scheme, which
+/// the deep-link plugin delivers to the running instance (or cold-starts it). Buttons
+/// without a `launch_uri` use system dismissal. `aumid` is the AppUserModelID the toast
+/// notifier is branded under (`com.meetily.ai`); it must have a DisplayName/IconUri
+/// registry entry or Windows silently drops the toast.
+#[cfg(target_os = "windows")]
+pub fn show_action_toast(
+    title: &str,
+    body: &str,
+    actions: &[crate::notifications::types::NotificationAction],
+    aumid: &str,
+) -> Result<()> {
+    use windows::core::HSTRING;
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+
+    let xml = build_action_toast_xml(title, body, actions);
 
     let doc = XmlDocument::new()?;
     doc.LoadXml(&HSTRING::from(&xml))?;
@@ -201,4 +216,81 @@ pub fn show_action_toast(
     let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(aumid))?;
     notifier.Show(&toast)?;
     Ok(())
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+    use crate::notifications::types::NotificationAction;
+
+    #[test]
+    fn build_xml_renders_protocol_and_dismiss_actions() {
+        let actions = vec![
+            NotificationAction::button("stop", "Stop recording", Some("meetily://recording/stop".into())),
+            NotificationAction::button("dismiss", "Dismiss", None),
+        ];
+        let xml = build_action_toast_xml("Meetily", "Recording started", &actions);
+        assert!(
+            xml.contains("<action content='Stop recording' activationType='protocol' arguments='meetily://recording/stop'/>"),
+            "protocol action missing or malformed: {xml}"
+        );
+        assert!(
+            xml.contains("<action content='Dismiss' activationType='system' arguments='dismiss'/>"),
+            "dismiss action missing or malformed: {xml}"
+        );
+        assert!(xml.contains("<text>Meetily</text><text>Recording started</text>"));
+    }
+
+    #[test]
+    fn build_xml_escapes_untrusted_title_and_body() {
+        // A meeting name with XML metacharacters must not break out of the <text>
+        // element or inject an <action>.
+        let xml = build_action_toast_xml(
+            "Standup <script>alert(1)</script>",
+            "Recording & \"meeting\" > done",
+            &[],
+        );
+        assert!(!xml.contains("<script>"), "raw <script> leaked: {xml}");
+        assert!(xml.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(xml.contains("&amp;"));
+        assert!(xml.contains("&quot;"));
+        assert!(xml.contains("&gt;"));
+        // No <actions> block for an empty action list.
+        assert!(!xml.contains("<actions>"));
+    }
+
+    #[test]
+    fn build_xml_escapes_action_label_and_uri() {
+        // A crafted action label or URI must not escape its element or inject a new
+        // action — the quotes and angle brackets are entity-encoded.
+        let actions = vec![NotificationAction::button(
+            "a",
+            "Stop'/><action content='evil",
+            Some("meetily://recording/stop'/><action".into()),
+        )];
+        let xml = build_action_toast_xml("T", "B", &actions);
+        assert!(!xml.contains(">evil"), "injected action leaked: {xml}");
+        assert!(xml.contains("&apos;"));
+        assert!(xml.contains("&lt;action"));
+    }
+
+    #[test]
+    fn build_xml_empty_actions_has_no_actions_block() {
+        let xml = build_action_toast_xml("Meetily", "Body", &[]);
+        assert!(!xml.contains("<actions>"));
+        assert!(xml.contains("<toast>"));
+        assert!(xml.contains("</toast>"));
+    }
+
+    #[test]
+    fn build_xml_ampersand_in_uri_is_escaped() {
+        let actions = vec![NotificationAction::button(
+            "stop",
+            "Stop",
+            Some("meetily://recording/stop?x=1&y=2".into()),
+        )];
+        let xml = build_action_toast_xml("T", "B", &actions);
+        assert!(xml.contains("x=1&amp;y=2"), "raw & in URI: {xml}");
+        assert!(!xml.contains("x=1&y=2"));
+    }
 }

@@ -37,9 +37,9 @@ Toast buttons use `activationType="protocol"` with a `launch` URI like `meetily:
 
 The detector's `emit_detected` fires its `recording_started` notification at **detection time**, before recording begins and before the user can cancel via the in-app banner — so a `[Stop recording]` button there would act on a recording that isn't running yet. That premature toast is **removed** entirely (delete the `show_notification` call from `emit_detected` in `lib.rs`); detection surfaces only the in-app banner, as before.
 
-The **record-start** code path (`start_recording` command → `show_recording_started_notification`) becomes the single actionable toast, for both detector-started and manual starts. No `detector_started` flag or suppression logic is needed — with the premature toast gone there is exactly one notification path.
+The **record-start** code path (`start_recording_with_devices_and_meeting` command → `show_recording_started_notification`) becomes the single actionable toast, for both detector-started and manual starts.
 
-To distinguish wording, the record-start notification carries a **source signal** (`detector` vs `manual`): detector starts read "Meeting detected — recording: \<title\>", manual starts read "Recording started: \<title\>". Both carry `[Stop recording]` / `[Continue]`.
+To distinguish wording, the record-start notification carries a **source signal** (`detector` vs `manual`): detector starts read "Meeting detected — recording: \<title\>", manual starts read "Recording started: \<title\>". Both carry `[Stop recording]` / `[Continue]`. The source is threaded end-to-end: `useAutoDetect` passes `detectorStarted: true` through `handleRecordingStart` → `recordingService.startRecordingWithDevices` → the Tauri command's `detector_started: Option<bool>` param → `show_recording_started_notification(.., source: RecordStartSource)` which branches `manager.show_meeting_detected` vs `manager.show_recording_started`. The two notification paths converge at `show_notification`, so only one toast fires.
 
 ### Decision 4: Boundary validation of deep-link URIs (security)
 
@@ -60,6 +60,22 @@ Deep-link URIs are attacker-controllable external input (§9). The dispatch use 
 | `[Continue]` (active) | `meetily://recording/continue` | Dismiss only; recording continues. No-op. |
 | `[Continue recording]` (stopped) | `meetily://recording/continue` | Start a **fresh** recording with the same title — the pipeline has no append-after-save path (see Resolved Q1). True cross-session merge is a follow-up issue. |
 | `[Dismiss]` (stopped) | (default dismissal) | Accept the stop; meeting stays saved. |
+
+### Decision 7: `LiveRecordingState` reads the authoritative `RecordingPhase`, not a parallel flag
+
+The dispatch guards (`resolve(Action, &LiveRecordingState)`) must see the real recording lifecycle. An earlier version of this change backed `LiveRecordingState::is_recording()` with a standalone `RECORDING_FLAG: AtomicBool` that was only set by the legacy `start_recording` Tauri command — **not** by `start_recording_with_devices_and_meeting` (the production path the frontend actually calls). That made `is_recording()` always return `false` mid-recording: `[Stop recording]` was a dead no-op and `[Continue]` could start a duplicate session. The fix wires `is_recording()` to `audio::recording_commands::current_phase() == RecordingPhase::Recording` (the single source of truth, set via `compare_exchange` by every start path), and deletes the stale flag entirely. An integration-style unit test (`live_recording_state_reflects_authoritative_phase`) sets `RecordingPhase` via the test-only `set_phase` and asserts `LiveRecordingState` tracks it — this would have caught the bug.
+
+### Decision 8: Stopped-toast body carries the meeting title
+
+The stopped toast's body is `"Recording saved: \<meeting title\>"` (spec requirement), not a generic static string. `Notification::recording_stopped(meeting_name)` formats the body; the title is threaded from `stop_recording`'s `result.meeting_name` → `show_recording_stopped_notification` → `manager.show_recording_stopped` → the builder. A missing title falls back to `"Recording saved"` (the generated-title path means a title is normally present).
+
+### Decision 9: Action-toast XML is built by a pure, testable function
+
+`build_action_toast_xml(title, body, actions) -> String` (system.rs, Windows-only) constructs the ToastGeneric XML and is unit-tested independently of WinRT I/O. `show_action_toast` calls it then does the `ToastNotificationManager` show. Adversarial tests cover XML injection via title/body/action-label/URI, ampersand-in-URI escaping, and the empty-actions case. `xml_escape` (already present) prevents element breakout.
+
+### Decision 10: Fragment check precedes query stripping in URI validation
+
+`dispatch_notification_action` checks for `#` in the raw `after_scheme` string **before** splitting off the query. This rejects `meetily://recording/stop?x=1#frag` as malformed (not just `stop#frag`), so a fragment is never silently swallowed with the discarded query. Defence in depth — the `Action` type carries no payload so no untrusted data could propagate either way, but rejecting fragments consistently is less surprising than the prior "accept if query-present, reject otherwise" behaviour.
 
 ## Risks / Trade-offs
 

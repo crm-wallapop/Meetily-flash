@@ -106,17 +106,21 @@ export class RecordingService {
    * @param micDeviceName - Microphone device name (null for default)
    * @param systemDeviceName - System audio device name (null for none)
    * @param meetingName - Meeting name/title
+   * @param detectorStarted - True when the auto-detect feature initiated the start;
+   *   selects the "Meeting detected" toast wording instead of the manual wording.
    * @returns Promise with meeting_id
    */
   async startRecordingWithDevices(
     micDeviceName: string | null,
     systemDeviceName: string | null,
-    meetingName: string
+    meetingName: string,
+    detectorStarted: boolean = false
   ): Promise<StartRecordingResult> {
     return invoke<StartRecordingResult>('start_recording_with_devices_and_meeting', {
       mic_device_name: micDeviceName,
       system_device_name: systemDeviceName,
-      meeting_name: meetingName
+      meeting_name: meetingName,
+      detector_started: detectorStarted
     });
   }
 

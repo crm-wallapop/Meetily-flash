@@ -45,17 +45,19 @@ pub fn dispatch_notification_action(uri: &str) -> Action {
 
     let after_scheme = &uri[scheme_end + 3..];
 
+    // Fragments are never produced by our toast URIs; treat one as malformed. Checked
+    // before query stripping so `stop?x=1#frag` is rejected, not silently swallowed with
+    // the discarded query.
+    if after_scheme.contains('#') {
+        return Action::Rejected;
+    }
+
     // Split off any query before authority/path validation. Query is never read — its
     // presence is legal, its contents are dropped.
     let authority_and_path = match after_scheme.find('?') {
         Some(i) => &after_scheme[..i],
         None => after_scheme,
     };
-
-    // Fragments are never produced by our toast URIs; treat one as malformed.
-    if authority_and_path.contains('#') {
-        return Action::Rejected;
-    }
 
     let Some((host, path)) = authority_and_path.split_once('/') else {
         return Action::Rejected;
@@ -200,6 +202,21 @@ mod tests {
         assert_eq!(
             dispatch_notification_action("meetily://recording/stop?u=https://evil/x"),
             Action::Stop
+        );
+    }
+
+    #[test]
+    fn rejects_fragment_after_query() {
+        // A fragment after a query is rejected, not silently swallowed with the
+        // discarded query — defence in depth against any future code that reads the
+        // raw URI before this function trims it.
+        assert_eq!(
+            dispatch_notification_action("meetily://recording/stop?x=1#frag"),
+            Action::Rejected
+        );
+        assert_eq!(
+            dispatch_notification_action("meetily://recording/continue?a=1#"),
+            Action::Rejected
         );
     }
 
