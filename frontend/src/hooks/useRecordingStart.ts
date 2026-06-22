@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { useConfig } from '@/contexts/ConfigContext';
@@ -130,6 +131,30 @@ export function useRecordingStart(
     window.addEventListener('start-recording-from-sidebar', handleDirectStart);
     return () => window.removeEventListener('start-recording-from-sidebar', handleDirectStart);
   }, [isRecording, isAutoStarting, selectedDevices, generateMeetingTitle, setMeetingTitle, setIsRecording, clearTranscripts, setIsMeetingActive, setStatus, setActiveMeetingId]);
+
+  // Continue from the stopped-toast [Continue recording] button. The Rust deep-link
+  // handler emits `recording-continue-requested` carrying the last meeting title; the
+  // frontend owns device selection so this reuses the normal start path. No-op while
+  // already recording — the cold-start/cross-session guards live in the dispatch use case.
+  useEffect(() => {
+    if (isRecording || isAutoStarting) return;
+
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      unlisten = await listen<{ title: string | null }>('recording-continue-requested', (event) => {
+        if (isRecording || isAutoStarting) return;
+        const title = event.payload?.title ?? undefined;
+        void handleRecordingStart(title);
+      });
+      if (cancelled) unlisten();
+    })();
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [isRecording, isAutoStarting, handleRecordingStart]);
 
   return { handleRecordingStart, isAutoStarting };
 }

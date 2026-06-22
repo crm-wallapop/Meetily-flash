@@ -164,6 +164,7 @@ tauri-plugin-store = "2.4.0"
 tauri-plugin-notification = "2.3.1"
 tauri-plugin-updater = "2.3.0"
 tauri-plugin-process = "2.3.0"
+tauri-plugin-deep-link = "2"
 scopeguard = "1.2.0"
 
 # macOS-specific dependencies with Metal GPU acceleration
@@ -203,6 +204,8 @@ windows = { version = "0.58", features = [
     "Win32_Networking_WinSock",
     "Win32_System_Com",
     "Win32_Media_Audio",
+    "Data_Xml_Dom",
+    "UI_Notifications",
 ] }
 ipnet = "2.9"
 

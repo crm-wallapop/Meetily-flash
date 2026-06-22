@@ -27,6 +27,21 @@ impl<R: Runtime> SystemNotificationHandler<R> {
             return Ok(());
         }
 
+        // Action-bearing toasts need raw WinRT XML with protocol-activation buttons;
+        // tauri-plugin-notification's builder can only render title+body. Windows-only —
+        // other platforms fall through to the actionless path (macOS actions are a
+        // separate future change, per design).
+        #[cfg(target_os = "windows")]
+        if !notification.actions.is_empty() {
+            let aumid = self.app_handle.config().identifier.clone();
+            return show_action_toast(
+                &notification.title,
+                &notification.body,
+                &notification.actions,
+                &aumid,
+            );
+        }
+
         // Use Tauri notification for all platforms
         log_info!("Showing Tauri notification: {}", notification.title);
 
@@ -108,4 +123,82 @@ impl From<&NotificationTimeout> for Option<Duration> {
             NotificationTimeout::Default => Some(Duration::from_secs(5)),
         }
     }
+}
+
+/// Escape a string for safe interpolation into toast XML. Titles and bodies reach here
+/// from untrusted boundary input (meeting names, window titles), so a stray `<` or `&`
+/// must not be able to break out of the element or inject an action.
+#[cfg(target_os = "windows")]
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\'' => out.push_str("&apos;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Build and show a Windows toast with protocol-activation action buttons via raw WinRT
+/// XML. Buttons with a `launch_uri` activate the registered `meetily://` scheme, which
+/// the deep-link plugin delivers to the running instance (or cold-starts it). Buttons
+/// without a `launch_uri` use system dismissal. `aumid` is the AppUserModelID the toast
+/// notifier is branded under (`com.meetily.ai`); it must have a DisplayName/IconUri
+/// registry entry or Windows silently drops the toast.
+#[cfg(target_os = "windows")]
+pub fn show_action_toast(
+    title: &str,
+    body: &str,
+    actions: &[crate::notifications::types::NotificationAction],
+    aumid: &str,
+) -> Result<()> {
+    use std::fmt::Write;
+    use windows::core::HSTRING;
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+
+    let mut actions_xml = String::new();
+    if !actions.is_empty() {
+        actions_xml.push_str("<actions>");
+        for a in actions {
+            match &a.launch_uri {
+                Some(uri) => {
+                    let _ = write!(
+                        actions_xml,
+                        "<action content='{}' activationType='protocol' arguments='{}'/>",
+                        xml_escape(&a.title),
+                        xml_escape(uri)
+                    );
+                }
+                None => {
+                    let _ = write!(
+                        actions_xml,
+                        "<action content='{}' activationType='system' arguments='dismiss'/>",
+                        xml_escape(&a.title)
+                    );
+                }
+            }
+        }
+        actions_xml.push_str("</actions>");
+    }
+
+    let xml = format!(
+        "<toast><visual><binding template='ToastGeneric'>\
+         <text>{}</text><text>{}</text></binding></visual>{}</toast>",
+        xml_escape(title),
+        xml_escape(body),
+        actions_xml
+    );
+
+    let doc = XmlDocument::new()?;
+    doc.LoadXml(&HSTRING::from(&xml))?;
+    let toast = ToastNotification::CreateToastNotification(&doc)?;
+    let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(aumid))?;
+    notifier.Show(&toast)?;
+    Ok(())
 }

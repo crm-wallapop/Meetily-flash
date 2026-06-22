@@ -112,6 +112,17 @@ impl<R: Runtime> NotificationManager<R> {
         self.show_notification(notification).await
     }
 
+    /// Show the detector-triggered record-start toast (distinct "Meeting detected" wording).
+    pub async fn show_meeting_detected(&self, meeting_name: Option<String>) -> Result<()> {
+        let settings = self.settings.read().await;
+        if !settings.notification_preferences.show_recording_started {
+            return Ok(());
+        }
+        drop(settings);
+        let notification = Notification::recording_detected(meeting_name);
+        self.show_notification(notification).await
+    }
+
     /// Show a recording stopped notification
     pub async fn show_recording_stopped(&self) -> Result<()> {
         let settings = self.settings.read().await;
@@ -293,7 +304,7 @@ impl<R: Runtime> NotificationManager<R> {
 
         // Check notification type specific settings
         match &notification.notification_type {
-            NotificationType::RecordingStarted => settings.notification_preferences.show_recording_started,
+            NotificationType::RecordingStarted | NotificationType::MeetingDetected => settings.notification_preferences.show_recording_started,
             NotificationType::RecordingStopped => settings.notification_preferences.show_recording_stopped,
             NotificationType::RecordingPaused => settings.notification_preferences.show_recording_paused,
             NotificationType::RecordingResumed => settings.notification_preferences.show_recording_resumed,

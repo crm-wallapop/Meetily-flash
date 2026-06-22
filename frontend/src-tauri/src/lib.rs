@@ -70,6 +70,10 @@ pub type SchedulerConfigState = Arc<SchedulerLiveConfig>;
 
 static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
 
+// Remembers the last saved meeting title so the stopped toast's [Continue recording]
+// can restart a fresh session with the same name — the meetily:// URI carries no title.
+static LAST_MEETING_TITLE: StdMutex<Option<String>> = StdMutex::new(None);
+
 // Global language preference storage (default to "auto-translate" for automatic translation to English)
 static LANGUAGE_PREFERENCE: std::sync::LazyLock<StdMutex<String>> =
     std::sync::LazyLock::new(|| StdMutex::new("auto-translate".to_string()));
@@ -163,6 +167,12 @@ async fn stop_recording<R: Runtime>(
             RECORDING_FLAG.store(false, Ordering::SeqCst);
             tray::update_tray_menu(&app);
 
+            if let Some(name) = result.meeting_name.as_ref() {
+                if let Ok(mut g) = LAST_MEETING_TITLE.lock() {
+                    *g = Some(name.clone());
+                }
+            }
+
             let notification_manager_state = app.state::<NotificationManagerState<R>>();
             if let Err(e) = notifications::commands::show_recording_stopped_notification(
                 &app,
@@ -182,6 +192,66 @@ async fn stop_recording<R: Runtime>(
             Err(format!("Failed to stop recording: {}", e))
         }
     }
+}
+
+/// Read-only recording state backing the deep-link dispatch guards with the global flag.
+struct LiveRecordingState;
+impl use_cases::notification_action::RecordingStatePort for LiveRecordingState {
+    fn is_recording(&self) -> bool {
+        RECORDING_FLAG.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Validate a `meetily://` URI, guard it against the live recording state, and route the
+/// outcome to a recording command. Emits `deep-link-dispatched` for every URI (logging +
+/// test surface); `recording-continue-requested` when a fresh capture should start. The
+/// URI is treated as untrusted boundary input throughout — only the resolved `Action`
+/// (carrying no payload) reaches the command paths.
+fn handle_deep_link(app: &tauri::AppHandle, uri: &str) {
+    use tauri::Emitter;
+    use use_cases::notification_action::{dispatch_notification_action, resolve, Action, Resolved};
+
+    let action = dispatch_notification_action(uri);
+    let outcome = resolve(action, &LiveRecordingState);
+
+    log::info!("deep-link dispatch: uri={uri} action={action:?} outcome={outcome:?}");
+    let _ = app.emit(
+        "deep-link-dispatched",
+        serde_json::json!({
+            "uri": uri,
+            "action": format!("{action:?}"),
+            "outcome": format!("{outcome:?}"),
+        }),
+    );
+
+    match outcome {
+        Resolved::Execute(Action::Stop) => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = stop_recording(app).await {
+                    log::error!("deep-link stop failed: {e}");
+                }
+            });
+        }
+        Resolved::Execute(Action::Continue) => {
+            let title = LAST_MEETING_TITLE.lock().ok().and_then(|g| g.clone());
+            let _ = app.emit(
+                "recording-continue-requested",
+                serde_json::json!({ "title": title }),
+            );
+        }
+        Resolved::Execute(Action::Rejected) | Resolved::NoOp => {}
+    }
+}
+
+/// Dev/test seam: dispatch a `meetily://` URI through the same path a real toast-button
+/// activation takes, so the smoke spec can exercise routing from the webview. Debug-only;
+/// never registered in release builds.
+#[cfg(debug_assertions)]
+#[tauri::command]
+fn __dev_inject_deep_link(app: tauri::AppHandle, uri: String) -> Result<String, String> {
+    handle_deep_link(&app, &uri);
+    Ok(format!("dispatched: {uri}"))
 }
 
 #[tauri::command]
@@ -527,6 +597,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_deep_link::init())
         .manage(whisper_engine::parallel_commands::ParallelProcessorState::new())
         .manage(Arc::new(RwLock::new(
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
@@ -535,6 +606,39 @@ pub fn run() {
         .manage(summary::summary_engine::ModelManagerState(Arc::new(tokio::sync::Mutex::new(None))))
         .setup(|_app| {
             log::info!("Application setup complete");
+
+            // Register the meetily:// scheme with the OS so toast action buttons can
+            // re-activate the running instance. Idempotent; a registry write failure is
+            // non-fatal (toasts still render, just without working buttons). Cold-start
+            // detection (handle_cli_arguments) already ran during plugin init.
+            #[cfg(target_os = "windows")]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                if let Err(e) = _app.deep_link().register_all() {
+                    log::warn!("deep-link scheme registration failed: {e:?}");
+                }
+            }
+
+            // Route meetily:// activations through the dispatch use case. on_open_url
+            // covers warm activations (button tap while running); get_current covers a URI
+            // that cold-started the app (the plugin parsed it during its own init, so we
+            // re-dispatch here — the guard turns a no-recording stop/continue into a no-op).
+            #[cfg(target_os = "windows")]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = _app.handle().clone();
+                _app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        handle_deep_link(&handle, url.as_str());
+                    }
+                });
+                if let Ok(Some(urls)) = _app.deep_link().get_current() {
+                    let handle = _app.handle().clone();
+                    for url in urls {
+                        handle_deep_link(&handle, url.as_str());
+                    }
+                }
+            }
 
             // Wire the transcription queue with production processors.
             {
@@ -824,14 +928,10 @@ pub fn run() {
                                     SHOULD_YIELD.store(true, Ordering::SeqCst);
                                 }
 
-                                let handler = crate::notifications::system::SystemNotificationHandler::new(self.0.clone());
-                                let notif = crate::notifications::types::Notification::recording_started(Some(default_title.clone()));
-                                tauri::async_runtime::spawn(async move {
-                                    if let Err(e) = handler.show_notification(notif).await {
-                                        log::warn!("recording-started notification failed: {}", e);
-                                    }
-                                });
-
+                                // Detection surfaces only the in-app banner (the meeting-detected
+                                // event below). The actionable toast fires once at record-start,
+                                // not here — firing at detection time produced a premature,
+                                // semantically-wrong notification (see notification-actions spec).
                                 let stripped: Vec<String> = candidate_titles
                                     .into_iter()
                                     .map(|t| crate::detection::windows::strip_google_meet_suffix(&t))
@@ -924,6 +1024,8 @@ pub fn run() {
             signal_cancel_detection,
             #[cfg(feature = "dev-detector")]
             __dev_simulate_meeting,
+            #[cfg(debug_assertions)]
+            __dev_inject_deep_link,
             is_recording,
             get_transcription_status,
             read_audio_file,
