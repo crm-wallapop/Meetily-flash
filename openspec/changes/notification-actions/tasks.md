@@ -33,7 +33,7 @@
 ## 6. Composition-root wiring
 
 - [x] 6.1 In `lib.rs`, subscribe to the deep-link event (`on_open_url`) plus re-dispatch `get_current` for cold-start; `dispatch_notification_action` → `resolve` → route: `Execute(Stop)` → `stop_recording` (stop-and-save, fires the stopped toast); `Execute(Continue)` → emit `recording-continue-requested` {title} (frontend restarts the fresh session via its existing start flow — the frontend owns device selection, so a deep-link restart is a request, not a direct audio call); every URI emits `deep-link-dispatched` for logging + the smoke test. A debug-only `__dev_inject_deep_link` Tauri command is the test seam
-- [x] 6.2 Q1 resolved pre-apply: the pipeline has no append-after-save path, so `[Continue recording]` starts a **fresh recording** (same title); true cross-session merge is a follow-up — **GitHub issue not yet filed** (deferred for the user to open; documented in design.md Resolved Q1)
+- [x] 6.2 Q1 resolved pre-apply: the pipeline has no append-after-save path, so `[Continue recording]` starts a **fresh recording** (same title); true cross-session merge is a follow-up — **filed as [#1](https://github.com/carlosruiz314/Meetily-flash/issues/1)** (documented in design.md Resolved Q1)
 
 ## 7. Smoke test (UI deliverable per §3)
 
