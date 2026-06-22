@@ -28,7 +28,7 @@ This design covers Windows toasts only (the project's current toast surface). ma
 
 ### Decision 2: Activate buttons via a `meetily://` protocol scheme (`tauri-plugin-deep-link`)
 
-Toast buttons use `activationType="protocol"` with a `launch` URI like `meetily://recording/stop`. The custom scheme is registered with the OS (Windows registry / macOS `CFBundleURLTypes`); `tauri-plugin-deep-link` delivers the URI to the running single instance (or cold-starts it) as an event. A use case maps each whitelisted action URI to an existing Tauri command path.
+Toast buttons use `activationType="protocol"` with a `launch` URI like `meetily://recording/stop`. The custom scheme is registered with the OS (Windows registry / macOS `CFBundleURLTypes`). `tauri-plugin-deep-link` only registers the scheme and parses URIs — it does **not** forward a warm re-activation to the running instance on Windows (confirmed by plugin-source inspection and an empirical 1→N instance test on 2026-06-22). `tauri-plugin-single-instance` is therefore required and is registered **first** in the builder: a toast-button re-launch passes the `meetily://` URI as argv, single-instance forwards argv to the already-running instance (and exits the launcher so no second window appears), and the composition root re-dispatches the URI through the same `handle_deep_link` path used on cold start. Cold-start still flows through the deep-link plugin's `get_current()`. A pure `extract_meetily_uri(argv)` helper isolates the argv→URI step so it is unit-testable. A use case maps each whitelisted action URI to an existing Tauri command path.
 
 - *Alternative considered*: COM activator (CLSID on the AUMID shortcut) — the canonical "in-app callback" mechanism, but heavier: requires a registered COM server and the Start-Menu-shortcut-with-AUMID registration (which we deliberately avoided for dev). Deferred.
 - *Alternative considered*: click-to-foreground only, no buttons — rejected; the user explicitly wants actionable CTAs.
@@ -72,9 +72,11 @@ Deep-link URIs are attacker-controllable external input (§9). The dispatch use 
 ## Migration Plan
 
 - Add `tauri-plugin-deep-link` and the scheme registration to Tauri config.
+- Add `tauri-plugin-single-instance`, registered first in the builder, forwarding any `meetily://` argv to the running instance via `handle_deep_link`.
 - No data migration; no schema change. Rollback = revert the code + remove the scheme registration (orphan registry key is inert).
 
 ## Resolved During Investigation (pre-apply)
 
 - **[Continue recording] append vs new session** → **Fresh session.** `recording_manager.rs` `stop_recording()` → `recording_saver.stop_and_save()` finalizes the session (writes file + DB row); `start_recording()` → `start_accumulation()` begins a new accumulation. There is no resume-after-save path (`pause_recording`/`resume_recording` are in-flight state toggles, not post-save). v1 starts a fresh recording with the same title; true cross-session merge is a follow-up GitHub issue.
 - **Manual starts** → Manual starts fire `show_recording_started_notification` exactly once at record-start (`lib.rs:121`); they get the same actionable toast with manual-appropriate wording. No duplicate to suppress.
+- **Single-instance forwarding** → `tauri-plugin-deep-link` v2.4.9 does not itself route a warm re-activation to the running instance on Windows (source has no mutex/named-pipe/COM-ROT; empirical test 2026-06-22: firing `meetily://` grew the instance count 1→3 and the original logged no dispatch). `tauri-plugin-single-instance` is added to satisfy the spec's "running single instance" requirement; its argv callback re-dispatches through `handle_deep_link`. The deep-link plugin's `on_open_url`/`get_current` remain for cold-start.

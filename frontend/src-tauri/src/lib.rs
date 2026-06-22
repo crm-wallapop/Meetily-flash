@@ -592,6 +592,17 @@ pub fn run() {
     // Max level is set by env_logger (via RUST_LOG) in main.rs — don't override it here.
 
     tauri::Builder::default()
+        // Registered first on purpose: this plugin decides whether this process is the
+        // authoritative instance or a re-activation that must hand its argv to the
+        // running instance and exit. Toast action buttons re-launch the app via
+        // meetily://; without this, every tap spawns a fresh instance that cannot see
+        // the live recording. The callback re-dispatches any meetily:// URI through the
+        // same handle_deep_link path the deep-link plugin uses on cold start.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(uri) = use_cases::notification_action::extract_meetily_uri(&argv) {
+                handle_deep_link(app, uri);
+            }
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())

@@ -84,7 +84,7 @@ When a recording stops and is saved (manually or via auto-stop), the system SHAL
 
 ### Requirement: Toast action buttons activate via a validated meetily:// protocol scheme
 
-Action buttons on recording-lifecycle toasts SHALL use `activationType="protocol"` with a `meetily://recording/<action>` URI. A custom `meetily://` scheme SHALL be registered with the OS (via `tauri-plugin-deep-link`) and delivered to the running single instance. A dispatch use case SHALL accept only URIs whose scheme is `meetily`, host is `recording`, and path action is `stop` or `continue`; every other host, action, query parameter, or malformed URI SHALL be rejected (logged, no command invoked). No untrusted URI component SHALL reach SQL, the filesystem, or an LLM.
+Action buttons on recording-lifecycle toasts SHALL use `activationType="protocol"` with a `meetily://recording/<action>` URI. A custom `meetily://` scheme SHALL be registered with the OS (via `tauri-plugin-deep-link`) and a re-activation SHALL be delivered to the running single instance via `tauri-plugin-single-instance` — a toast-button re-launch passes the URI as argv, single-instance forwards it to the already-running instance, and the launcher process exits without spawning a second instance or window. A dispatch use case SHALL accept only URIs whose scheme is `meetily`, host is `recording`, and path action is `stop` or `continue`; every other host, action, query parameter, or malformed URI SHALL be rejected (logged, no command invoked). No untrusted URI component SHALL reach SQL, the filesystem, or an LLM.
 
 Activation SHALL be safe under abnormal conditions: a button tapped while the app is not running (cold start) SHALL launch the app but perform no recording action and log the event; a repeated `stop` when no recording is active SHALL be an idempotent no-op; a `continue` when a recording is already active SHALL be a no-op.
 
@@ -125,3 +125,9 @@ Activation SHALL be safe under abnormal conditions: a button tapped while the ap
 - **GIVEN** a recording is not active
 - **WHEN** the deep-link event delivers `meetily://recording/stop` twice in rapid succession
 - **THEN** no error is raised AND no spurious stop occurs (idempotent no-op)
+
+#### Scenario: Warm activation forwards to the running instance
+
+- **GIVEN** the app is already running (a recording may or may not be active)
+- **WHEN** a toast button re-activates the app via a `meetily://recording/*` URI
+- **THEN** the URI is delivered to the *already-running* instance AND no second app instance or window is spawned (the launcher forwards its argv and exits) AND the running instance logs the dispatch

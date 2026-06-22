@@ -99,6 +99,24 @@ pub fn resolve(action: Action, state: &dyn RecordingStatePort) -> Resolved {
     }
 }
 
+/// Pull the first `meetily://` URI out of a process-argv slice. The composition root
+/// calls this from the single-instance plugin callback: a toast-button re-activation
+/// re-launches the app with the URI as argv, and single-instance forwards it to the
+/// *running* instance instead of booting a second one. The scheme match is
+/// case-insensitive (the OS scheme key is); every non-meetily arg is ignored.
+/// `dispatch_notification_action` re-validates host and action, so a permissive scheme
+/// filter here cannot let an untrusted payload reach a command.
+pub fn extract_meetily_uri(argv: &[String]) -> Option<&str> {
+    argv.iter().find_map(|a| {
+        let b = a.as_bytes();
+        if b.len() >= 10 && b[..8].eq_ignore_ascii_case(b"meetily:") && &b[8..10] == b"//" {
+            Some(a.as_str())
+        } else {
+            None
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +290,51 @@ mod tests {
         // The composition root skips before calling resolve, but the arm is total.
         assert_eq!(resolve(Action::Rejected, &RECORDING), Resolved::NoOp);
         assert_eq!(resolve(Action::Rejected, &IDLE), Resolved::NoOp);
+    }
+
+    // --- extract_meetily_uri: single-instance argv forwarding (pure) ---
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn extract_finds_meetily_uri() {
+        let a = argv(&["meetily-flash.exe", "meetily://recording/stop"]);
+        assert_eq!(extract_meetily_uri(&a), Some("meetily://recording/stop"));
+    }
+
+    #[test]
+    fn extract_none_when_no_meetily_uri() {
+        assert_eq!(extract_meetily_uri(&argv(&["meetily-flash.exe", "--flag"])), None);
+        assert_eq!(extract_meetily_uri(&argv(&[])), None);
+    }
+
+    #[test]
+    fn extract_finds_uri_in_any_position() {
+        // Real invocations put the exe path first; defend any argv position.
+        let a = argv(&["C:\\mf\\debug\\meetily-flash.exe", "--foo", "meetily://recording/continue"]);
+        assert_eq!(extract_meetily_uri(&a), Some("meetily://recording/continue"));
+    }
+
+    #[test]
+    fn extract_returns_first_when_multiple() {
+        let a = argv(&["meetily://recording/stop", "meetily://recording/continue"]);
+        assert_eq!(extract_meetily_uri(&a), Some("meetily://recording/stop"));
+    }
+
+    #[test]
+    fn extract_ignores_lookalikes() {
+        assert_eq!(extract_meetily_uri(&argv(&["https://meetily://x"])), None);
+        assert_eq!(extract_meetily_uri(&argv(&["meetily-recording/stop"])), None);
+        assert_eq!(extract_meetily_uri(&argv(&["meetily:recording/stop"])), None);
+    }
+
+    #[test]
+    fn extract_matches_scheme_case_insensitively() {
+        assert_eq!(
+            extract_meetily_uri(&argv(&["Meetily://recording/stop"])),
+            Some("Meetily://recording/stop")
+        );
     }
 }

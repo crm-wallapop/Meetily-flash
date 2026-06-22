@@ -165,6 +165,7 @@ tauri-plugin-notification = "2.3.1"
 tauri-plugin-updater = "2.3.0"
 tauri-plugin-process = "2.3.0"
 tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = "2"
 scopeguard = "1.2.0"
 
 # macOS-specific dependencies with Metal GPU acceleration

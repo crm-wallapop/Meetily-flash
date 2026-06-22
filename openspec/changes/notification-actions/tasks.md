@@ -4,8 +4,10 @@
 
 ## 1. Dependencies & scheme registration
 
-- [ ] 1.1 Add `tauri-plugin-deep-link` to `frontend/src-tauri/Cargo.toml` and register the plugin in `lib.rs`; add the `meetily://` scheme to `tauri.conf.json` (capabilities) and to `Info.plist` `CFBundleURLTypes` (macOS) + Windows registry scheme registration
-- [ ] 1.2 Manually verify the scheme routes to the running single instance: invoke a `meetily://recording/continue` URI from the OS (Start > Run / `Start-Process`) and confirm the app receives the deep-link event (log line)
+- [x] 1.1 Add `tauri-plugin-deep-link` to `frontend/src-tauri/Cargo.toml` and register the plugin in `lib.rs`; add the `meetily://` scheme to `tauri.conf.json` (capabilities) and to `Info.plist` `CFBundleURLTypes` (macOS) + Windows registry scheme registration
+- [x] 1.3 Add `tauri-plugin-single-instance` (registered **first** in the builder) so a toast-button re-activation forwards its argv to the running instance instead of spawning a second one. The callback extracts any `meetily://` URI from argv and re-dispatches it through `handle_deep_link`. Required because `tauri-plugin-deep-link` v2.4.9 only registers the scheme + parses URIs — it does NOT forward warm activations to the running instance (confirmed by source inspection + empirical 1→N instance test, 2026-06-22).
+- [x] 1.4 RED/GREEN: pure `extract_meetily_uri(argv: &[String]) -> Option<&str>` helper + adversarial tests (empty argv, no `meetily://`, URI in any position, first-of-many wins, lookalikes like `https://meetily://` / `meetily:recording/` ignored, scheme matched case-insensitively). Lives in `use_cases::notification_action` so the composition-root callback stays thin and the logic is unit-testable.
+- [x] 1.2 Manually verify the scheme routes to the running single instance (after 1.3/1.4): with the app running, invoke a `meetily://recording/<rejection>` URI from the OS (`Start-Process`) and confirm the *running* instance logs `deep-link dispatch:` AND no second instance/window spawns (instance count stays 1). **Verified 2026-06-22:** fired `meetily://recording/pause` via `Start-Process` against the running Vulkan dev instance (PID 59768); the running instance logged `deep-link dispatch: uri=meetily://recording/pause action=Rejected outcome=NoOp` (18:48:55Z) and the instance count stayed at 1 (no second window — the launcher forwarded argv and exited).
 
 ## 2. Deep-link dispatch use case (adversarial TDD)
 
