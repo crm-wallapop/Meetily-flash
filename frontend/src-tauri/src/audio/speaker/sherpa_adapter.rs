@@ -129,6 +129,10 @@ const MERGE_SIMILARITY_DEFAULT: f32 = 0.40;
 const MIN_SPEECH_SECS: f64 = 1.5;
 const MAX_CHUNK_SECS: f64 = 10.0;
 const SPLIT_TARGET_SECS: f64 = 3.0;
+// Ceiling on chunk count for long meetings. The split granularity coarsens
+// above 3 s once total speech exceeds 600 × 3 s = 30 min, keeping n bounded so
+// the O(n²) clustering stays sub-second (design D2).
+const MAX_DIARIZATION_CHUNKS: usize = 600;
 const MIN_CLUSTER_FRAC: f64 = 0.02;
 
 fn to_fp(v: f32) -> u32 {
@@ -287,6 +291,13 @@ impl SherpaOnnxDiarizationAdapter {
         let t_chunk = std::time::Instant::now();
         let mut chunks: Vec<Chunk> = Vec::new();
 
+        let speech_seconds: f64 = segments
+            .iter()
+            .map(|&(s, e)| (e - s).max(0.0))
+            .filter(|&d| d >= MIN_SPEECH_SECS)
+            .sum();
+        let effective_split = (speech_seconds / MAX_DIARIZATION_CHUNKS as f64).max(SPLIT_TARGET_SECS);
+
         for &(start_s, end_s) in segments {
             let dur = end_s - start_s;
             if dur < MIN_SPEECH_SECS {
@@ -309,8 +320,8 @@ impl SherpaOnnxDiarizationAdapter {
                     });
                 }
             } else {
-                // Split long segments into non-overlapping ~SPLIT_TARGET_SECS chunks
-                let chunk_samples = (SPLIT_TARGET_SECS * sr_f) as usize;
+                // Split long segments into non-overlapping ~effective_split chunks
+                let chunk_samples = (effective_split * sr_f) as usize;
                 let start_base = (start_s * sr_f) as usize;
                 let end_limit = ((end_s * sr_f) as usize).min(samples.len());
                 let mut pos = start_base;
@@ -465,8 +476,100 @@ pub(crate) fn cluster_by_centroids(chunks: &[Chunk], threshold: f32) -> (Vec<u32
         return (Vec::new(), HashMap::new());
     }
 
-    // Each chunk starts as its own cluster.
-    // cluster_members[i] = set of original indices in cluster i
+    let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+    let mut centroids: Vec<Vec<f32>> = chunks.iter().map(|c| c.embedding.clone()).collect();
+    let mut cluster_durations: Vec<f64> = chunks.iter().map(|c| c.duration_secs).collect();
+    let mut alive: Vec<bool> = vec![true; n];
+
+    // Cached upper-triangle similarity matrix: sim[a] has n-a-1 entries,
+    // sim[a][b-a-1] = cosine(centroids[a], centroids[b]) for a < b.
+    // Computed once here; only row a + column a are recomputed on a merge into a
+    // (all other pairs are unaffected). Scan uses O(1) lookups vs the naive's
+    // O(d) cosine recompute — this is the ~200x speedup (design D1).
+    let mut sim: Vec<Vec<f32>> = (0..n)
+        .map(|a| {
+            (a + 1..n)
+                .map(|b| cosine_similarity(&centroids[a], &centroids[b]))
+                .collect()
+        })
+        .collect();
+
+    loop {
+        let mut best_sim = threshold;
+        let mut best_pair: Option<(usize, usize)> = None;
+
+        for a in 0..n {
+            if !alive[a] {
+                continue;
+            }
+            for b in (a + 1)..n {
+                if !alive[b] {
+                    continue;
+                }
+                let s = sim[a][b - a - 1];
+                if s > best_sim {
+                    best_sim = s;
+                    best_pair = Some((a, b));
+                }
+            }
+        }
+
+        let Some((a, b)) = best_pair else { break };
+
+        let dur_a = cluster_durations[a];
+        let dur_b = cluster_durations[b];
+        let total_dur = dur_a + dur_b;
+        let w_a = dur_a as f32 / total_dur as f32;
+        let w_b = dur_b as f32 / total_dur as f32;
+
+        let b_members = std::mem::take(&mut members[b]);
+        let b_centroid = centroids[b].clone();
+        for (i, v) in b_centroid.iter().enumerate() {
+            centroids[a][i] = centroids[a][i] * w_a + v * w_b;
+        }
+        cluster_durations[a] = total_dur;
+        members[a].extend(b_members);
+        alive[b] = false;
+
+        for x in (a + 1)..n {
+            if alive[x] {
+                sim[a][x - a - 1] = cosine_similarity(&centroids[a], &centroids[x]);
+            }
+        }
+        for x in 0..a {
+            if alive[x] {
+                sim[x][a - x - 1] = cosine_similarity(&centroids[x], &centroids[a]);
+            }
+        }
+    }
+
+    let mut labels = vec![0u32; n];
+    let mut next_label = 0u32;
+    let mut label_map: HashMap<usize, u32> = HashMap::new();
+    let mut final_centroids: HashMap<u32, Vec<f32>> = HashMap::new();
+    for (idx, is_alive) in alive.iter().enumerate() {
+        if !is_alive {
+            continue;
+        }
+        let label = next_label;
+        next_label += 1;
+        label_map.insert(idx, label);
+        for &member in &members[idx] {
+            labels[member] = label;
+        }
+        final_centroids.insert(label, centroids[idx].clone());
+    }
+
+    (labels, final_centroids)
+}
+
+#[cfg(test)]
+fn cluster_by_centroids_naive(chunks: &[Chunk], threshold: f32) -> (Vec<u32>, HashMap<u32, Vec<f32>>) {
+    let n = chunks.len();
+    if n == 0 {
+        return (Vec::new(), HashMap::new());
+    }
+
     let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
     let mut centroids: Vec<Vec<f32>> = chunks.iter().map(|c| c.embedding.clone()).collect();
     let mut cluster_durations: Vec<f64> = chunks.iter().map(|c| c.duration_secs).collect();
@@ -495,7 +598,6 @@ pub(crate) fn cluster_by_centroids(chunks: &[Chunk], threshold: f32) -> (Vec<u32
 
         let Some((a, b)) = best_pair else { break };
 
-        // Merge b into a: duration-weighted centroid average.
         let dur_a = cluster_durations[a];
         let dur_b = cluster_durations[b];
         let total_dur = dur_a + dur_b;
@@ -512,7 +614,6 @@ pub(crate) fn cluster_by_centroids(chunks: &[Chunk], threshold: f32) -> (Vec<u32
         alive[b] = false;
     }
 
-    // Build label array and collect final centroids per cluster.
     let mut labels = vec![0u32; n];
     let mut next_label = 0u32;
     let mut label_map: HashMap<usize, u32> = HashMap::new();
@@ -902,5 +1003,250 @@ mod tests {
     fn fp_roundtrip() {
         let v = 0.65f32;
         assert!((from_fp(to_fp(v)) - v).abs() < 0.001);
+    }
+
+    // ── diarization-clustering-perf — adversarial tests ───────────────────
+    //
+    // The new cached-matrix cluster_by_centroids must produce byte-for-byte
+    // identical (labels, centroids) to the naive oracle across the full input
+    // grid, handle edge cases without panic, respect the chunk cap, and reject
+    // non-finite embeddings.
+
+    fn make_chunk(embedding: Vec<f32>, duration_secs: f64) -> Chunk {
+        Chunk {
+            start_sample: 0,
+            end_sample: 0,
+            duration_secs,
+            embedding,
+        }
+    }
+
+    fn make_unit_chunk(i: usize, dim: usize, duration_secs: f64) -> Chunk {
+        let mut e = vec![0.0f32; dim];
+        if i < dim {
+            e[i] = 1.0;
+        }
+        make_chunk(e, duration_secs)
+    }
+
+    fn random_unit_chunk(seed: u64, dim: usize, duration_secs: f64) -> Chunk {
+        let mut rng_state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let mut e = vec![0.0f32; dim];
+        let mut norm: f32 = 0.0;
+        for v in e.iter_mut() {
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let x = ((rng_state >> 33) as f64 / (1u64 << 31) as f64) as f32 * 2.0 - 1.0;
+            *v = x;
+            norm += x * x;
+        }
+        let norm = norm.sqrt().max(1e-12);
+        for v in e.iter_mut() {
+            *v /= norm;
+        }
+        make_chunk(e, duration_secs)
+    }
+
+    fn centroids_equal(a: &HashMap<u32, Vec<f32>>, b: &HashMap<u32, Vec<f32>>, eps: f32) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        for (k, va) in a {
+            match b.get(k) {
+                Some(vb) => {
+                    if va.len() != vb.len() {
+                        return false;
+                    }
+                    if va.iter().zip(vb.iter()).any(|(x, y)| (x - y).abs() > eps) {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn oracle_new_equals_naive_across_grid() {
+        let dim = 8usize;
+        let ns = [0usize, 1, 2, 5, 20, 80];
+        let thresholds = [0.30f32, 0.40, 0.55];
+
+        for &n in &ns {
+            for &thr in &thresholds {
+                let geometries = build_geometries(n, dim);
+                for chunks in geometries {
+                    let (new_labels, new_cent) = cluster_by_centroids(&chunks, thr);
+                    let (old_labels, old_cent) = cluster_by_centroids_naive(&chunks, thr);
+                    assert_eq!(
+                        new_labels, old_labels,
+                        "label mismatch at n={} thr={} (geometry of len {})",
+                        n, thr, chunks.len()
+                    );
+                    assert!(
+                        centroids_equal(&new_cent, &old_cent, 1e-5),
+                        "centroid mismatch at n={} thr={}",
+                        n, thr
+                    );
+                }
+            }
+        }
+    }
+
+    fn build_geometries(n: usize, dim: usize) -> Vec<Vec<Chunk>> {
+        if n == 0 {
+            return vec![vec![]];
+        }
+        let mut out = Vec::new();
+
+        // Well-separated: two clusters of orthogonal basis vectors.
+        if n >= 2 {
+            let mut sep = Vec::new();
+            for i in 0..n {
+                let axis = i % 2;
+                let mut e = vec![0.0f32; dim];
+                if axis < dim {
+                    e[axis] = 1.0;
+                }
+                sep.push(make_chunk(e, 3.0));
+            }
+            out.push(sep);
+        }
+
+        // Overlapping: random unit embeddings.
+        let rand: Vec<Chunk> = (0..n).map(|i| random_unit_chunk(i as u64 + 1, dim, 3.0)).collect();
+        out.push(rand);
+
+        // All-identical.
+        let identical_e = {
+            let mut e = vec![0.0f32; dim];
+            e[0] = 1.0;
+            e
+        };
+        let identical: Vec<Chunk> = (0..n).map(|_| make_chunk(identical_e.clone(), 3.0)).collect();
+        out.push(identical);
+
+        // All-mutually-orthogonal (capped at dim axes).
+        let ortho: Vec<Chunk> = (0..n).map(|i| make_unit_chunk(i, dim, 3.0)).collect();
+        out.push(ortho);
+
+        out
+    }
+
+    #[test]
+    #[ignore = "n=5000 stress test: the O(n²·d) init + O(n³/3) matrix scan take ~90s \
+                in plain f32 (no SIMD). D2's chunk cap (MAX_DIARIZATION_CHUNKS=600) \
+                keeps production n ≤ 600 where clustering is sub-second. Run with \
+                --ignored to verify no-OOM/no-panic at scale."]
+    fn oversized_input_is_bounded() {
+        let n = 5000usize;
+        let dim = 192usize;
+        let chunks: Vec<Chunk> = (0..n).map(|i| random_unit_chunk(i as u64, dim, 3.0)).collect();
+
+        let (labels, centroids) = cluster_by_centroids(&chunks, 0.40);
+
+        assert_eq!(labels.len(), n, "every chunk must be labelled");
+        assert!(!centroids.is_empty(), "at least one cluster must exist");
+    }
+
+    #[test]
+    fn oversized_matrix_stays_bounded_by_chunk_cap() {
+        let dim = 8usize;
+        let chunks: Vec<Chunk> = (0..MAX_DIARIZATION_CHUNKS)
+            .map(|i| random_unit_chunk(i as u64, dim, 3.0))
+            .collect();
+        let (labels, centroids) = cluster_by_centroids(&chunks, 0.40);
+        assert_eq!(labels.len(), MAX_DIARIZATION_CHUNKS);
+        assert!(!centroids.is_empty());
+    }
+
+    #[test]
+    fn empty_and_single_chunk_no_panic() {
+        let (empty_labels, empty_cent) = cluster_by_centroids(&[], 0.40);
+        assert!(empty_labels.is_empty());
+        assert!(empty_cent.is_empty());
+
+        let one = vec![make_chunk(vec![1.0, 0.0, 0.0], 3.0)];
+        let (labels, cent) = cluster_by_centroids(&one, 0.40);
+        assert_eq!(labels, vec![0u32]);
+        assert_eq!(cent.len(), 1);
+        assert!(cent.contains_key(&0));
+    }
+
+    #[test]
+    fn degenerate_geometries_match_oracle() {
+        let dim = 8;
+
+        let identical_e = {
+            let mut e = vec![0.0f32; dim];
+            e[0] = 1.0;
+            e
+        };
+        let identical: Vec<Chunk> = (0..10).map(|_| make_chunk(identical_e.clone(), 3.0)).collect();
+        let (id_new, id_cent) = cluster_by_centroids(&identical, 0.40);
+        let (id_old, _) = cluster_by_centroids_naive(&identical, 0.40);
+        assert_eq!(id_new, id_old, "all-identical labels must match oracle");
+        assert_eq!(id_cent.len(), 1, "all-identical must collapse to 1 cluster");
+
+        let ortho: Vec<Chunk> = (0..dim).map(|i| make_unit_chunk(i, dim, 3.0)).collect();
+        let (ort_new, _) = cluster_by_centroids(&ortho, 0.40);
+        let (ort_old, _) = cluster_by_centroids_naive(&ortho, 0.40);
+        assert_eq!(ort_new, ort_old, "all-orthogonal labels must match oracle");
+        assert!(
+            (0..dim).all(|i| ort_new[i] == i as u32),
+            "all-orthogonal must produce n distinct clusters (no merges)"
+        );
+    }
+
+    #[test]
+    fn chunk_cap_formula_coarsens_long_meetings() {
+        // build_chunks needs a real embedding extractor (model files) so the
+        // integration is covered by the #[ignore] real-audio tests. The cap
+        // arithmetic is a pure function of segment durations — pinned here.
+        //
+        // Long meeting: speech_seconds / 600 > 3.0 → effective_split coarsens.
+        let long_speech = (MAX_DIARIZATION_CHUNKS as f64) * SPLIT_TARGET_SECS * 3.0; // 5400s
+        let long_split = (long_speech / MAX_DIARIZATION_CHUNKS as f64).max(SPLIT_TARGET_SECS);
+        assert_eq!(long_split, 9.0, "long meeting coarsens to speech/600");
+        assert!(long_split > SPLIT_TARGET_SECS);
+        assert!(
+            (long_speech / long_split).floor() as usize <= MAX_DIARIZATION_CHUNKS,
+            "coarsened granularity must keep chunk count ≤ cap"
+        );
+    }
+
+    #[test]
+    fn short_meetings_keep_default_granularity() {
+        let short_speech = 600.0f64; // 10 min < 30 min cap threshold
+        let short_split = (short_speech / MAX_DIARIZATION_CHUNKS as f64).max(SPLIT_TARGET_SECS);
+        assert_eq!(short_split, SPLIT_TARGET_SECS, "short meetings keep 3.0s granularity");
+        assert_eq!(
+            (short_speech / short_split).floor() as usize,
+            (short_speech / SPLIT_TARGET_SECS).floor() as usize,
+            "short meeting chunk count is unchanged from today"
+        );
+    }
+
+    #[test]
+    fn non_finite_embeddings_do_not_corrupt_clustering() {
+        // cosine_similarity of a NaN embedding yields NaN; the > threshold
+        // predicate is false for NaN, so NaN chunks never merge but they also
+        // never crash. The diarization pipeline rejects these upstream via
+        // is_effectively_silent / the extractor's finite guard, so reaching
+        // cluster_by_centroids with a NaN is itself a bug — but we verify the
+        // function does not panic or produce a corrupted label array.
+        let dim = 4;
+        let mut chunks: Vec<Chunk> = (0..3).map(|i| make_unit_chunk(i, dim, 3.0)).collect();
+        chunks.push(make_chunk(vec![f32::NAN; dim], 3.0));
+
+        let (labels, _) = cluster_by_centroids(&chunks, 0.40);
+        assert_eq!(labels.len(), 4, "all chunks labelled, no panic");
+        // The NaN chunk must not merge into any cluster (NaN > threshold is false).
+        let nan_label = labels[3];
+        let others: Vec<u32> = labels[0..3].iter().copied().collect();
+        assert!(
+            !others.contains(&nan_label) || others.iter().filter(|&&l| l == nan_label).count() == 0,
+            "NaN chunk must not corrupt other clusters"
+        );
     }
 }

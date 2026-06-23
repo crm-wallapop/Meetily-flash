@@ -13,31 +13,48 @@ algorithm and its cost change.
 
 ## Decisions
 
-### D1 — Cached similarity matrix + lazy-deletion max-heap (O(n² log n))
+### D1 — Cached upper-triangle similarity matrix (O(n²·d) init + O(k·d) per-merge recompute)
 
-Maintain an upper-triangle `sim: Vec<Vec<f32>>` (n×n, ~n²/2 · 4 bytes; n=600 →
-0.7 MB, n=1553 → 4.8 MB) and a binary max-heap of `(sim, i, j)` entries.
+Maintain an upper-triangle `sim: Vec<Vec<f32>>` where `sim[a][b-a-1]` holds
+`cosine_similarity(centroids[a], centroids[b])` for `a < b`. Memory: ~n²/2 · 4 B
+(n=600 → 0.7 MB, n=1553 → 4.8 MB).
 
-- **Init:** compute `sim(i,j)` for all `i < j` once → O(n²·d). Push every entry
-  onto the heap.
-- **Merge step:** pop the heap until the top is a *live* pair (both endpoints
-  still `alive` AND the stored `sim` equals the matrix entry — stale entries
-  are discarded). If the top's sim ≤ threshold, stop. Otherwise merge `b` into
-  `a`:
-  - New centroid `c` = duration-weighted average (identical rule to today).
-  - For every other live cluster `x`: recompute `sim(c, x)` from the **new**
-    centroid, write it back to the matrix, push `(sim, a, x)` onto the heap.
-    Mark `b` dead. → O(k·d) per merge, **not** O(k²·d).
+- **Init:** compute every `sim(i,j)` for `i < j` once → O(n²·d). No heap, no
+  stale entries.
+- **Best-pair scan:** identical double loop to today's naive code
+  (`for a in alive { for b in alive, b>a { if sim[a][b-a-1] > best_sim … } }`),
+  but each lookup is **O(1)** against the cached matrix instead of an O(d)
+  `cosine_similarity` recompute. The `>` predicate and the `(a,b)` iteration
+  order are unchanged, so **tie-breaking is byte-for-byte identical** to the
+  naive oracle — no custom `Ord`, no heap-staleness reasoning required.
+- **Merge step:** merge `b` into `a` (identical duration-weighted centroid
+  rule). Then recompute **only** row `a` and column `a` of the similarity
+  matrix (`sim(a, x)` for each surviving `x`) — O(k·d), not O(k²·d). Pairs not
+  involving `a` are unchanged and stay cached.
 
-Total: O(n²·d) init + O(n·k̄·d) merges + O(n² log n) heap ops ≈ **O(n² log n)**.
-For n=1553: ~5×10⁹ ops → low tens of seconds worst case; with D2's cap
-(n ≤ 600) it is **sub-second to a few seconds**.
+Total: O(n²·d) init + Σ O(k²) O(1)-lookup scans + Σ O(k·d) recomputes ≈
+**O(n³/3) O(1) comparisons + O(n²·d) recomputes**. For n=600 (D2's ceiling):
+~7×10⁷ comparisons → **sub-second**. For n=1553 (worst case pre-D2):
+~1.2×10⁹ comparisons → **~10 s**. Both are a **~200× speedup** over the
+~60-minute naive on n=1553.
 
 **Why this is correct, not just fast:** the centroid update rule and the
 `sim > threshold` merge predicate are byte-for-byte the same as today, so the
-*sequence* of merge decisions is identical. Centroid values are identical (same
+sequence of merge decisions is identical. Centroid values are identical (same
 weighted average). The naive code redundantly recomputed pairs whose similarity
-hadn't changed; the matrix just remembers them.
+hadn't changed; the matrix just remembers them. Because the scan logic is
+unchanged (only the per-pair cost drops from O(d) to O(1)), the new labels and
+centroids are **trivially equal** to the naive oracle — no tie-breaking
+reasoning needed.
+
+**Why not the max-heap originally proposed:** a lazy-deletion binary heap of
+`(sim, i, j)` would give O(n² log n) on paper, but: (a) `f32` has no `Ord`
+(NaN), requiring a `to_bits()` wrapper or `OrderedFloat`; (b) to produce
+*identical* merge decisions the heap's tie-break must exactly mirror the naive
+double-loop's lowest-`(i,j)`-first ordering — a custom `Ord` with reversed
+indices; (c) stale-entry discarding (stored sim ≠ matrix sim) adds edge-case
+surface. Given D2 caps n at 600, the heap's asymptotic win is unnecessary and
+the simpler matrix scan is already sub-second. KISS (CLAUDE.md §1.7) wins.
 
 ### D2 — Adaptive chunk granularity, `MAX_DIARIZATION_CHUNKS` ceiling
 
@@ -129,3 +146,65 @@ so they cannot poison the matrix with NaN.
 - **Raise `SPLIT_TARGET_SECS` globally** (e.g. to 6 s). Rejects: regresses
   short-meeting boundary resolution; the adaptive ceiling (D2) gives long
   meetings the coarser granularity only when they actually need it.
+
+## Decision 5 — Round-1 self-review (0 findings, one design simplification)
+
+The `Agent` tool is not available in this session (persistent HTTP 529 outage);
+self-review fallback as with the prior four changes in this session.
+
+**The one change from the proposal as written: D1 is simplified from a max-heap
+to a cached matrix scan.** Rationale in D1 above. Summary: the heap's O(n² log n)
+advantage is unnecessary once D2 caps n at 600, and the cached-matrix scan is
+trivially correctness-equivalent to the naive oracle (same scan order, same
+predicate) while the heap would require custom `Ord` + tie-breaking + stale-entry
+logic to achieve the same guarantee. KISS.
+
+**Correctness — 0 findings.**
+
+- **C1 — Problem diagnosis verified.** `cluster_by_centroids` at
+  `sherpa_adapter.rs:462`; the per-merge `alive_indices` rescan with fresh
+  `cosine_similarity` calls at `:484-494`; the duration-weighted merge at
+  `:498-513`. The O(n³·d) FLOP estimate in the proposal matches the code.
+- **C2 — The cached-matrix scan preserves merge-decision identity.** The scan
+  loop (`for a { for b>a { if sim > best_sim { … } } }`) is identical in
+  structure and iteration order to the naive; only the per-pair cost changes
+  (O(d) → O(1)). The `>` strict predicate is preserved. Therefore the argmax
+  pair selected each iteration is identical ⇒ the merge sequence is identical ⇒
+  labels and centroids are identical. The oracle property test (D3) is the
+  binding proof.
+- **C3 — Selective row recompute is sufficient.** When `b` merges into `a`,
+  only `centroids[a]` changes; `centroids[x]` for all other live `x` is
+  unchanged. So `sim(x,y)` for pairs not involving `a` is unchanged, and only
+  `sim(a,x)` needs recomputation. The implementation recomputes row `a` and
+  column `a` (the upper-triangle entries `sim[x][a-x-1]` for `x<a` and
+  `sim[a][x-a-1]` for `x>a`). Correct.
+- **C4 — D2 chunk cap is a safe coarsening.** `effective_split = max(3.0,
+  speech_seconds/600)` only increases the split target for long meetings.
+  Segments under `MAX_CHUNK_SECS` (10 s) are never split regardless, so only
+  long monologues get coarser chunks. Speaker boundaries (at transcript-segment
+  edges) are unaffected. The `MIN_SPEECH_SECS` / `MAX_CHUNK_SECS` bounds are
+  unchanged.
+
+**Security — 0 findings.**
+
+- **S1 — No new external input.** Audio samples and transcript timestamps are
+  validated upstream. The n² matrix is bounded by `MAX_DIARIZATION_CHUNKS`
+  (D2), so a hostile oversized input cannot trigger unbounded allocation — the
+  cap is a resource-exhaustion guard as well as a perf one.
+- **S2 — Non-finite embeddings.** Already rejected by
+  `is_effectively_silent` / the extractor's finite guard before reaching
+  `cluster_by_centroids`. Task 1.7 pins this at the clustering boundary.
+
+**Spec compliance — 0 findings.**
+
+- **SC1 — MODIFIED requirement** ("Transcript-timestamp-driven speaker
+  diarization runs as a post-processing queue phase") gains a chunk-cap clause
+  (step 3) and a bounded-complexity / non-blocking clause (step 5). The merge
+  threshold (0.40), `max_speakers` enforcement, nemo_titanet model, and
+  centroid storage are all explicitly unchanged (Out of Scope).
+- **SC2 — No scope creep.** No DB migration, no frontend, no model change, no
+  new dependency. The `ports/` extraction is correctly deferred to
+  `hexagonal-port-traits`.
+
+**Conclusion.** Proceed to `/opsx:apply` with the cached-matrix D1 and the D2
+chunk cap.

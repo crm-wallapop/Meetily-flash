@@ -356,9 +356,16 @@ pub async fn run_diarization_for_meeting(
     log::warn!("DIARIZATION: adapter creation: {:.2}s", t1.elapsed().as_secs_f64());
 
     // Step 4: Run diarization with transcript-driven segments.
+    // Clustering + embedding extraction are CPU-bound (seconds even after the
+    // D1/D2 perf fix); offload to a blocking thread so the async runtime
+    // (detection polls, IPC) stays responsive regardless of meeting length.
     let t2 = std::time::Instant::now();
-    let diarization = adapter.process(&samples, DIARIZATION_SAMPLE_RATE, &transcript_segments)
-        .map_err(|e| format!("Diarization failed: {}", e))?;
+    let diarization = tokio::task::spawn_blocking(move || {
+        adapter.process(&samples, DIARIZATION_SAMPLE_RATE, &transcript_segments)
+    })
+    .await
+    .map_err(|e| format!("Diarization blocking task failed: {}", e))?
+    .map_err(|e| format!("Diarization failed: {}", e))?;
     let mut segments = diarization.segments;
     let mut centroids = diarization.centroids;
     log::warn!("DIARIZATION: full pipeline: {:.2}s → {} segments", t2.elapsed().as_secs_f64(), segments.len());
