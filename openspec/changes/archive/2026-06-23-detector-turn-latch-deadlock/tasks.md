@@ -1,10 +1,13 @@
 # Tasks — detector-turn-latch-deadlock
 
 > Branch: `fix/detector-turn-latch-deadlock`.
-> Adapter-only change in `frontend/src-tauri/src/detection/windows.rs`. No
-> smoke spec (see design Decision 4 — the bug is in Rust detection logic
-> driven by live TCP/WASAPI state, not webview-assertable; coverage is the
-> cargo adversarial tests below + the existing `dev-detector` seam).
+> Adapter-only change in `frontend/src-tauri/src/detection/windows.rs`. Coverage split
+> (post-archive correction): the latch/entry-formula LOGIC is Rust-internal (live
+> TCP/WASAPI state) and cargo-tested (§1 adversarial tests). The
+> `meeting-detected`/`meeting-ended` → AutoDetectBanner WIRING is covered by
+> `e2e/smoke/meeting-auto-detect.spec.ts` (a capability-level backfill that also covers
+> meeting-udp-media-signal). The original "not webview-assertable" framing was too broad —
+> the latch logic isn't webview-assertable, but the detection-result wiring is.
 
 ## 1. RED — adversarial adapter tests (must fail on current code)
 

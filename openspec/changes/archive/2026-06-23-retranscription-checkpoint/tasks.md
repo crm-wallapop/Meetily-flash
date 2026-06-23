@@ -4,11 +4,14 @@
 > see branch note at the bottom).
 > Processor + scratch-table change in `frontend/src-tauri/src/audio/retranscription.rs`
 > and a new sqlx migration. The `ProcessorFn` contract and the queue state machine are
-> unchanged. No Playwright smoke spec — the checkpoint logic is unit-testable against a
-> temp SQLite DB with stubbed transcription; a Playwright smoke would require orchestrating
-> a real GPU transcription with a timed pause/resume (heavy and flaky), so coverage is the
-> cargo adversarial tests below + manual QA (carve-out consistent with the detector
-> changes).
+> unchanged. Coverage split (post-archive correction): the checkpoint resume LOGIC is
+> cargo-tested against a temp SQLite DB (§1 adversarial tests); the
+> `retranscription-progress` → UI rendering contract is covered by
+> `e2e/smoke/retranscription-checkpoint.spec.ts` (task 3.3 — emits the 66 % event a
+> resume produces, asserts the dialog renders it). A real GPU transcription with timed
+> pause/resume remains manual QA (task 3.2): the cargo tests pin the fraction computation,
+> the smoke spec pins the rendering. The original "would require orchestrating a real GPU
+> transcription" framing conflated the logic with the rendering contract.
 
 ## 1. RED — adversarial checkpoint tests
 
@@ -69,7 +72,11 @@
   See `project_diarization_threshold.md` / the checkpoint carve-out in the proposal: the
   adversarial tests pin the logic; the manual step is the end-to-end confirmation on a
   real meeting file.
-- [x] 3.3 No `e2e/smoke/retranscription-checkpoint.spec.ts` — carve-out per header.
+- [x] 3.3 `e2e/smoke/retranscription-checkpoint.spec.ts` added — emits
+  `retranscription-progress { progress_percentage: 66, stage, message }` (the event a
+  resume produces after 3 of 4 segments checkpointed) and asserts the dialog renders `66%`
+  + the stage label. Covers the UI rendering contract; the fraction computation is
+  cargo-tested in §1.7.
 
 ## 4. Self-review (Agent tool unavailable — HTTP 529 outage persists)
 

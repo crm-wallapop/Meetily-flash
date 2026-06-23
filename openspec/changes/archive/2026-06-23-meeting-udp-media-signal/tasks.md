@@ -1,10 +1,12 @@
 # Tasks — meeting-udp-media-signal
 
 > Branch: `enhance/meeting-udp-media-signal`.
-> Adapter + port-struct + pure-use-case change. No Playwright smoke spec — the
-> behaviour is driven by Rust detection logic over live WASAPI state, not
-> webview-assertable (mirrors `detector-turn-latch-deadlock` design Decision 4).
-> Coverage is the cargo adversarial tests below + the existing `dev-detector` seam.
+> Adapter + port-struct + pure-use-case change. Coverage split (post-archive correction):
+> the stable_capture latch + adaptive debounce LOGIC is Rust-internal (live WASAPI state)
+> and cargo-tested (§1 adversarial tests). The `meeting-detected`/`meeting-ended` →
+> AutoDetectBanner WIRING is covered by `e2e/smoke/meeting-auto-detect.spec.ts`. The
+> original "not webview-assertable" framing was too broad — the debounce logic isn't
+> webview-assertable, but the detection-result wiring is.
 
 ## 1. RED — adversarial adapter + use-case tests (must fail on current code)
 
@@ -31,7 +33,10 @@
 
 - [x] 4.1 `cargo test` (full Tauri crate) green.
 - [ ] 4.2 Manual QA: join a Meet call with a stable mic (no device switch), leave, and confirm `meeting-ended` fires in ~5–6 s with the `bc transition` log showing no `true → false` drop during the call (so `stable_capture` stayed `true`). **Deferred** — a live Meet call is not available in this session. The §1 cargo tests (393/393 green, including the 6 new adaptive-debounce tests + the invariant matrix) plus the `dev-detector` seam are the binding proof of correctness. The `SHORT` value (4 s) matches the empirically validated TURN debounce and is the single tunable constant if a specific hardware setup needs more margin. Reopen when a developer can run a live stable-mic Meet call.
-- [x] 4.3 No `e2e/smoke/meeting-udp-media-signal.spec.ts` — detection logic is not webview-assertable (design Decision 4 / CLAUDE.md §3 carve-out).
+- [x] 4.3 No change-specific `e2e/smoke/meeting-udp-media-signal.spec.ts` — the adaptive
+  debounce LOGIC is Rust-internal (cargo-tested §1). The `meeting-detected`/`meeting-ended`
+  → banner WIRING is covered by the capability-level `e2e/smoke/meeting-auto-detect.spec.ts`
+  backfill (also covers detector-turn-latch-deadlock).
 
 ## 5. Self-review (round 1) — 0 findings
 

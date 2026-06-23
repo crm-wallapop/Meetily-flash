@@ -5,8 +5,11 @@
 > Pure-Rust change in `frontend/src-tauri/src/audio/speaker/sherpa_adapter.rs`
 > (the `cluster_by_centroids` function and the `build_chunks` split granularity)
 > plus the non-blocking wrap of `adapter.process()` in `commands.rs`. No DB
-> migration, no frontend, no model change, no new dependency. No Playwright
-> smoke spec — pure compute optimization with a property-test correctness oracle.
+> migration, no frontend, no model change, no new dependency. No new Playwright smoke
+> spec — pure compute optimization with a property-test correctness oracle. The
+> `diarization-complete` → speaker-badge UI wiring is already covered by
+> `e2e/smoke/speaker-diarization.spec.ts` (tests 15.2/15.3/15.6); the perf change
+> introduces no new UI behavior.
 
 ## 1. RED — adversarial clustering tests
 
@@ -65,7 +68,10 @@
   completes, and the resulting speaker assignments look correct. (Deferred —
   requires the real model + the specific long meeting file; the oracle test +
   the #[ignore] real-audio tests are the binding automated proof.)
-- [x] 3.3 No `e2e/smoke/diarization-clustering-perf.spec.ts` — carve-out per header.
+- [x] 3.3 No change-specific `e2e/smoke/diarization-clustering-perf.spec.ts` — the perf
+  change introduces no new UI behavior. The `diarization-complete` → speaker-badge wiring
+  is already covered by `e2e/smoke/speaker-diarization.spec.ts` (tests 15.2/15.3/15.6);
+  clustering correctness is the cargo oracle (§1.1).
 
 ## 4. Self-review (Agent tool unavailable — HTTP 529 outage persists)
 
