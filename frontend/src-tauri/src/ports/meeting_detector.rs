@@ -40,6 +40,15 @@ pub struct DetectorObservation {
     /// Resets to `false` when TURN returns (transient blip), allowing the debounce timer
     /// to be cleared. `false` on all other paths.
     pub is_turn_exit: bool,
+    /// Adaptive UDP-exit discriminator: `true` only while no `has_browser_capture_session`
+    /// drop (a `true → false` transition) has been observed during the current call. The
+    /// adapter latches it to `false` on the first such drop (the setup proved itself
+    /// transient-prone) and resets it to `false` (conservative) in `notify_exit()`. The
+    /// pure `step_detector` selects the UDP debounce from this flag: 4 s when `true`
+    /// (stable-mic common case), 15 s when `false` (transient-prone). Ignored on the TURN
+    /// path (`is_turn_exit` gates there). Mirrors the `is_turn_exit` plumbing: adapter-set
+    /// bool consumed by the pure use case, no trait-method change.
+    pub stable_capture: bool,
 }
 
 impl Default for DetectorObservation {
@@ -51,6 +60,7 @@ impl Default for DetectorObservation {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         }
     }
 }
@@ -82,6 +92,7 @@ mod tests {
             connection_first_seen_at: None,
             default_title: "Weekly sync".to_string(),
             is_turn_exit: false,
+            stable_capture: false,
         };
         let cloned = obs.clone();
         assert_eq!(obs, cloned);

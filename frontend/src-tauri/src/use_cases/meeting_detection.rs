@@ -8,10 +8,17 @@ use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
 pub struct DetectorSettings {
-    /// Debounce for UDP calls: how long `has_browser_capture_session` must be absent
-    /// before a meeting-ended event fires. 15 s absorbs the empirical ~10 s WASAPI
-    /// Inactive transients (Chrome mic re-acquisition) with 5 s margin.
+    /// Debounce for UDP calls on a transient-prone setup (`stable_capture = false`):
+    /// how long `has_browser_capture_session` must be absent before a meeting-ended
+    /// event fires. 15 s absorbs the empirical ~10 s WASAPI Inactive transients
+    /// (Chrome mic re-acquisition) with 5 s margin. Also the conservative default
+    /// when the adapter has not populated `stable_capture`.
     pub debounce_duration: Duration,
+    /// Debounce for UDP calls on a stable-mic setup (`stable_capture = true`): no
+    /// bc drop has been observed during the call, so a drop now is a high-confidence
+    /// leave signal. 4 s absorbs the ~1–2 s getUserMedia release lag + 2 s poll
+    /// granularity + margin, matching the empirically validated TURN debounce.
+    pub stable_udp_debounce_duration: Duration,
     /// Debounce for TCP TURN calls (`is_turn_exit = true`): shorter because TURN is a
     /// reliable signal (drops within ~1 s of leaving) and transient TURN blips recover
     /// within 1–2 polls. 4 s is the original debounce value and is sufficient.
@@ -22,6 +29,7 @@ impl Default for DetectorSettings {
     fn default() -> Self {
         Self {
             debounce_duration: Duration::from_secs(15),
+            stable_udp_debounce_duration: Duration::from_secs(4),
             turn_debounce_duration: Duration::from_secs(4),
         }
     }
@@ -118,18 +126,25 @@ pub fn step_detector(
                     vec![],
                 )
             } else {
+                // TURN path (is_turn_exit) gates first — stable_capture is ignored there.
+                // UDP path selects the debounce adaptively: 4 s when no bc drop was
+                // observed this call (stable_capture=true, the common case), 15 s
+                // otherwise (transient-prone, or the adapter has not populated the flag).
                 let debounce = if observation.is_turn_exit {
                     settings.turn_debounce_duration
+                } else if observation.stable_capture {
+                    settings.stable_udp_debounce_duration
                 } else {
                     settings.debounce_duration
                 };
                 let lost_at = connection_lost_at.unwrap_or(now);
                 let elapsed = now.duration_since(lost_at);
                 log::debug!(
-                    "InCall: no connection — debounce {:.1}s / {:.1}s (turn_exit={})",
+                    "InCall: no connection — debounce {:.1}s / {:.1}s (turn_exit={} stable_capture={})",
                     elapsed.as_secs_f32(),
                     debounce.as_secs_f32(),
                     observation.is_turn_exit,
+                    observation.stable_capture,
                 );
                 if elapsed >= debounce {
                     (DetectorState::Idle, vec![DetectorEvent::MeetingEnded])
@@ -325,6 +340,7 @@ pub mod tests {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         }
     }
 
@@ -338,12 +354,14 @@ pub mod tests {
             connection_first_seen_at: Some(conn_seen),
             default_title: title.to_string(),
             is_turn_exit: false,
+            stable_capture: false,
         }
     }
 
     fn default_settings() -> DetectorSettings {
         DetectorSettings {
             debounce_duration: Duration::from_secs(15),
+            stable_udp_debounce_duration: Duration::from_secs(4),
             turn_debounce_duration: Duration::from_secs(4),
         }
     }
@@ -366,6 +384,7 @@ pub mod tests {
             connection_first_seen_at: Some(conn_seen),
             default_title: "Meet - Weekly sync".to_string(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         let (state, events) = step_detector(
@@ -397,6 +416,7 @@ pub mod tests {
             connection_first_seen_at: Some(start),
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         let (state, events) = step_detector(
@@ -427,6 +447,7 @@ pub mod tests {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         let state = DetectorState::InCall {
@@ -461,6 +482,7 @@ pub mod tests {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         let state = DetectorState::InCall {
@@ -498,6 +520,7 @@ pub mod tests {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         // Step 1: cancel signal consumed, connection just lost.
@@ -518,6 +541,7 @@ pub mod tests {
             connection_first_seen_at: Some(start + Duration::from_millis(500)),
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
         let (state, events) = step_detector(state, &obs_back, start, Instant::now(), &AtomicBool::new(false), &default_settings());
         assert!(events.is_empty(), "no re-emit after transient drop+return");
@@ -536,6 +560,7 @@ pub mod tests {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
         let (state, events) = step_detector(state, &obs_gone, start, now, &AtomicBool::new(false), &default_settings());
         assert!(matches!(state, DetectorState::Idle));
@@ -550,6 +575,7 @@ pub mod tests {
             connection_first_seen_at: Some(conn_seen),
             default_title: "Meet - New call".to_string(),
             is_turn_exit: false,
+            stable_capture: false,
         };
         let (_, events) = step_detector(state, &obs_new, start, conn_seen, &AtomicBool::new(false), &default_settings());
         assert_eq!(events.len(), 1, "new call after Idle reset must re-emit");
@@ -575,6 +601,7 @@ pub mod tests {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
         let obs_true = DetectorObservation {
             meet_windows: vec![meet_window("Meet - Sprint")],
@@ -583,6 +610,7 @@ pub mod tests {
             connection_first_seen_at: Some(conn_seen),
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         // true → false → true → false, each step < 2s apart
@@ -615,6 +643,7 @@ pub mod tests {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         let (state, events) = step_detector(
@@ -643,6 +672,7 @@ pub mod tests {
             connection_first_seen_at: Some(conn_seen),
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         let (state, events) = step_detector(
@@ -683,6 +713,7 @@ pub mod tests {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         let state = DetectorState::InCall {
@@ -723,6 +754,7 @@ pub mod tests {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: true,
+            stable_capture: false,
         };
 
         // 3 s elapsed — still under the 4 s TURN debounce.
@@ -762,6 +794,7 @@ pub mod tests {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: true,
+            stable_capture: false,
         };
 
         // Step 1: timer not yet started (connection_lost_at=None) — first poll after TURN drop.
@@ -803,6 +836,7 @@ pub mod tests {
             connection_first_seen_at: Some(now - Duration::from_secs(60)),
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         let (new_state, events) = step_detector(
@@ -833,6 +867,7 @@ pub mod tests {
             connection_first_seen_at: Some(conn_seen),
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         // Even if frontend is "recording" (not tracked in the state machine), Rust emits.
@@ -866,6 +901,7 @@ pub mod tests {
             connection_first_seen_at: Some(conn_seen),
             default_title: "Meet - Standup".to_string(),
             is_turn_exit: false,
+            stable_capture: false,
         };
         // 3 polls "in call", then idle. MockMeetingDetector repeats the last item as
         // fallback, so a single idle_obs() at the end provides idle state indefinitely.
@@ -882,7 +918,7 @@ pub mod tests {
             port,
             emitter_clone,
             Duration::from_millis(5),
-            DetectorSettings { debounce_duration: Duration::from_millis(50), turn_debounce_duration: Duration::from_millis(50) },
+            DetectorSettings { debounce_duration: Duration::from_millis(50), stable_udp_debounce_duration: Duration::from_millis(50), turn_debounce_duration: Duration::from_millis(50) },
             suppress,
         );
 
@@ -909,6 +945,7 @@ pub mod tests {
             connection_first_seen_at: Some(conn_seen),
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         // Panics on first 2 calls, then succeeds.
@@ -926,7 +963,7 @@ pub mod tests {
             port,
             emitter_for_spawn,
             Duration::from_millis(5),
-            DetectorSettings { debounce_duration: Duration::from_secs(10), turn_debounce_duration: Duration::from_secs(10) },
+            DetectorSettings { debounce_duration: Duration::from_secs(10), stable_udp_debounce_duration: Duration::from_secs(10), turn_debounce_duration: Duration::from_secs(10) },
             suppress,
         );
 
@@ -955,6 +992,7 @@ pub mod tests {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         let (state, events) = step_detector(
@@ -983,6 +1021,7 @@ pub mod tests {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         let (state, events) = step_detector(
@@ -1015,6 +1054,7 @@ pub mod tests {
             connection_first_seen_at: Some(detector_start),
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
 
         let (state, events) = step_detector(
@@ -1051,6 +1091,7 @@ pub mod tests {
             connection_first_seen_at: Some(conn_seen),
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
         let (state, events) = step_detector(
             DetectorState::Idle,
@@ -1074,6 +1115,7 @@ pub mod tests {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
         // The signal is consumed on this step (compare_exchange true→false)
         let (state, events) = step_detector(state, &obs_dropped, start, now_8s, &suppress, &default_settings());
@@ -1090,6 +1132,7 @@ pub mod tests {
             connection_first_seen_at: Some(conn_seen + Duration::from_millis(500)),
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         };
         let (state, events) = step_detector(state, &obs_returned, start, now_9s, &AtomicBool::new(false), &default_settings());
         assert!(events.is_empty(), "step 3: InCall with connection → no re-emit");
@@ -1130,6 +1173,7 @@ pub mod tests {
             connection_first_seen_at: Some(conn_seen_new),
             default_title: "Meet - Sprint planning".to_string(),
             is_turn_exit: false,
+            stable_capture: false,
         };
         let (_, events) = step_detector(
             state,
@@ -1141,5 +1185,99 @@ pub mod tests {
         );
         assert_eq!(events.len(), 1, "step 5: cancel flag reset on Idle → new call must re-emit");
         assert!(matches!(&events[0], DetectorEvent::MeetingDetected { default_title, .. } if default_title == "Meet - Sprint planning"));
+    }
+
+    // ── meeting-udp-media-signal — step_detector adaptive debounce ──────────
+    //
+    // The UDP debounce is selected from `stable_capture`: 4 s when true
+    // (stable-mic, the common case), 15 s when false (transient-prone, or the
+    // adapter has not populated the flag). The TURN path (is_turn_exit=true) is
+    // invariant under `stable_capture`. These tests pin the selection by probing
+    // elapsed times that discriminate 4 s from 15 s.
+
+    fn obs_udp_exit(stable_capture: bool) -> DetectorObservation {
+        // bc=false so the InCall exit branch engages; is_turn_exit=false so the
+        // UDP (not TURN) path runs; stable_capture is the variable under test.
+        DetectorObservation {
+            meet_windows: vec![],
+            has_meet_connection: false,
+            has_browser_capture_session: false,
+            connection_first_seen_at: None,
+            default_title: String::new(),
+            is_turn_exit: false,
+            stable_capture,
+        }
+    }
+
+    fn obs_turn_exit(stable_capture: bool) -> DetectorObservation {
+        // TURN drop: is_turn_exit=true. bc is irrelevant (TURN gates first).
+        DetectorObservation {
+            meet_windows: vec![],
+            has_meet_connection: false,
+            has_browser_capture_session: false,
+            connection_first_seen_at: None,
+            default_title: String::new(),
+            is_turn_exit: true,
+            stable_capture,
+        }
+    }
+
+    fn step_incall_lost(lost_secs_before_now: u64, obs: &DetectorObservation) -> (DetectorState, Vec<DetectorEvent>) {
+        let now = Instant::now();
+        let lost_at = now - Duration::from_secs(lost_secs_before_now);
+        let state = DetectorState::InCall { connection_lost_at: Some(lost_at) };
+        step_detector(state, obs, now - Duration::from_secs(600), now, &AtomicBool::new(false), &default_settings())
+    }
+
+    // Task 1.4 — A stable-mic UDP call (stable_capture=true) exits on the SHORT
+    // (4 s) debounce. At 5 s elapsed, meeting-ended MUST fire (5 ≥ 4). With the
+    // pre-change code, only the 15 s debounce exists, so 5 s would NOT fire.
+    #[test]
+    fn stable_call_uses_short_udp_debounce() {
+        let (new_state, events) = step_incall_lost(5, &obs_udp_exit(true));
+        assert!(matches!(new_state, DetectorState::Idle),
+            "stable_capture=true at 5 s elapsed: must fire meeting-ended (SHORT=4 s)");
+        assert_eq!(events, vec![DetectorEvent::MeetingEnded]);
+    }
+
+    // Task 1.5 — A transient-prone UDP call (stable_capture=false) keeps the
+    // LONG (15 s) debounce. At 10 s elapsed, meeting-ended must NOT fire
+    // (10 < 15). This pins the preserved behaviour.
+    #[test]
+    fn transient_prone_call_uses_long_udp_debounce() {
+        let (new_state, events) = step_incall_lost(10, &obs_udp_exit(false));
+        assert!(matches!(new_state, DetectorState::InCall { .. }),
+            "stable_capture=false at 10 s elapsed: must NOT fire (LONG=15 s)");
+        assert!(events.is_empty());
+    }
+
+    // Task 1.6 — Invariant matrix: the debounce is a pure function of
+    // (is_turn_exit, stable_capture). TURN path (4 s) is invariant under
+    // stable_capture; UDP path selects 4 s only when stable_capture=true.
+    #[test]
+    fn debounce_selection_invariant_matrix() {
+        for &stable in &[false, true] {
+            // TURN path: fires at 5 s regardless of stable_capture.
+            let (s, ev) = step_incall_lost(5, &obs_turn_exit(stable));
+            assert!(matches!(s, DetectorState::Idle),
+                "TURN path: stable_capture={stable} at 5 s must fire (4 s debounce, invariant)");
+            assert_eq!(ev, vec![DetectorEvent::MeetingEnded]);
+        }
+
+        // UDP path, stable=true: fires at 5 s (4 s debounce).
+        let (s, _) = step_incall_lost(5, &obs_udp_exit(true));
+        assert!(matches!(s, DetectorState::Idle),
+            "UDP stable at 5 s must fire (4 s debounce)");
+
+        // UDP path, stable=false: does NOT fire at 5 s (15 s debounce).
+        let (s, _) = step_incall_lost(5, &obs_udp_exit(false));
+        assert!(matches!(s, DetectorState::InCall { .. }),
+            "UDP transient-prone at 5 s must NOT fire (15 s debounce)");
+
+        // Discriminator at 12 s: stable fires (12 ≥ 4), transient-prone does not (12 < 15).
+        let (s_stable, _) = step_incall_lost(12, &obs_udp_exit(true));
+        assert!(matches!(s_stable, DetectorState::Idle), "UDP stable at 12 s must fire");
+        let (s_transient, _) = step_incall_lost(12, &obs_udp_exit(false));
+        assert!(matches!(s_transient, DetectorState::InCall { .. }), "UDP transient at 12 s must NOT fire");
     }
 }

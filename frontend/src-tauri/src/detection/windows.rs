@@ -575,6 +575,15 @@ pub struct WindowsMeetingDetector {
     /// Used to emit an `info`-level log on every `bc` transition so smoke tests can
     /// measure the exact WASAPI-drop lag after "Leave call" without needing `RUST_LOG=debug`.
     last_bc: Option<bool>,
+    /// Per-call latch: flips to `true` on the first observed `bc` `Some(true) → false`
+    /// transition (a WASAPI capture-session drop). `bc` stability is the in-call
+    /// discriminator the detector already relies on — a drop proves the setup is
+    /// transient-prone (device switch, brief WASAPI hiccup), so once observed the call
+    /// uses the long 15 s UDP debounce for any subsequent exit; a stable-mic call (the
+    /// common case) keeps the 4 s debounce. Monotonic false→true; reset only by
+    /// `notify_exit()` on the `InCall → Idle` transition so back-to-back calls start
+    /// fresh. `pub(crate)` so adapter tests can set it directly.
+    pub(crate) bc_drop_observed_this_call: bool,
     /// Injectable probes for unit tests — absent in release builds (D test seam).
     #[cfg(test)]
     pub(crate) probes: Option<DetectorProbes>,
@@ -589,6 +598,7 @@ impl WindowsMeetingDetector {
             focus_history,
             turn_established: false,
             last_bc: None,
+            bc_drop_observed_this_call: false,
             #[cfg(test)]
             probes: None,
         }
@@ -611,6 +621,9 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
         // Reset the sticky TURN flag so the next call (potentially UDP-only)
         // goes through the full join/exit detection flow again (D7).
         self.turn_established = false;
+        // Reset the per-call bc-drop latch so the next call starts assumed-stable
+        // (4 s debounce). A transient-prone previous call must not poison the next.
+        self.bc_drop_observed_this_call = false;
     }
 
     fn current_state(&mut self) -> DetectorObservation {
@@ -656,6 +669,13 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
                 bc,
                 if bc { "active" } else { "dropped" },
             );
+            // Latch the per-call bc-drop flag on the first Some(true) → false
+            // transition. Must read `last_bc` BEFORE reassigning it below. Once
+            // observed, the call is treated as transient-prone for its remainder
+            // (15 s UDP debounce); reset only by `notify_exit()`.
+            if self.last_bc == Some(true) && !bc {
+                self.bc_drop_observed_this_call = true;
+            }
             self.last_bc = Some(bc);
         }
 
@@ -725,6 +745,7 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
             connection_first_seen_at: self.connection_first_seen_at,
             default_title: String::new(),
             is_turn_exit,
+            stable_capture: !self.bc_drop_observed_this_call,
         };
 
         if !obs.meet_windows.is_empty() {
@@ -784,6 +805,7 @@ mod tests {
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: false,
+            stable_capture: false,
         }
     }
 
@@ -1189,5 +1211,104 @@ mod tests {
         let obs = det.current_state();
         assert!(obs.has_meet_connection,
             "after notify_exit(), persistent Otter.ai WASAPI does not block next call");
+    }
+
+    // ── meeting-udp-media-signal — adversarial RED tests ────────────────────
+    //
+    // These pin the per-call bc-drop latch that drives the adaptive UDP debounce.
+    // They FAIL on the pre-change code: `stable_capture` does not exist, so the
+    // field cannot be read and the latch is never tripped.
+
+    // Task 1.1 — A call with continuously-active bc (no drop) must report
+    // stable_capture=true so step_detector selects the 4 s short debounce.
+    #[test]
+    fn stable_call_sets_stable_capture_true() {
+        let probes = DetectorProbes {
+            has_turn:    Box::new(|| false),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        };
+        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
+        // Poll several times with bc continuously true. No Some(true) → false
+        // transition occurs, so the latch stays false and stable_capture stays true.
+        for i in 0..3 {
+            let obs = det.current_state();
+            assert!(obs.stable_capture,
+                "poll {i}: continuously-stable bc must yield stable_capture=true");
+        }
+    }
+
+    // Task 1.2 — The first bc drop (Some(true) → false) latches
+    // bc_drop_observed_this_call=true. stable_capture must then be false on
+    // every subsequent poll, EVEN AFTER bc returns true (the latch is monotonic
+    // for the remainder of the call).
+    #[test]
+    fn first_bc_drop_latches_stable_capture_false() {
+        let bc_flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let bc_for_probe = Arc::clone(&bc_flag);
+        let probes = DetectorProbes {
+            has_turn:    Box::new(|| false),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(move || bc_for_probe.load(std::sync::atomic::Ordering::SeqCst)),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        };
+        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
+
+        // Poll 1: bc=true (stable so far).
+        let obs = det.current_state();
+        assert!(obs.stable_capture, "before any drop: stable_capture must be true");
+
+        // Poll 2: bc drops (a transient). Latch trips.
+        bc_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        let obs = det.current_state();
+        assert!(!obs.stable_capture,
+            "after first Some(true) → false transition: stable_capture must be false");
+
+        // Poll 3: bc returns. The latch must remain tripped (monotonic per call).
+        bc_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        let obs = det.current_state();
+        assert!(!obs.stable_capture,
+            "after bc returns: the latch must stay tripped for the rest of the call");
+
+        // Poll 4: bc drops again. Still false.
+        bc_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        let obs = det.current_state();
+        assert!(!obs.stable_capture, "a second drop must keep stable_capture false");
+    }
+
+    // Task 1.3 — notify_exit() resets the latch so the next call starts
+    // assumed-stable. A transient-prone previous call must not poison the next.
+    #[test]
+    fn notify_exit_resets_bc_drop_latch_for_next_call() {
+        let bc_flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let bc_for_probe = Arc::clone(&bc_flag);
+        let probes = DetectorProbes {
+            has_turn:    Box::new(|| false),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(move || bc_for_probe.load(std::sync::atomic::Ordering::SeqCst)),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        };
+        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
+
+        // Establish bc=true first so the subsequent drop is a real Some(true) → false
+        // transition (last_bc must be Some(true) before the drop poll).
+        let _ = det.current_state();
+
+        // Trip the latch with a drop during the first call.
+        bc_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        let obs = det.current_state();
+        assert!(!obs.stable_capture, "first call: drop must trip the latch");
+
+        // notify_exit fires on InCall → Idle. Adapter resets the latch.
+        det.notify_exit();
+
+        // Second call: bc continuously true. stable_capture must be true again.
+        bc_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        for i in 0..3 {
+            let obs = det.current_state();
+            assert!(obs.stable_capture,
+                "poll {i} after notify_exit: next call must start assumed-stable");
+        }
     }
 }

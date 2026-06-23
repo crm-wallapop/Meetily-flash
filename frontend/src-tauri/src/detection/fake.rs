@@ -72,6 +72,11 @@ impl FakeDetectorHandle {
                     connection_first_seen_at: Some(std::time::Instant::now()),
                     default_title: resolved,
                     is_turn_exit: false,
+                    // Default false = conservative 15 s debounce. The fake adapter drives
+                    // no real bc signal, so without an explicit override every simulated
+                    // call behaves as if transient-prone (today's behaviour). A test that
+                    // needs the short-debounce path sets this directly on the shared obs.
+                    stable_capture: false,
                 };
                 Ok(())
             }
@@ -117,6 +122,7 @@ mod tests {
     fn fast_settings() -> DetectorSettings {
         DetectorSettings {
             debounce_duration: Duration::from_millis(50),
+            stable_udp_debounce_duration: Duration::from_millis(50),
             turn_debounce_duration: Duration::from_millis(50),
         }
     }
@@ -187,6 +193,7 @@ mod tests {
             Duration::from_millis(1),
             DetectorSettings {
                 debounce_duration: Duration::from_millis(5),
+                stable_udp_debounce_duration: Duration::from_millis(5),
                 turn_debounce_duration: Duration::from_millis(5),
             },
             suppress,
