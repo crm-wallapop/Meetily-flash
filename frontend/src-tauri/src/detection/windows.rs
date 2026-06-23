@@ -638,10 +638,6 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
         #[cfg(not(test))]
         let turn = has_turn_connection();
 
-        if turn {
-            self.turn_established = true;
-        }
-
         // Compute WASAPI capture state unconditionally for two uses:
         //   • entry conjunction (UDP phase below): mc && bc
         //   • exit signal in observation.has_browser_capture_session (asymmetric D2):
@@ -663,16 +659,24 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
             self.last_bc = Some(bc);
         }
 
+        // Latch TURN-established only when a TURN relay coincides with an active
+        // browser capture session. `bc` is the in-call discriminator the detector
+        // already relies on for UDP entry/exit — non-Meet GCP traffic (Gmail, Drive)
+        // has no capture session, so this stops it from poisoning is_turn_exit.
+        if turn && bc {
+            self.turn_established = true;
+        }
+
+        // Entry signal: `turn || (mc && bc)` unconditionally. The prior
+        // `else if turn_established { false }` arm is removed — its rationale
+        // ("prevent the exit debounce from starting") was stale: exit has used
+        // `bc` (not has_conn) since the asymmetric-D2 redesign. The arm only
+        // ever blocked entry, and forcing entry false while latched was a
+        // self-reinforcing deadlock (notify_exit only fires on InCall→Idle,
+        // which requires entry, which the arm prevented). See Decision 1.
         let has_conn = if turn {
             log::debug!("detector poll: has_turn_connection=true");
             true
-        } else if self.turn_established {
-            // TURN was active for this call but is now gone → user hung up.
-            // The lobby page maintains HTTPS connections to general Google IPs,
-            // so falling back to the broad check here would prevent the exit
-            // debounce from ever starting. `notify_exit()` resets this flag.
-            log::debug!("detector poll: TURN gone after call — treating as disconnected");
-            false
         } else {
             // UDP/join phase: TURN relay not yet seen. AND both signals for entry so that:
             // • join is detected when mc && bc both true after getUserMedia opens, and
@@ -929,7 +933,101 @@ mod tests {
         })
     }
 
+    // ── detector-turn-latch-deadlock — adversarial RED tests ───────────────
+    //
+    // These three tests assert the post-fix invariants and FAIL on the pre-fix
+    // code (the entry-suppression arm + the turn-only latch set).
+
+    // Task 1.1 — Deadlock regression: a latched turn_established flag must NOT
+    // block detection of a subsequent real UDP call (mc && bc both true). The
+    // pre-fix else-if turn_established arm forces has_conn=false here.
+    #[test]
+    fn latched_turn_flag_does_not_block_subsequent_udp_call_entry() {
+        let probes = DetectorProbes {
+            has_turn:    Box::new(|| false), // TURN gone (UDP call)
+            has_conn:    Box::new(|| true),  // Meet TCP active
+            has_capture: Box::new(|| true),  // browser mic capture active
+            meet_windows: probe_windows(&["Meet - standup"]),
+        };
+        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
+        // Simulate the poisoned state: a prior browser→GCP connection latched
+        // the flag in a previous poll. This is the deadlock scenario.
+        det.turn_established = true;
+
+        let obs = det.current_state();
+        assert!(obs.has_meet_connection,
+            "a latched turn_established flag must NOT suppress entry when a real UDP call (mc && bc) is active");
+    }
+
+    // Task 1.2 — Spurious-latch non-poison: TURN active but NO browser capture
+    // (background GCP traffic, no call) must NOT latch turn_established, so a
+    // later UDP call is not misclassified as a TURN exit (4s debounce).
+    #[test]
+    fn turn_without_browser_capture_does_not_latch() {
+        // Phase 1: TURN=true but bc=false (background GCP, no call).
+        let probes_gcp = DetectorProbes {
+            has_turn:    Box::new(|| true),
+            has_conn:    Box::new(|| false),
+            has_capture: Box::new(|| false),
+            meet_windows: probe_windows(&[]),
+        };
+        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_gcp);
+        // Poll several times to give the latch every chance to (wrongly) set.
+        for _ in 0..3 {
+            let _ = det.current_state();
+        }
+        assert!(!det.turn_established,
+            "turn_established must NOT set on TURN-without-capture (background GCP traffic)");
+
+        // Phase 2: user joins a real UDP call (TURN=false, mc && bc true).
+        det.probes = Some(DetectorProbes {
+            has_turn:    Box::new(|| false),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        });
+        let obs = det.current_state();
+        assert!(obs.has_meet_connection, "the UDP call must be detected");
+        assert!(!obs.is_turn_exit,
+            "is_turn_exit must be false — the prior GCP traffic must not poison the exit debounce");
+    }
+
+    // Task 1.3 — Entry formula invariant: with turn_established latched, the
+    // entry signal has_meet_connection must equal `turn || (mc && bc)` across
+    // the full probe matrix. The latch must never change the entry formula.
+    #[test]
+    fn entry_formula_invariant_holds_across_probe_matrix_when_latched() {
+        for &turn in &[false, true] {
+            for &mc in &[false, true] {
+                for &bc in &[false, true] {
+                    let probes = DetectorProbes {
+                        has_turn:    Box::new(move || turn),
+                        has_conn:    Box::new(move || mc),
+                        has_capture: Box::new(move || bc),
+                        meet_windows: probe_windows(&["Meet - standup"]),
+                    };
+                    let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
+                    // Latch is set (simulating a prior TURN call). The entry
+                    // formula must still be `turn || (mc && bc)`.
+                    det.turn_established = true;
+                    let obs = det.current_state();
+                    let expected = turn || (mc && bc);
+                    assert_eq!(
+                        obs.has_meet_connection, expected,
+                        "turn={turn} mc={mc} bc={bc}: has_meet_connection must equal turn || (mc && bc), got {}",
+                        obs.has_meet_connection
+                    );
+                }
+            }
+        }
+    }
+
     // (b) notify_exit resets turn_established so the next UDP call is detectable.
+    //     Post-detector-turn-latch-deadlock: the suppression arm is gone, so
+    //     has_conn is true both before and after notify_exit when mc && bc are
+    //     both true. The notify_exit → detectable-again assertion (the real
+    //     purpose of this test) stays; only the stale "before = false" assertion
+    //     (which encoded the deadlock) is corrected to true.
     #[test]
     fn notify_exit_resets_turn_established_for_next_udp_detection() {
         let probes = DetectorProbes {
@@ -941,10 +1039,10 @@ mod tests {
         let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
         det.turn_established = true;
 
-        // Before notify_exit: TURN gone, turn_established=true → has_conn=false
+        // Before notify_exit: suppression arm gone, mc && bc both true → has_conn=true
         let obs = det.current_state();
-        assert!(!obs.has_meet_connection,
-            "turn_established=true with TURN gone must yield has_conn=false");
+        assert!(obs.has_meet_connection,
+            "post-fix: turn_established=true no longer suppresses entry when mc && bc are true");
 
         det.notify_exit();
 
@@ -1058,7 +1156,14 @@ mod tests {
     }
 
     // (c) Otter.ai scenario: persistent browser mic keeps WASAPI active across calls.
-    //     turn_established=true must block detection for all polls until notify_exit.
+    //     Post-detector-turn-latch-deadlock: a latched turn_established flag no longer
+    //     blocks entry. With mc && bc both true, has_meet_connection is true (entry not
+    //     suppressed); after notify_exit() it is still true. The pre-fix version of this
+    //     test asserted the deadlock ("must block UDP detection"); that assertion encoded
+    //     the bug as desired behaviour. The Otter.ai lobby false-positive (HTTPS + WASAPI
+    //     from another app) is the pre-existing known limitation at canonical-spec line 107
+    //     — it is not latch-suppressed (notify_exit resets the latch at Idle, the same
+    //     state the lobby scenario starts from).
     #[test]
     fn otter_ai_persistent_mic_blocked_until_notify_exit() {
         let probes = DetectorProbes {
@@ -1070,11 +1175,12 @@ mod tests {
         let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
         det.turn_established = true;
 
-        // Multiple polls: turn_established=true, TURN=false → has_conn=false every time
+        // Post-fix invariant: a latched flag does NOT block entry when a real UDP
+        // call (mc && bc) is active. (mc=true, bc=true → has_conn=true.)
         for i in 0..3 {
             let obs = det.current_state();
-            assert!(!obs.has_meet_connection,
-                "poll {i}: turn_established=true must block UDP detection regardless of WASAPI");
+            assert!(obs.has_meet_connection,
+                "poll {i}: a latched turn_established must not suppress entry for a real UDP call (mc && bc)");
         }
 
         det.notify_exit();
