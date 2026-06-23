@@ -103,6 +103,17 @@ pub fn recording_started_body(source: RecordStartSource, title: Option<&str>) ->
     }
 }
 
+/// Body text for the recording-stopped toast. Pure so the wording can be shared
+/// between the manager path and the fallback (Tauri-direct) path without drift.
+/// An empty-string title collapses to the generic body so a caller passing
+/// `Some("")` doesn't render "Recording saved: " with a dangling colon.
+pub fn recording_stopped_body(meeting_name: Option<&str>) -> String {
+    match meeting_name {
+        Some(name) if !name.is_empty() => format!("Recording saved: {}", name),
+        _ => "Recording saved".to_string(),
+    }
+}
+
 /// Action set for the recording-active toast (started or detected): stop-and-save,
 /// or keep running. Order matches the spec (`[Stop recording]` then `[Continue]`).
 pub fn recording_active_actions() -> Vec<NotificationAction> {
@@ -205,10 +216,7 @@ impl Notification {
     /// Recording-stopped toast: "Recording saved: \<title\>" + `[Continue recording]` / `[Dismiss]`.
     /// The title names the saved meeting so the user can tell which session was persisted.
     pub fn recording_stopped(meeting_name: Option<String>) -> Self {
-        let body = match meeting_name.as_deref() {
-            Some(title) => format!("Recording saved: {}", title),
-            None => "Recording saved".to_string(),
-        };
+        let body = recording_stopped_body(meeting_name.as_deref());
         Notification::new("Meetily", body, NotificationType::RecordingStopped)
             .with_priority(NotificationPriority::Normal)
             .with_timeout(NotificationTimeout::Seconds(3))
@@ -348,6 +356,18 @@ mod tests {
     fn recording_stopped_without_title_uses_generic_body() {
         let n = Notification::recording_stopped(None);
         assert_eq!(n.body, "Recording saved");
+    }
+
+    #[test]
+    fn recording_stopped_body_collapses_empty_title_to_generic() {
+        // Boundary input: Some("") must not render "Recording saved: " with a
+        // dangling colon — it collapses to the generic body.
+        assert_eq!(recording_stopped_body(None), "Recording saved");
+        assert_eq!(recording_stopped_body(Some("")), "Recording saved");
+        assert_eq!(
+            recording_stopped_body(Some("Standup")),
+            "Recording saved: Standup"
+        );
     }
 
     #[test]

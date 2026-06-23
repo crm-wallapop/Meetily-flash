@@ -244,14 +244,18 @@ mod tests {
     #[test]
     fn build_xml_escapes_untrusted_title_and_body() {
         // A meeting name with XML metacharacters must not break out of the <text>
-        // element or inject an <action>.
+        // element or inject an <action>. Body and title are escaped by the same
+        // helper, but per the adversarial-TDD per-field rule each is probed for
+        // every metacharacter independently — including `<` in the body.
         let xml = build_action_toast_xml(
             "Standup <script>alert(1)</script>",
-            "Recording & \"meeting\" > done",
+            "Recording & \"meeting\" > done <img src=x>",
             &[],
         );
         assert!(!xml.contains("<script>"), "raw <script> leaked: {xml}");
+        assert!(!xml.contains("<img"), "raw <img> leaked from body: {xml}");
         assert!(xml.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(xml.contains("&lt;img src=x&gt;"));
         assert!(xml.contains("&amp;"));
         assert!(xml.contains("&quot;"));
         assert!(xml.contains("&gt;"));

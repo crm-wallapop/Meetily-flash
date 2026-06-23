@@ -201,6 +201,10 @@ impl use_cases::notification_action::RecordingStatePort for LiveRecordingState {
         audio::recording_commands::current_phase()
             == audio::recording_commands::RecordingPhase::Recording
     }
+    // During Saving, is_recording() returns false; a late [Stop recording] tap from
+    // the toast then resolves to NoOp, which is correct — stop is already in flight and
+    // a second stop call would race the save. The guard turns the tap into a silent no-op
+    // rather than a duplicate stop.
 }
 
 /// Validate a `meetily://` URI, guard it against the live recording state, and route the

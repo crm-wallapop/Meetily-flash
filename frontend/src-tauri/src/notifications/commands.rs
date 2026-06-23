@@ -1,5 +1,5 @@
 use crate::notifications::{
-    types::{Notification, RecordStartSource, recording_started_body},
+    types::{Notification, RecordStartSource, recording_started_body, recording_stopped_body},
     settings::NotificationSettings,
     manager::NotificationManager,
 };
@@ -282,6 +282,20 @@ pub async fn get_notification_stats(
 // Helper functions for showing specific notification types
 // These are used internally by the app and don't need to be Tauri commands
 
+/// Dispatch the record-start toast to the manager method that matches `source`. Both
+/// manager methods gate on the same `show_recording_started` setting, so this fn only
+/// selects wording (detector vs manual), not consent.
+async fn dispatch_start_by_source<R: Runtime>(
+    manager: &NotificationManager<R>,
+    meeting_name: Option<String>,
+    source: RecordStartSource,
+) -> Result<()> {
+    match source {
+        RecordStartSource::Manual => manager.show_recording_started(meeting_name).await,
+        RecordStartSource::Detector => manager.show_meeting_detected(meeting_name).await,
+    }
+}
+
 /// Show recording started notification (internal use). `source` selects the detector
 /// ("Meeting detected — recording: \<title\>") vs manual ("Recording started: \<title\>")
 /// wording so a user can tell an auto-started recording from a manual one.
@@ -297,23 +311,11 @@ pub async fn show_recording_started_notification<R: Runtime>(
         meeting_name
     );
 
-    // Branch helper: both manager methods gate on the same `show_recording_started` setting.
-    async fn via_manager<R: Runtime>(
-        manager: &NotificationManager<R>,
-        meeting_name: Option<String>,
-        source: RecordStartSource,
-    ) -> Result<()> {
-        match source {
-            RecordStartSource::Manual => manager.show_recording_started(meeting_name).await,
-            RecordStartSource::Detector => manager.show_meeting_detected(meeting_name).await,
-        }
-    }
-
     // Check if manager is initialized
     let manager_lock = manager_state.read().await;
     if let Some(manager) = manager_lock.as_ref() {
         log_info!("Notification manager found, showing recording started notification");
-        via_manager(manager, meeting_name, source).await
+        dispatch_start_by_source(manager, meeting_name, source).await
     } else {
         drop(manager_lock);
         log_info!("Notification manager not initialized, initializing now...");
@@ -331,7 +333,7 @@ pub async fn show_recording_started_notification<R: Runtime>(
                 // Now use the initialized manager
                 let manager_lock = manager_state.read().await;
                 if let Some(manager) = manager_lock.as_ref() {
-                    via_manager(manager, meeting_name, source).await
+                    dispatch_start_by_source(manager, meeting_name, source).await
                 } else {
                     log_error!("Manager still not available after initialization");
                     Ok(())
@@ -355,7 +357,10 @@ pub async fn show_recording_started_notification<R: Runtime>(
                 let title = "Meetily";
                 let body = recording_started_body(source, meeting_name.as_deref());
 
-                log_info!("Using direct Tauri notification fallback: {} - {}", title, body);
+                log_info!(
+                    "Using direct Tauri notification fallback (source={:?}): {} - {}",
+                    source, title, body
+                );
 
                 match app_handle.notification().builder()
                     .title(title)
@@ -402,10 +407,7 @@ pub async fn show_recording_stopped_notification<R: Runtime>(
 
         // Use direct Tauri notification as fallback for stop notification.
         let title = "Meetily";
-        let body = match meeting_name.as_deref() {
-            Some(name) => format!("Recording saved: {}", name),
-            None => "Recording saved".to_string(),
-        };
+        let body = recording_stopped_body(meeting_name.as_deref());
 
         log_info!("Using direct Tauri notification fallback: {} - {}", title, body);
 

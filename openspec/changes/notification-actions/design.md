@@ -77,6 +77,18 @@ The stopped toast's body is `"Recording saved: \<meeting title\>"` (spec require
 
 `dispatch_notification_action` checks for `#` in the raw `after_scheme` string **before** splitting off the query. This rejects `meetily://recording/stop?x=1#frag` as malformed (not just `stop#frag`), so a fragment is never silently swallowed with the discarded query. Defence in depth — the `Action` type carries no payload so no untrusted data could propagate either way, but rejecting fragments consistently is less surprising than the prior "accept if query-present, reject otherwise" behaviour.
 
+### Decision 11: Round-2 architecture review convergence (shark tank, post-fix)
+
+A second adversarial shark-tank pass (4 parallel reviewers: correctness, spec-compliance, architecture, security) ran against `824e35a..b2b6a00`. Spec-compliance and correctness surfaced no findings. The architecture reviewer surfaced actionable items that were triaged against the code; the confirmed ones are fixed here, the false positives were rejected:
+
+- **DRY (Critical):** the stopped-toast body formatting (`"Recording saved: <title>"` / `"Recording saved"`) was duplicated between `Notification::recording_stopped` (`types.rs`) and the fallback path in `show_recording_stopped_notification` (`commands.rs`). Extracted `recording_stopped_body(meeting_name: Option<&str>) -> String` mirroring `recording_started_body`, used by both call sites.
+- **Empty-string title boundary (Minor → folded into the DRY extraction):** `Some("")` would previously render `"Recording saved: "` with a dangling colon. `recording_stopped_body` collapses `None`, `Some("")`, and any empty name to the generic body. Test `recording_stopped_body_collapses_empty_title_to_generic` added.
+- **`via_manager` nesting (Important, KISS):** the inner `async fn via_manager` in `show_recording_started_notification` is hoisted to the module-level `dispatch_start_by_source` so it is greppable and not nested inside another `async fn`.
+- **Fallback log source attribution (Important):** the direct-Tauri fallback log in `show_recording_started_notification` now includes `source={:?}` so a developer debugging "why did the detector wording appear in the fallback?" can attribute it.
+- **Saving-phase race documentation (Important):** `LiveRecordingState::is_recording` carries a WHY note explaining that during `RecordingPhase::Saving`, a late `[Stop recording]` tap resolves to `NoOp` on purpose (stop is already in flight; a second stop would race the save).
+- **Body `<` injection test (Important, adversarial TDD per-field rule):** `build_xml_escapes_untrusted_title_and_body` now includes `<img src=x>` in the body (not just the title's `<script>`) so each field is probed for `<` independently, per the adversarial-TDD mandate.
+- **Rejected (false positive):** "legacy `start_recording` hardcodes Manual undocumented" — the rationale comment already exists at `lib.rs:118-119` (`// The legacy no-devices start path is always manual.`).
+
 ## Risks / Trade-offs
 
 - **[Action toasts invisible if AUMID branding is missing]** (fresh machine / clean dev build) → buttons render only when the AUMID is registered; document the dev-setup branding step (already applied this session) and rely on the installer for production. No crash either way.
