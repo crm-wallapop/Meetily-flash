@@ -75,13 +75,24 @@ export const SMOKE_DEFAULTS_INIT_SCRIPT = `
   d.register('stop_recording', function () {
     window.__smokeRecording = false;
     if (bus) {
+      // Saving emits synchronously (matches the real backend: streams release,
+      // phase flips to Saving — all before stop_recording returns). The
+      // SQLite-save signal fires next so the sidebar refetch sees the row.
       bus.emit('recording-state-changed', { phase: 'Saving' });
       // recording-saved-to-db is what useRecordingStop listens for to call
       // refetchMeetings(); without it the sidebar never re-fetches and the
       // just-recorded meeting stays invisible even though stop_recording resolved.
       bus.emit('recording-saved-to-db', { meeting_id: '${SMOKE_MEETING_ID}' });
-      bus.emit('recording-state-changed', { phase: 'Idle' });
-      bus.emit('recording-stopped', { folder_path: '/tmp/smoke' });
+      // Idle + recording-stopped fire on a later macrotask. In the real backend
+      // this gap is background_shutdown (MP4 flush + SQLite save + phase reset);
+      // here it also breaks the React 18 batch so the Saving paint is observable.
+      // Default 0 defers by one macrotask (Saving still paints one frame); a spec
+      // sets __smokeSavingPhaseMs to hold Saving long enough to assert it.
+      var idleDelay = window.__smokeSavingPhaseMs || 0;
+      setTimeout(function () {
+        bus.emit('recording-state-changed', { phase: 'Idle' });
+        bus.emit('recording-stopped', { folder_path: '/tmp/smoke' });
+      }, idleDelay);
     }
     window.__smokeMeetings.push({
       id: '${SMOKE_MEETING_ID}',

@@ -105,4 +105,61 @@ test.describe('recording-basic smoke (4.1)', () => {
       timeout: 15_000,
     }).toBe(true);
   });
+
+  // fix-stop-responsiveness task 8.3 (Saving-phase render half). The mock emits
+  // recording-state-changed(Saving) on stop; this test proves the event → context
+  // → RecordingStatusBar isSaving branch wiring renders in the real webview, then
+  // clears when Idle arrives. Branch CONTENT (gray spinner, no red dot, no Stop
+  // button) is pinned at the component altitude by the Vitest 7.1 test; this spec
+  // pins only the wiring that only the full webview can prove. The 1s TIMING and
+  // no-audio-after-stop halves of 8.3 are Rust-side (cargo phase-machine test
+  // stop_sync_path_transitions_phase_to_saving_and_returns_fast + the real-stream
+  // teardown that needs a live mic).
+  test('stop transitions the status bar into Saving then clears on Idle', async ({ page }) => {
+    page.on('dialog', (d) => d.dismiss());
+    await page.addInitScript(TAURI_MOCK_INIT_SCRIPT);
+    await page.addInitScript(SMOKE_DEFAULTS_INIT_SCRIPT);
+    await page.goto('/');
+    await page.waitForFunction(
+      () => (window as unknown as { __tauriCoreMockActive?: boolean }).__tauriCoreMockActive === true,
+      { timeout: 15_000 },
+    );
+
+    // Hold Saving across a macrotask boundary so the branch paints. With the
+    // default 0 the Saving+Idle setStates land one frame apart already, but a
+    // longer window makes the render unambiguously assertable.
+    await page.evaluate(() => {
+      (window as unknown as { __smokeSavingPhaseMs?: number }).__smokeSavingPhaseMs = 1500;
+    });
+
+    const sidebarMic = page.locator('button.bg-red-500').filter({
+      has: page.locator('svg.lucide-mic'),
+    });
+    await expect(sidebarMic).toBeVisible({ timeout: 15_000 });
+    await sidebarMic.click();
+
+    const stopButton = page.locator('button:not([disabled])').filter({
+      has: page.locator('svg.lucide-square'),
+    });
+    await expect(stopButton).toBeVisible({ timeout: 15_000 });
+
+    await stopButton.click();
+    await expect.poll(() => callLogIncludes(page, 'stop_recording'), {
+      timeout: 15_000,
+    }).toBe(true);
+
+    // Saving branch renders (RecordingStatusBar isSaving path).
+    const savingBar = page.getByTestId('saving-status-bar');
+    await expect(savingBar).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByTestId('saving-spinner')).toBeVisible();
+    await expect(page.getByTestId('saving-label')).toHaveText('Saving…');
+
+    // Idle arrives after the held window → Saving branch unmounts.
+    await expect(savingBar).toBeHidden({ timeout: 5_000 });
+
+    // The synchronous recording-saved-to-db emit still drove the sidebar refresh.
+    await expect.poll(() => smokeMeetingsHas(page, SMOKE_MEETING_TITLE), {
+      timeout: 15_000,
+    }).toBe(true);
+  });
 });

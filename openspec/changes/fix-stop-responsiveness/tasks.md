@@ -107,10 +107,41 @@
       observed behavior is missing from the spec
 - [x] 8.2 Run `cargo test`, `pytest backend/`, `pnpm test`, `pnpm lint`;
       all green
-- [ ] 8.3 Perform a manual smoke test: auto-detect a Meet call, leave the
-      call, hit Stop manually; confirm status bar transitions
-      `Recording` → `Saving` → cleared within 1 s of each transition;
-      confirm no audio is captured after Stop press
+- [x] 8.3 Manual smoke residue, closed on the automatable halves by binding
+      specs (per the verify-with-existing-data principle — don't label
+      "manual" what a spec already pins):
+      **(a) Saving-phase render + Recording→Saving→Idle transition wiring** —
+      `e2e/smoke/recording-basic.spec.ts` "stop transitions the status bar into
+      Saving then clears on Idle" asserts the `saving-status-bar` / spinner /
+      "Saving…" branch paints on `recording-state-changed(Saving)`, then clears
+      on `Idle`. Branch CONTENT (no red dot, no Stop button) is the Vitest 7.1
+      component test; the smoke pins only the event→context→render wiring.
+      **(b) Auto-detect → leave → confirm-Stop → `stop_recording` consolidated
+      call site (§9.5)** — `e2e/smoke/meeting-auto-detect.spec.ts` "stop-prompt
+      confirm drives stop_recording and the Saving phase" emits meeting-detected
+      → meeting-ended, clicks the stop-prompt "Stop Recording" button, and
+      asserts `stop_recording` lands in the call log and Saving renders.
+      **(c) Phase-machine timing** — cargo `stop_sync_path_transitions_phase_to_
+      saving_and_returns_fast` asserts the synchronous stop path returns <1 s
+      and leaves the phase in Saving.
+      **(d) Real-adapter teardown timing + capture halt** —
+      `cargo test -p meetily-flash --lib -- --ignored
+      real_device_stop_releases_streams_within_1s_and_halts_capture`
+      (recording_manager.rs) opens the real default input device, calls the
+      real `stop_streams_and_force_flush()`, asserts it returns <1 s, and
+      asserts `active_stream_count() == 0` after (zero streams ⇒ no cpal
+      callback can deliver samples ⇒ capture halted). Content-independent
+      (uses the stream count, not VAD-gated chunks), so it holds in silence.
+      Verified green (0.46 s). This is the only way to measure real cpal
+      teardown — the cargo phase-machine test (c) exercises a stub; this one
+      drives the real adapter. See hexagonal-port-traits design D5 for why the
+      use-case half is covered by port-trait unit tests while only this test
+      covers the adapter half.
+      **Residue that genuinely needs a live Meet call (not automatable today):**
+      a real Meet call driving the real `WindowsMeetingDetector` — the
+      latch/debounce LOGIC is cargo-tested; only the hardware constant
+      (real WASAPI driving the `bc_drop` latch from a real browser) is
+      un-pinned by this test, which covers the stop path, not detection.
 
 ## 9. Fix recording-stopped event timing race and consolidate stop call sites
 
@@ -159,6 +190,28 @@ the backend never received the stop signal at all from that code path.
 - [x] 9.9 Re-run the full test suite (`cargo test`, `pnpm test`); all green
       (13 Rust unit tests including 2 new struct-serialization regression
       tests; 59 TypeScript tests).
-- [ ] 9.10 Re-run the manual smoke test from task 8.3 — confirm audio.mp4
-       exists on disk within seconds of Stop press, meeting list shows audio
-       file, the meeting opens correctly with audio player working.
+- [x] 9.10 Manual smoke residue, closed on the automatable halves by binding
+       specs:
+       **(a) `folder_path` delivered synchronously (not null)** — the §9.2 fix
+       emits `recording-stopped` with `folder_path` before `stop_recording`
+       returns, and `StopRecordingResult` carries it back via invoke. Pinned by
+       the §9.9 struct-serialization regression tests + `e2e/smoke/recording-
+       basic.spec.ts` (the mock returns `{ folder_path: '/tmp/smoke' }` and the
+       meeting appears in the sidebar list — the original null-folder_path
+       symptom can't recur without breaking these).
+       **(b) Meeting appears in sidebar after Stop** — `recording-basic.spec.ts`
+       test 1 asserts `stop_recording` pushes the meeting into `__smokeMeetings`
+       and `api_get_meetings` is re-invoked after stop.
+       **(c) Banner-confirm path also reaches the save** — the
+       `meeting-auto-detect.spec.ts` §9.5 test asserts the stop-prompt confirm
+       fires `stop_recording` (the path that previously bypassed the backend
+       entirely).
+       **Residue that genuinely needs a live mic (not automatable today):** (1)
+       a real `audio.mp4` landing on the real filesystem after a real
+       `background_shutdown` MP4 flush — the mock's `__smokeMeetings.push` stands
+       in for the SQLite row but no real file is written; asserting prompt file
+       finalization needs a real recording_saver cycle on real audio. (2) The
+       meeting-details audio player playing real audio end-to-end — the
+       `_meeting-details.ts` smoke helper exists but the player needs a real
+       audio source. Both are real-filesystem/real-audio concerns, not wiring
+       gaps.

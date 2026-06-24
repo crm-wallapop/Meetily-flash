@@ -634,6 +634,7 @@ impl Drop for RecordingManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // Task 3.4: two RecordingManager::new() calls produce different ids
     #[test]
@@ -643,5 +644,66 @@ mod tests {
         assert_ne!(a.get_meeting_id(), b.get_meeting_id());
         assert!(a.get_meeting_id().starts_with("meeting-"));
         assert!(b.get_meeting_id().starts_with("meeting-"));
+    }
+
+    // fix-stop-responsiveness Option 1 (see hexagonal-port-traits design D5):
+    // the ONLY way to measure real cpal stream-teardown timing. The port-trait
+    // unit tests (landed with hexagonal-port-traits) prove the use-case half —
+    // no added latency, chunk-gating at the seam. This #[ignore] test proves
+    // the real-adapter half: that stop_streams_and_force_flush against a live
+    // capture device actually completes within the 1 s bound and that no
+    // further audio is captured. Runs on real audio (no vulkan, no GPU); needs
+    // a default input device present.
+    //   cargo test -p meetily-flash -- --ignored real_device_stop_releases_streams_within_1s_and_halts_capture
+    #[tokio::test]
+    #[serial]
+    #[ignore]
+    async fn real_device_stop_releases_streams_within_1s_and_halts_capture() {
+        let mic = crate::audio::devices::default_input_device()
+            .expect("no default input device — run on a machine with a microphone");
+        let mic = std::sync::Arc::new(mic);
+
+        let mut manager = RecordingManager::new();
+        // The returned receiver is VAD-gated and the current pipeline path
+        // discards the transcription sender, so chunk arrival is NOT a reliable
+        // capture-liveness signal. Use stream_manager.active_stream_count()
+        // instead — it is content-independent (holds in silence).
+        let _chunk_rx = manager
+            .start_recording(Some(mic), None, false, -30)
+            .await
+            .expect("start_recording failed on the default input device");
+
+        // Let the cpal streams finish registering after start_streams awaited.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Capture is live: the mic stream is active.
+        assert!(
+            manager.stream_manager.active_stream_count() > 0,
+            "no active streams after start — start_recording did not open the mic"
+        );
+
+        // The 1 s bound is dominated by this call (real cpal stream Drop +
+        // pipeline force-flush + state cleanup) — the adapter half the
+        // port-trait tests cannot reach.
+        let stop_start = std::time::Instant::now();
+        manager
+            .stop_streams_and_force_flush()
+            .await
+            .expect("stop_streams_and_force_flush failed");
+        let stop_elapsed = stop_start.elapsed();
+        assert!(
+            stop_elapsed < std::time::Duration::from_secs(1),
+            "stop_streams_and_force_flush took {:?}, must be <1s (recording-lifecycle spec)",
+            stop_elapsed
+        );
+
+        // Halt: zero active streams means no cpal callback can deliver samples,
+        // so no capture occurs regardless of mic input. This is the
+        // content-independent form of the no-audio-after-stop guarantee.
+        assert_eq!(
+            manager.stream_manager.active_stream_count(),
+            0,
+            "streams still active after stop — capture was not halted"
+        );
     }
 }

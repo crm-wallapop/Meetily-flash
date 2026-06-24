@@ -160,4 +160,76 @@ test.describe('meeting-auto-detect smoke (detection-result wiring)', () => {
 
     await expect(page.getByText('Google Meet call ended — stop recording?')).toBeVisible({ timeout: 10_000 });
   });
+
+  // fix-stop-responsiveness §9.5 — the consolidated stop call site. Both the
+  // manual Stop button and the stop-prompt banner's confirm button must route
+  // through handleRecordingStop → recordingService.stopRecording() →
+  // invoke('stop_recording'). The first two tests prove the banners render; this
+  // one proves the stop-prompt confirm actually reaches the Rust command and
+  // drives the Saving phase (the regression from §9: the banner-confirm path
+  // used to call handleRecordingStop without ever invoking stop_recording).
+  test('stop-prompt confirm drives stop_recording and the Saving phase', async ({ page }) => {
+    page.on('dialog', (d) => d.dismiss());
+    await page.addInitScript(TAURI_MOCK_INIT_SCRIPT);
+    await page.addInitScript(SMOKE_DEFAULTS_INIT_SCRIPT);
+    await page.goto('/');
+    await page.waitForFunction(
+      () => (window as unknown as { __tauriCoreMockActive?: boolean }).__tauriCoreMockActive === true,
+      { timeout: 15_000 },
+    );
+
+    await expect
+      .poll(() => listenerCount(page, 'meeting-detected'), { timeout: 15_000 })
+      .toBeGreaterThanOrEqual(1);
+
+    // Hold Saving so the branch paints (same reason as recording-basic).
+    await page.evaluate(() => {
+      (window as unknown as { __smokeSavingPhaseMs?: number }).__smokeSavingPhaseMs = 1500;
+    });
+
+    // Detector-started recording (sets isDetectorStartedRef for the stop-prompt).
+    await page.evaluate(() => {
+      (
+        window as unknown as {
+          __tauriMockEventBus: { emit: (e: string, p: unknown) => void };
+        }
+      ).__tauriMockEventBus.emit('meeting-detected', {
+        default_title: 'Call',
+        candidate_titles: ['Call'],
+      });
+    });
+    await expect
+      .poll(() => callLogIncludes(page, 'start_recording_with_devices_and_meeting'), {
+        timeout: 10_000,
+      })
+      .toBe(true);
+    await page.getByRole('button', { name: 'Start Recording' }).click();
+    await expect(page.getByText('Google Meet detected — start recording?')).toBeHidden({ timeout: 5_000 });
+
+    await expect
+      .poll(() => listenerCount(page, 'meeting-ended'), { timeout: 15_000 })
+      .toBeGreaterThanOrEqual(1);
+    await page.evaluate(() => {
+      (
+        window as unknown as {
+          __tauriMockEventBus: { emit: (e: string, p: unknown) => void };
+        }
+      ).__tauriMockEventBus.emit('meeting-ended', undefined);
+    });
+    await expect(page.getByText('Google Meet call ended — stop recording?')).toBeVisible({ timeout: 10_000 });
+
+    expect(await callLogIncludes(page, 'stop_recording')).toBe(false);
+
+    // The stop-prompt confirm button routes through the consolidated stop path.
+    await page.getByRole('button', { name: 'Stop Recording' }).click();
+
+    await expect
+      .poll(() => callLogIncludes(page, 'stop_recording'), { timeout: 10_000 })
+      .toBe(true);
+
+    // The shared stop_recording handler emits Saving — the banner-confirm path
+    // reached the same phase transition as the manual Stop button.
+    await expect(page.getByTestId('saving-status-bar')).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByTestId('saving-label')).toHaveText('Saving…');
+  });
 });
