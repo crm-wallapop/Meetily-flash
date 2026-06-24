@@ -1,3 +1,15 @@
+> **STATUS: DEFERRED 2026-06-24.** Both stop-responsiveness guarantees are
+> already covered — G1 (status bar clears <1s) by the phase-machine cargo tests,
+> G2 (capture halts / no chunks after stop) by the `#[ignore]` real-device test
+> `real_device_stop_releases_streams_within_1s_and_halts_capture` (merged
+> 2026-06-24). The Why/What below were written against incorrect architecture
+> premises (the flush is in `background_shutdown`, not the sync path; the manager
+> is a global static consumed on stop, not app state) — see `design.md`
+> § "DEFERRED & architecture corrections" for the real architecture, the deferral
+> reasoning, and the corrected Option 2 implementation path. Revisit when a §4
+> adversarial need (device-disconnect / permission-denied / sample-rate-mismatch)
+> demands a swappable capture port.
+
 ## Why
 
 The recording stop path can't be unit-tested. `RecordingManager`

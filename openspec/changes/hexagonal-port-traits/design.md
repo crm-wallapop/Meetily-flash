@@ -1,3 +1,93 @@
+## ⚠️ DEFERRED & architecture corrections (2026-06-24)
+
+**Status: DEFERRED.** Parked; do not implement from the original Context or
+D1–D6 below without reading this section — **they were written against
+incorrect premises about the current code.**
+
+### What the code actually does (the original design got these wrong)
+
+1. **The flush is NOT on the synchronous stop path.** `stop_streams_and_force_flush`
+   runs in `background_shutdown` (`recording_commands.rs:714`), inside the
+   `tokio::spawn`'d task — it was *deliberately moved out of the sync path* (the
+   comment at `:708-711` says "moved here from stop_recording's synchronous path so
+   the command returns fast"). The sync path (`stop_recording :514-696`) only does:
+   phase guard → CAS `Recording→Saving` → `take()` the manager → extract id/folder
+   → emit Saving + recording-stopped → spawn. It never touches streams.
+2. **`RecordingManager` is a process-global static, not Tauri app state.** It is
+   `RECORDING_MANAGER: Mutex<Option<RecordingManager>>`, and `stop_recording`
+   **consumes** it via `.take()` (`:562`) — it does not borrow it. So D3
+   ("`Arc<dyn AudioCapturePort>` in app state") and tasks §5 are impossible without
+   first migrating the manager from global-static to app-state — a refactor the
+   original design never scoped.
+3. **There is no flush call on the sync path to extract.** Tasks §2.2 ("lift the
+   synchronous stop body to inject a port flush") has no injection point.
+
+### What is already covered without this change
+
+- **G1 (status bar clears <1s):** already a permanent `cargo test` gate — the sync
+  path's CAS never touches streams, and the phase-machine tests
+  (`stop_sync_path_transitions_phase_to_saving_and_returns_fast` et al.) assert the
+  fast flip.
+- **G2 (capture halts / no chunks after stop):** covered by the `#[ignore]`
+  real-device test `real_device_stop_releases_streams_within_1s_and_halts_capture`
+  (merged 2026-06-24) — asserts `stop_streams_and_force_flush` returns <1s and
+  `active_stream_count()==0`. Runs via `cargo test -- --ignored` with a mic.
+
+### Why deferred
+
+- **Option 1 (minimal port at the flush seam):** rejected — its §3 cargo tests are
+  largely tautological (the no-chunks-after-stop fake test asserts the fake stops
+  sending — true by construction) or redundant with the existing G1 phase-machine
+  gate. It would prove the use case *calls* `port.stop`, little more.
+- **Option 2 (full DI):** correct architecture but disproportionate now — requires
+  migrating `RECORDING_MANAGER` global-static → app-state across every access site
+  on the critical recording path (where the 2-min-lag and `folder_path=null` bugs
+  lived), for value (full §2a) with **no current caller** (no §4 change exists
+  yet). That is the YAGNI case (CLAUDE.md §6).
+- Net: G1 is already permanently gated, G2 is already `#[ignore]`-covered; both
+  options are either thin (1) or speculative+risky (2).
+
+### Trigger to revisit
+
+A concrete **§4 adversarial need** that requires faking the capture lifecycle
+without real hardware — device-disconnect mid-recording, permission-denied, or
+sample-rate-mismatch. When one lands, YAGNI no longer holds and the port earns
+its full cost.
+
+### The Option 2 path (when revisited)
+
+Corrected implementation against the real architecture:
+
+1. **Migrate the manager to app state (prerequisite).** Convert
+   `RECORDING_MANAGER: Mutex<Option<RecordingManager>>` →
+   `Arc<RwLock<Option<RecordingManager>>>` in Tauri state via `app.manage()`.
+   Update every access site: `start_recording` (`recording_commands.rs:175,413`),
+   `stop_recording` (`:542`), cancel paths, `get_state`, the startup GC, tray, and
+   the `get_recording_state` command. The `.take()` on stop becomes a
+   `.write().take()` on the app-state lock.
+2. **Define `AudioCapturePort`** (`ports/audio_capture.rs`):
+   `async fn start(...) -> Result<mpsc::UnboundedReceiver<AudioChunk>>` +
+   `async fn stop_streams_and_flush(&mut self) -> Result<()>`. `impl` it for
+   `RecordingManager` (delegate to existing methods).
+3. **Composition root (corrected D3).** In `lib.rs` construct ONE
+   `Arc<RecordingManager>`; clone + upcast into
+   `Arc<dyn AudioCapturePort + Send + Sync>`; register both in app state. Sole
+   cross-boundary importer per §2a.
+4. **Wire the port into `background_shutdown`.** Its signature changes from
+   `manager: Option<RecordingManager>` → `manager: Option<Box<dyn AudioCapturePort>>`;
+   the flush at `:714` then goes through the trait. The sync path's CAS is untouched
+   (it is the G1 gate, already phase-machine-tested).
+5. **Fake + §3 tests** (`use_cases/recording_lifecycle`). Now meaningful because the
+   whole capture lifecycle — not just the flush — is behind the swappable port, so
+   device-disconnect / permission-denied / sample-rate-mismatch can be simulated.
+6. **Keep the `#[ignore]` real-device test** as the adapter confirmation (D5:
+   port = permanent logic gate; `#[ignore]` = hardware confirmation).
+
+---
+
+> The original Context + Decisions below are preserved for history. They contain
+> the factual errors corrected above.
+
 ## Context
 
 The detector side of the Tauri app already proves the target pattern:
