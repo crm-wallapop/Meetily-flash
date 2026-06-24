@@ -646,10 +646,12 @@ mod tests {
         assert!(b.get_meeting_id().starts_with("meeting-"));
     }
 
-    // fix-stop-responsiveness Option 1 (see hexagonal-port-traits design D5):
-    // the ONLY way to measure real cpal stream-teardown timing. The port-trait
-    // unit tests (landed with hexagonal-port-traits) prove the use-case half —
-    // no added latency, chunk-gating at the seam. This #[ignore] test proves
+    // fix-stop-responsiveness: the ONLY way to measure real cpal
+    // stream-teardown timing. hexagonal-port-traits — the port-trait
+    // complement that would prove the use-case half (no added latency,
+    // chunk-gating at the seam) — was DEFERRED 2026-06-24 (see its design.md
+    // § "DEFERRED & architecture corrections"), so this #[ignore] test is
+    // currently the sole automated stop-responsiveness coverage. It proves
     // the real-adapter half: that stop_streams_and_force_flush against a live
     // capture device actually completes within the 1 s bound and that no
     // further audio is captured. Runs on real audio (no vulkan, no GPU); needs
@@ -683,8 +685,8 @@ mod tests {
         );
 
         // The 1 s bound is dominated by this call (real cpal stream Drop +
-        // pipeline force-flush + state cleanup) — the adapter half the
-        // port-trait tests cannot reach.
+        // pipeline force-flush + state cleanup) — the real-adapter half that
+        // unit tests cannot reach without a live device.
         let stop_start = std::time::Instant::now();
         manager
             .stop_streams_and_force_flush()

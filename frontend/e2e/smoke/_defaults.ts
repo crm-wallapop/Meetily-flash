@@ -75,9 +75,10 @@ export const SMOKE_DEFAULTS_INIT_SCRIPT = `
   d.register('stop_recording', function () {
     window.__smokeRecording = false;
     if (bus) {
-      // Saving emits synchronously (matches the real backend: streams release,
-      // phase flips to Saving — all before stop_recording returns). The
-      // SQLite-save signal fires next so the sidebar refetch sees the row.
+      // Saving emits synchronously (matches the real backend: the phase flips
+      // to Saving before stop_recording returns; stream release happens later
+      // in background_shutdown, which the Idle-emit macrotask below models).
+      // The SQLite-save signal fires next so the sidebar refetch sees the row.
       bus.emit('recording-state-changed', { phase: 'Saving' });
       // recording-saved-to-db is what useRecordingStop listens for to call
       // refetchMeetings(); without it the sidebar never re-fetches and the
