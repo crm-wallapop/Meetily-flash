@@ -43,12 +43,14 @@ happens after background shutdown completes.
 - **AND** the UI never simultaneously presents "Stop is disabled / processing"
   and "Recording is active"
 
+## ADDED Requirements
+
 ### Requirement: Stop command is idempotent
 
-A second invocation of `stop_recording` while the first is still in progress
-SHALL be a no-op: the audio streams, transcription task, and file saver are
-owned by exactly one shutdown sequence; a concurrent second call observes
-the phase has already transitioned out of `Recording` and returns early.
+A duplicate `stop_recording` while the first is still in progress SHALL be a no-op.
+The audio streams, transcription task, and file saver are owned by exactly
+one shutdown sequence; a concurrent second call observes the phase has
+already transitioned out of `Recording` and returns early.
 
 #### Scenario: User double-presses the Stop button
 
@@ -91,8 +93,6 @@ transitions to `Saving`.
 - **WHEN** the user speaks at time T + 0.5 s (streams may still be draining)
 - **THEN** whether this audio is captured is implementation-defined, but the
   duration of the capture window SHALL NOT exceed 1 second from the stop command
-
-## ADDED Requirements
 
 ### Requirement: Lifecycle phase is observable from the frontend
 
@@ -138,8 +138,7 @@ a clear message; no partial recording is created.
 
 ### Requirement: Background shutdown failures surface as toasts, not stuck UI
 
-If the background shutdown work (transcription drain, Whisper unload, file
-save) fails after the phase has transitioned to `Saving`, the system SHALL:
+If background shutdown work fails after the phase has reached `Saving`, the system SHALL still reach `Idle` and surface the error — it MUST never leave the UI stuck in `Saving`.
 - still transition the phase to `Idle` (never leave the UI stuck in `Saving`);
 - emit a `recording-save-failed` Tauri event carrying an error message;
 - log the failure with sufficient context for the startup GC pass to reconcile
