@@ -679,6 +679,18 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
             self.last_bc = Some(bc);
         }
 
+        // Self-heal a stale latch when the system is definitively idle (no TURN
+        // relay, no capture session). notify_exit() on InCall->Idle is the primary
+        // reset, but a missed exit (task aborted, crash recovery without detector
+        // reconstruction) can leave turn_established=true across calls, which would
+        // then produce a spurious is_turn_exit=true on the next poll. Clearing it on
+        // a fully-idle poll closes that idle-gap window. (Does not fire mid-call,
+        // where bc=true; the during-call stale-latch case stays covered by
+        // notify_exit() + reconstruction-on-restart.)
+        if !turn && !bc {
+            self.turn_established = false;
+        }
+
         // Latch TURN-established only when a TURN relay coincides with an active
         // browser capture session. `bc` is the in-call discriminator the detector
         // already relies on for UDP entry/exit — non-Meet GCP traffic (Gmail, Drive)
@@ -979,6 +991,46 @@ mod tests {
         let obs = det.current_state();
         assert!(obs.has_meet_connection,
             "a latched turn_established flag must NOT suppress entry when a real UDP call (mc && bc) is active");
+    }
+
+    // Self-healing (review Recommendation #1): a stale turn_established left by
+    // a missed exit (task aborted before notify_exit, or crash recovery without
+    // detector reconstruction) must clear on a definitively-idle poll (no TURN
+    // relay, no capture session). Otherwise the next poll carries a spurious
+    // is_turn_exit=true. Fails on the pre-self-heal code: the latch persists.
+    #[test]
+    fn stale_turn_latch_self_heals_on_idle_poll() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let turn_flag = Arc::new(AtomicBool::new(true));
+        let bc_flag = Arc::new(AtomicBool::new(true));
+        let turn_p = Arc::clone(&turn_flag);
+        let bc_p = Arc::clone(&bc_flag);
+        let probes = DetectorProbes {
+            has_turn:    Box::new(move || turn_p.load(SeqCst)),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(move || bc_p.load(SeqCst)),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        };
+        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
+
+        // Poll 1: TURN relay + active capture -> latch sets.
+        let _ = det.current_state();
+        assert!(det.turn_established, "sanity: latch sets on TURN + capture");
+
+        // Missed exit: both signals drop, notify_exit() never fires.
+        turn_flag.store(false, SeqCst);
+        bc_flag.store(false, SeqCst);
+        let obs = det.current_state();
+        assert!(!det.turn_established,
+            "a definitively-idle poll must self-heal the stale latch");
+        assert!(!obs.is_turn_exit,
+            "the idle poll must not report a spurious TURN exit");
+
+        // New UDP call: capture returns, TURN stays absent. No poisoned flag.
+        bc_flag.store(true, SeqCst);
+        let obs = det.current_state();
+        assert!(!obs.is_turn_exit,
+            "new UDP call after self-heal must not inherit the stale TURN-exit flag");
     }
 
     // Task 1.2 — Spurious-latch non-poison: TURN active but NO browser capture
