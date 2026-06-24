@@ -1274,10 +1274,7 @@ mod tests {
         // The NaN chunk must not merge into any cluster (NaN > threshold is false).
         let nan_label = labels[3];
         let others: Vec<u32> = labels[0..3].iter().copied().collect();
-        assert!(
-            !others.contains(&nan_label) || others.iter().filter(|&&l| l == nan_label).count() == 0,
-            "NaN chunk must not corrupt other clusters"
-        );
+        assert!(!others.contains(&nan_label), "NaN chunk must not corrupt other clusters");
     }
 
     // Verification gap on diarization-clustering-perf: oracle_new_equals_naive

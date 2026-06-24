@@ -170,9 +170,14 @@ pub async fn rediarize_meeting<R: tauri::Runtime>(
 
     let app_clone = app.clone();
     let mid = meeting_id.clone();
-    tokio::spawn(async move {
+    // Surface diarization failure to the frontend: the task returns its result
+    // so the command can return Err on failure. Without this a failure logs
+    // silently and returns Ok(0), the diarization-complete event the frontend
+    // awaits to clear its isRediarizing spinner never fires, and the spinner
+    // hangs indefinitely.
+    let join_result = tokio::spawn(async move {
         let result = run_diarization_for_meeting(&pool, &mid, threshold_fp, registry).await;
-        match result {
+        match &result {
             Ok(r) => {
                 let _ = app_clone.emit("diarization-complete", serde_json::json!({
                     "meeting_id": mid,
@@ -185,9 +190,15 @@ pub async fn rediarize_meeting<R: tauri::Runtime>(
                 log::error!("rediarize_meeting: FAILED for {}: {}", mid, e);
             }
         }
-    }).await.map_err(|e| e.to_string())?;
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())?;
 
-    Ok(0)
+    match join_result {
+        Ok(_) => Ok(0),
+        Err(e) => Err(format!("rediarize_meeting failed for {}: {}", meeting_id, e)),
+    }
 }
 
 #[tauri::command]
@@ -207,9 +218,11 @@ pub async fn reset_speaker_labels<R: tauri::Runtime>(
 
     let app_clone = app.clone();
     let mid = meeting_id.clone();
-    tokio::spawn(async move {
+    // Return Err on diarization failure so the frontend's isRediarizing spinner
+    // clears (its catch block runs) instead of hanging on a silent Ok(0).
+    let join_result = tokio::spawn(async move {
         let result = run_diarization_for_meeting(&pool, &mid, threshold_fp, registry).await;
-        match result {
+        match &result {
             Ok(r) => {
                 let _ = app_clone.emit("diarization-complete", serde_json::json!({
                     "meeting_id": mid,
@@ -222,9 +235,15 @@ pub async fn reset_speaker_labels<R: tauri::Runtime>(
                 log::error!("reset_speaker_labels: FAILED for {}: {}", mid, e);
             }
         }
-    }).await.map_err(|e| e.to_string())?;
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())?;
 
-    Ok(0)
+    match join_result {
+        Ok(_) => Ok(0),
+        Err(e) => Err(format!("reset_speaker_labels failed for {}: {}", meeting_id, e)),
+    }
 }
 
 #[tauri::command]
@@ -882,7 +901,25 @@ fn enforce_max_speakers_cap(
                 seg.speaker_id = nn_of_isolated;
             }
         }
-        centroids.remove(&most_isolated);
+        // Recompute the surviving centroid as the duration-weighted average of
+        // the two merged clusters, matching cluster_by_centroids
+        // (sherpa_adapter.rs:527). Without this the stored speaker_embeddings
+        // row would hold only nn's original members, degrading cross-meeting
+        // matching and skewing the next merge iteration's isolation ranking.
+        let dur_iso = *durations.get(&most_isolated).unwrap_or(&0.0);
+        let dur_nn = *durations.get(&nn_of_isolated).unwrap_or(&0.0);
+        let total = dur_iso + dur_nn;
+        if let Some(cent_iso) = centroids.remove(&most_isolated) {
+            if total > 0.0 {
+                let w_iso = dur_iso as f32 / total as f32;
+                let w_nn = dur_nn as f32 / total as f32;
+                if let Some(cent_nn) = centroids.get_mut(&nn_of_isolated) {
+                    for (i, v) in cent_iso.iter().enumerate() {
+                        cent_nn[i] = cent_nn[i] * w_nn + v * w_iso;
+                    }
+                }
+            }
+        }
     }
 }
 
