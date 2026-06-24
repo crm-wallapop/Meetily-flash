@@ -216,13 +216,22 @@ where
     Fut: std::future::Future<Output = Result<(String, f32)>>,
 {
     let total = processable_segments.len();
-    let checkpoints = load_checkpoints(pool, meeting_id)
-        .await
-        .unwrap_or_default();
+    let checkpoints = match load_checkpoints(pool, meeting_id).await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Failed to load retranscription checkpoints for {} ({}) — will re-transcribe all segments", meeting_id, e);
+            Vec::new()
+        }
+    };
     let matched = match_checkpoints(&checkpoints, processable_segments);
 
+    // Cumulative completed count, monotonic across the loop. The raw segment
+    // index is NOT monotonic under non-contiguous checkpoints (indices {0,2}
+    // make index 1 dip below the initial matched.len()=2), which sent the
+    // progress bar backwards on a resume-with-gaps.
+    let mut completed = matched.len();
     if !matched.is_empty() {
-        on_progress(matched.len(), total);
+        on_progress(completed, total);
     }
 
     let mut all_transcripts: Vec<(String, f64, f64)> = Vec::new();
@@ -244,11 +253,12 @@ where
             continue;
         }
 
-        on_progress(i, total);
+        on_progress(completed, total);
 
         // Skip very short segments (< 100ms = 1600 samples at 16kHz).
         if segment.samples.len() < 1600 {
             debug!("Skipping short segment {} with {} samples", i, segment.samples.len());
+            completed += 1;
             continue;
         }
 
@@ -274,8 +284,10 @@ where
         } else {
             debug!("Segment {}/{}: empty transcription", i + 1, total);
         }
+        completed += 1;
     }
 
+    on_progress(completed, total);
     Ok((all_transcripts, total_confidence))
 }
 
@@ -1668,6 +1680,44 @@ mod tests {
         assert_eq!(total, 4);
         let expected = 25 + ((2f32 / 4f32) * 55.0) as u32;
         assert_eq!(expected, 52, "non-contiguous 2-of-4 fraction maps to 52%");
+    }
+
+    // Adversarial: the FULL on_progress call sequence must be monotonic
+    // non-decreasing. The pre-cumulative-counter code reported the raw segment
+    // index, which dipped (2 -> 1) on non-contiguous checkpoints {0,2} and sent
+    // the progress bar backwards. The two fraction tests above only capture the
+    // FIRST call, so they could not see the dip.
+    #[tokio::test]
+    #[serial]
+    async fn progress_sequence_is_monotonic_for_non_contiguous_checkpoints() {
+        reset_flags();
+        let pool = checkpoint_pool().await;
+        let meeting_id = "meet-monotonic";
+
+        let segments = vec![seg(0., 1.), seg(1., 2.), seg(2., 3.), seg(3., 4.)];
+        save_checkpoint(&pool, meeting_id, 0, "a", 0., 1., 0.9).await.unwrap();
+        save_checkpoint(&pool, meeting_id, 2, "c", 2., 3., 0.9).await.unwrap();
+
+        let calls: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(vec![]));
+        let c = Arc::clone(&calls);
+        let (_all, _) = transcribe_segments_checkpointed(
+            meeting_id,
+            &segments,
+            &pool,
+            |_i, _seg| async { Ok(("new".to_string(), 0.5f32)) },
+            move |done, _total| { c.lock().unwrap().push(done); },
+        )
+        .await
+        .unwrap();
+
+        let recorded = calls.lock().unwrap().clone();
+        assert!(!recorded.is_empty(), "progress must fire");
+        for w in recorded.windows(2) {
+            assert!(w[1] >= w[0],
+                "progress must be monotonic non-decreasing: {recorded:?} dipped");
+        }
+        assert_eq!(*recorded.last().unwrap(), 4,
+            "final progress must report all segments done: {recorded:?}");
     }
 
     // Start-stop-resume lifecycle (verification gap on the YIELD path). Every
