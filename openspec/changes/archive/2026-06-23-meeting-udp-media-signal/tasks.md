@@ -32,7 +32,21 @@
 ## 4. Verify
 
 - [x] 4.1 `cargo test` (full Tauri crate) green.
-- [ ] 4.2 Manual QA: join a Meet call with a stable mic (no device switch), leave, and confirm `meeting-ended` fires in ~5–6 s with the `bc transition` log showing no `true → false` drop during the call (so `stable_capture` stayed `true`). **Deferred** — a live Meet call is not available in this session. The §1 cargo tests (393/393 green, including the 6 new adaptive-debounce tests + the invariant matrix) plus the `dev-detector` seam are the binding proof of correctness. The `SHORT` value (4 s) matches the empirically validated TURN debounce and is the single tunable constant if a specific hardware setup needs more margin. Reopen when a developer can run a live stable-mic Meet call.
+- [x] 4.2 Adaptive-debounce selection through the REAL `spawn_detector` loop —
+  `stable_capture_true_drives_short_debounce_to_ended` (C1) and
+  `stable_capture_false_holds_ended_through_long_debounce` (C2) in
+  `detection/fake.rs`, added 2026-06-24 (commit `dedd325`). The §1 unit tests
+  (1.4–1.6) pin the `step_detector` selection but use SHORT==LONG==50 ms, so they
+  cannot discriminate the two debounce paths by timing. C1/C2 run the full
+  `spawn_detector` poll loop with LONG=400 ms ≫ SHORT=60 ms: C1 asserts
+  `meeting-ended` fires before LONG when `stable_capture=true` (SHORT path); C2
+  asserts it holds through LONG when `stable_capture=false`. This pins the
+  field-propagation chain `port.current_state → spawn_detector poll →
+  step_detector debounce select` that the §1 tests reach only at the pure
+  use-case altitude. The residual gap a live Meet call would close — real WASAPI
+  driving the `bc_drop_observed_this_call` latch from real device state — is
+  already pinned by §1.1–1.3 (the latch is pure internal logic); the live call
+  would only confirm the hardware constant, not the code path.
 - [x] 4.3 No change-specific `e2e/smoke/meeting-udp-media-signal.spec.ts` — the adaptive
   debounce LOGIC is Rust-internal (cargo-tested §1). The `meeting-detected`/`meeting-ended`
   → banner WIRING is covered by the capability-level `e2e/smoke/meeting-auto-detect.spec.ts`

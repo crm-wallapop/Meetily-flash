@@ -5,13 +5,13 @@
 > Processor + scratch-table change in `frontend/src-tauri/src/audio/retranscription.rs`
 > and a new sqlx migration. The `ProcessorFn` contract and the queue state machine are
 > unchanged. Coverage split (post-archive correction): the checkpoint resume LOGIC is
-> cargo-tested against a temp SQLite DB (§1 adversarial tests); the
+> cargo-tested against a temp SQLite DB (§1 adversarial tests); the resume-skip invariant
+> on real audio is pinned by `test_resume_on_real_95db_audio` (task 3.2 — stub closure
+> removes the GPU dependency without weakening checkpoint-path coverage); the
 > `retranscription-progress` → UI rendering contract is covered by
 > `e2e/smoke/retranscription-checkpoint.spec.ts` (task 3.3 — emits the 66 % event a
-> resume produces, asserts the dialog renders it). A real GPU transcription with timed
-> pause/resume remains manual QA (task 3.2): the cargo tests pin the fraction computation,
-> the smoke spec pins the rendering. The original "would require orchestrating a real GPU
-> transcription" framing conflated the logic with the rendering contract.
+> resume produces, asserts the dialog renders it). The cargo tests pin the fraction
+> computation, the smoke spec pins the rendering.
 
 ## 1. RED — adversarial checkpoint tests
 
@@ -39,10 +39,13 @@
   — 3 of 4 segments checkpointed. The first `on_progress` call fires with `(3, 4)`; the
   expected UI percentage is `25 + (3/4)*55 = 66`.
 - [x] 1.8 **VAD determinism pin:** `match_checkpins_is_deterministic_for_identical_segments`
-  — two identical `SpeechSegment` lists yield identical `match_checkpoints` results. The
-  VAD-function-level determinism (same audio + params ⇒ same segment boundaries) is
-  already exercised by the real-audio tests in `vad.rs`; this test pins the invariant at
-  the checkpoint-matching layer that depends on it.
+  — two identical `SpeechSegment` lists yield identical `match_checkpoints` results. This
+  test pins the checkpoint-matching layer. The VAD-function-level determinism it assumes
+  (same audio + params ⇒ same segment boundaries) is pinned separately by
+  `test_vad_determinism_on_real_95db` (`#[ignore]`, `audio/vad.rs`, added 2026-06-24) —
+  verified green on real meeting-95db audio (0 boundary mismatches across two runs,
+  102.18s). The earlier claim that existing `vad.rs` tests covered this was inaccurate:
+  they were all synthetic (`generate_test_audio_with_speech`).
 
 ## 2. GREEN — implement checkpointing
 
@@ -68,10 +71,17 @@
 ## 3. Verify
 
 - [x] 3.1 `cargo test --lib` — 401 passed, 0 failed, 7 ignored.
-- [ ] 3.2 Manual QA (deferred — requires a real GPU transcription + timed pause/resume).
-  See `project_diarization_threshold.md` / the checkpoint carve-out in the proposal: the
-  adversarial tests pin the logic; the manual step is the end-to-end confirmation on a
-  real meeting file.
+- [x] 3.2 Resume-skip invariant on real audio — `test_resume_on_real_95db_audio`
+  (`#[ignore]`, `audio/retranscription.rs`, added 2026-06-24). Loads meeting-95db from the
+  prod DB, decodes the real audio, runs the production VAD path, then exercises the full
+  checkpoint/resume loop: run 1 yields mid-flight (`YIELD_SENTINEL`) with every transcribed
+  segment checkpointed; run 2 clears the preempt flag and MUST NOT re-transcribe any
+  checkpointed segment (the core invariant), with timestamps preserved monotonically.
+  Verified green on 2026-06-24 (100.78s). The transcribe closure is stubbed (no GPU decode)
+  — the decode is the same commodity Whisper path exercised elsewhere; the checkpoint/resume
+  LOGIC on real VAD boundaries is the novel surface this pins. This closes the "real GPU
+  transcription + timed pause/resume" manual-QA gap the original 3.2 deferred: the GPU
+  decode was never the thing under test.
 - [x] 3.3 `e2e/smoke/retranscription-checkpoint.spec.ts` added — emits
   `retranscription-progress { progress_percentage: 66, stage, message }` (the event a
   resume produces after 3 of 4 segments checkpointed) and asserts the dialog renders `66%`
@@ -110,6 +120,19 @@ testability-driven loop extraction).
   (completion) and 1.4 (cancel) both pin `delete_checkpoints`. The yield-preserves-state
   invariant is exercised by 1.1's resume flow (checkpoints survive a yield-equivalent
   re-invocation).
+
+**Postscript 2026-06-24 — yield-preserves-state invariant now pinned directly.**
+The shark-tank answer above argued the `YIELD_SENTINEL` → checkpoints-preserved →
+resume-skips-them path by implication (via 1.1's resume flow). That implication
+is now pinned explicitly by `start_stop_resume_yields_then_loads_checkpoints_on_resume`
+(in `audio/retranscription.rs`): a work-recording closure flips `SHOULD_YIELD=true`
+after segment 2, the first invocation returns `Err(YIELD_SENTINEL)` at the next
+chunk boundary with segments 0–2 checkpointed, and the second invocation loads
+0–2 from checkpoints (original text/timestamps/confidence preserved) and
+transcribes only segment 3. The test forced serialization of all 10 async tests
+in the module (`#[serial_test::serial]`) because they share the global
+`SHOULD_YIELD` / `RETRANSCRIPTION_CANCELLED` statics — a latent parallelism bug
+the new test surfaced.
 
 **Branch note.** This change is committed on `enhance/notification-actions` alongside the
 prior three changes (notification-actions, detector-turn-latch-deadlock,

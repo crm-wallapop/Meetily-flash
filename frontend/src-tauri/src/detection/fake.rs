@@ -219,4 +219,106 @@ mod tests {
         let snap = handle.0.lock().unwrap().clone();
         let _ = format!("{snap:?}");
     }
+
+    // C1 — stable_capture=true drives the SHORT debounce through the REAL
+    // spawn_detector loop, end-to-end. test_2_1 covers only the default
+    // (stable_capture=false) AND uses SHORT==LONG==50ms so it cannot
+    // discriminate the two paths by timing. Here LONG >> SHORT; a custom exit
+    // observation with stable_capture=true must produce meeting-ended within
+    // SHORT, well before LONG elapses. Proves the field propagates
+    // port.current_state → spawn_detector poll → step_detector debounce select.
+    #[tokio::test]
+    async fn stable_capture_true_drives_short_debounce_to_ended() {
+        let fake = FakeMeetingDetector::new();
+        let handle = FakeDetectorHandle(fake.handle());
+        let emitter = Arc::new(RecEmitter {
+            detected: Mutex::new(vec![]),
+            ended: Mutex::new(0),
+        });
+        let suppress = Arc::new(AtomicBool::new(false));
+        let settings = DetectorSettings {
+            debounce_duration: Duration::from_millis(400),           // LONG
+            stable_udp_debounce_duration: Duration::from_millis(60), // SHORT
+            turn_debounce_duration: Duration::from_millis(400),
+        };
+        let det = spawn_detector(
+            fake,
+            Arc::clone(&emitter),
+            Duration::from_millis(5),
+            settings,
+            suppress,
+        );
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        handle.apply("joined", Some("Short")).unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        // Exit observation: bc dropped (enters debounce branch), UDP not TURN,
+        // stable_capture=true selects the SHORT debounce.
+        {
+            let mut g = handle.0.lock().unwrap();
+            g.has_browser_capture_session = false;
+            g.is_turn_exit = false;
+            g.stable_capture = true;
+        }
+
+        // Past SHORT (60ms) + poll slack, well under LONG (400ms).
+        tokio::time::sleep(Duration::from_millis(160)).await;
+        let ended_before_long = *emitter.ended.lock().unwrap();
+        det.abort();
+
+        assert!(
+            ended_before_long >= 1,
+            "stable_capture=true must end at SHORT (~60ms), not wait for LONG (400ms); ended={ended_before_long}"
+        );
+    }
+
+    // C2 — stable_capture=false holds meeting-ended through LONG. Symmetric to
+    // C1: a transient-prone exit observation must NOT fire ended at SHORT
+    // elapsed. Pins that the LONG branch is actually reachable through the
+    // spawn loop, not only at the pure step_detector altitude.
+    #[tokio::test]
+    async fn stable_capture_false_holds_ended_through_long_debounce() {
+        let fake = FakeMeetingDetector::new();
+        let handle = FakeDetectorHandle(fake.handle());
+        let emitter = Arc::new(RecEmitter {
+            detected: Mutex::new(vec![]),
+            ended: Mutex::new(0),
+        });
+        let suppress = Arc::new(AtomicBool::new(false));
+        let settings = DetectorSettings {
+            debounce_duration: Duration::from_millis(400),           // LONG
+            stable_udp_debounce_duration: Duration::from_millis(60), // SHORT
+            turn_debounce_duration: Duration::from_millis(400),
+        };
+        let det = spawn_detector(
+            fake,
+            Arc::clone(&emitter),
+            Duration::from_millis(5),
+            settings,
+            suppress,
+        );
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        handle.apply("joined", Some("Long")).unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        // Exit observation: transient-prone → stable_capture=false → LONG.
+        {
+            let mut g = handle.0.lock().unwrap();
+            g.has_browser_capture_session = false;
+            g.is_turn_exit = false;
+            g.stable_capture = false;
+        }
+
+        // At SHORT+slack (160ms < LONG=400ms), ended must NOT have fired.
+        tokio::time::sleep(Duration::from_millis(160)).await;
+        let ended_before_long = *emitter.ended.lock().unwrap();
+        det.abort();
+
+        assert_eq!(
+            ended_before_long, 0,
+            "stable_capture=false must hold meeting-ended until LONG (400ms); ended={ended_before_long}"
+        );
+    }
 }

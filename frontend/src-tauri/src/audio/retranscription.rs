@@ -1296,6 +1296,7 @@ mod tests {
     // determinism) against a temp SQLite DB with a stub transcription closure.
 
     use crate::audio::vad::SpeechSegment;
+    use serial_test::serial;
     use std::sync::Mutex;
 
     /// Build an in-memory SQLite pool with the checkpoint table applied.
@@ -1339,6 +1340,7 @@ mod tests {
     // Task 1.1 — Resume-skip: segments 0..N with checkpoints are NOT re-transcribed;
     // the loop resumes at N+1. Uses a stub closure recording which indices ran.
     #[tokio::test]
+    #[serial]
     async fn resume_skips_checkpointed_segments() {
         reset_flags();
         let pool = checkpoint_pool().await;
@@ -1382,6 +1384,7 @@ mod tests {
     // (no in-memory state) loads them and resumes. The loaded transcripts reach the
     // final accumulator.
     #[tokio::test]
+    #[serial]
     async fn crash_recovery_loads_checkpoints_and_resumes() {
         reset_flags();
         let pool = checkpoint_pool().await;
@@ -1411,6 +1414,7 @@ mod tests {
 
     // Task 1.3 — Completion cleanup: after a full run, delete_checkpoints leaves no rows.
     #[tokio::test]
+    #[serial]
     async fn completion_deletes_checkpoints() {
         let pool = checkpoint_pool().await;
         let meeting_id = "meet-complete";
@@ -1426,6 +1430,7 @@ mod tests {
 
     // Task 1.4 — Cancel cleanup: the same delete_checkpoints is used on cancel.
     #[tokio::test]
+    #[serial]
     async fn cancel_deletes_checkpoints() {
         let pool = checkpoint_pool().await;
         let meeting_id = "meet-cancel";
@@ -1444,6 +1449,7 @@ mod tests {
     // end_ms) does not match the re-derived segment at that index is NOT trusted;
     // the segment is re-transcribed.
     #[tokio::test]
+    #[serial]
     async fn vad_mismatch_invalidates_stale_checkpoint() {
         reset_flags();
         let pool = checkpoint_pool().await;
@@ -1482,6 +1488,7 @@ mod tests {
     // save_checkpoint call catches the error. The transcript still reaches the
     // accumulator.
     #[tokio::test]
+    #[serial]
     async fn checkpoint_write_failure_degrades_never_aborts() {
         reset_flags();
         // A closed pool causes INSERT to fail. We simulate this by using a pool
@@ -1521,6 +1528,7 @@ mod tests {
     // Task 1.7 — Progress reflects the checkpoint on resume: the on_progress callback
     // is called with (loaded_count, total) on resume, reporting the checkpointed fraction.
     #[tokio::test]
+    #[serial]
     async fn progress_reflects_checkpointed_fraction_on_resume() {
         reset_flags();
         let pool = checkpoint_pool().await;
@@ -1576,5 +1584,426 @@ mod tests {
         assert_eq!(m2.len(), 2, "identical segment lists must yield identical match sets");
         assert_eq!(m1[0].text, m2[0].text);
         assert_eq!(m1[1].text, m2[1].text);
+    }
+
+    // Gap-case: checkpoints at NON-CONTIGUOUS indices {0, 2} (index 1 missing).
+    // This is the exact scenario design Decision 6 calls out — the loop must
+    // iterate ALL indices and skip each checkpoint inline, NOT "resume at first
+    // non-matching". Asserts the gap segment (1) and tail (3) are transcribed
+    // and the accumulator interleaves checkpoints with fresh work.
+    #[tokio::test]
+    #[serial]
+    async fn non_contiguous_checkpoints_transcribe_the_gap_and_tail() {
+        reset_flags();
+        let pool = checkpoint_pool().await;
+        let meeting_id = "meet-gap";
+
+        let segments = vec![seg(0., 1000.), seg(1000., 2000.), seg(2000., 3000.), seg(3000., 4000.)];
+
+        // Checkpoints at 0 and 2 — index 1 is the gap.
+        save_checkpoint(&pool, meeting_id, 0, "cp-0", 0., 1000., 0.9).await.unwrap();
+        save_checkpoint(&pool, meeting_id, 2, "cp-2", 2000., 3000., 0.9).await.unwrap();
+
+        let transcribed_indices: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(vec![]));
+        let ti = Arc::clone(&transcribed_indices);
+        let (all, _) = transcribe_segments_checkpointed(
+            meeting_id,
+            &segments,
+            &pool,
+            |i, _seg| {
+                let ti = Arc::clone(&ti);
+                async move {
+                    ti.lock().unwrap().push(i);
+                    Ok((format!("new-{}", i), 0.5f32))
+                }
+            },
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        // Gap (1) and tail (3) transcribed; checkpoints 0 and 2 skipped inline.
+        assert_eq!(*transcribed_indices.lock().unwrap(), vec![1, 3],
+            "non-contiguous checkpoints must transcribe the gap and tail, not resume-at-first-non-match");
+        assert_eq!(all.len(), 4, "all four transcripts must reach the accumulator");
+        assert_eq!(all[0].0, "cp-0");
+        assert_eq!(all[1].0, "new-1", "gap segment must be freshly transcribed");
+        assert_eq!(all[2].0, "cp-2");
+        assert_eq!(all[3].0, "new-3", "tail segment must be freshly transcribed");
+    }
+
+    // Fraction formula under NON-CONTIGUOUS checkpoints: 2 of 4 loaded (indices
+    // 0 and 2). The first on_progress must report (2, 4) → 25 + (2/4)*55 = 52%.
+    // Pins the formula for the gap case (task 1.7 only covered contiguous 3-of-4).
+    #[tokio::test]
+    #[serial]
+    async fn progress_fraction_holds_for_non_contiguous_checkpoints() {
+        reset_flags();
+        let pool = checkpoint_pool().await;
+        let meeting_id = "meet-gap-progress";
+
+        let segments = vec![seg(0., 1.), seg(1., 2.), seg(2., 3.), seg(3., 4.)];
+        save_checkpoint(&pool, meeting_id, 0, "a", 0., 1., 0.9).await.unwrap();
+        save_checkpoint(&pool, meeting_id, 2, "c", 2., 3., 0.9).await.unwrap();
+
+        let first_progress: Arc<Mutex<Option<(usize, usize)>>> = Arc::new(Mutex::new(None));
+        let fp = Arc::clone(&first_progress);
+        let (_all, _) = transcribe_segments_checkpointed(
+            meeting_id,
+            &segments,
+            &pool,
+            |_i, _seg| async { Ok(("new".to_string(), 0.5f32)) },
+            move |loaded, total| {
+                let mut g = fp.lock().unwrap();
+                if g.is_none() {
+                    *g = Some((loaded, total));
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        let (loaded, total) = first_progress.lock().unwrap().expect("progress callback must fire");
+        assert_eq!(loaded, 2, "first progress must report 2 loaded checkpoints (non-contiguous)");
+        assert_eq!(total, 4);
+        let expected = 25 + ((2f32 / 4f32) * 55.0) as u32;
+        assert_eq!(expected, 52, "non-contiguous 2-of-4 fraction maps to 52%");
+    }
+
+    // Start-stop-resume lifecycle (verification gap on the YIELD path). Every
+    // existing checkpoint test plants checkpoints directly into the DB then
+    // calls transcribe_segments_checkpointed ONCE — none exercises the real
+    // scheduler-driven pause. Production path:
+    //   1. transcription_queue::SHOULD_YIELD is set by the scheduler when a
+    //      higher-priority job preempts retranscription mid-flight.
+    //   2. transcribe_segments_checkpointed observes SHOULD_YIELD at the top
+    //      of each chunk iteration and returns Err(YIELD_SENTINEL) BEFORE
+    //      touching the next segment.
+    //   3. Every segment transcribed before the yield MUST have a checkpoint
+    //      row (save_checkpoint runs after each successful transcription).
+    //   4. On resume, the loop loads those checkpoints and skips them inline,
+    //      only transcribing the uncheckpointed tail.
+    //
+    // This test flips SHOULD_YIELD=true inside segment 2's transcribe closure
+    // (simulating mid-flight preemption), verifies YIELD_SENTINEL surfaces on
+    // the NEXT iteration boundary with segments 0–2 checkpointed, then re-
+    // invokes with SHOULD_YIELD=false and asserts 0–2 load from checkpoints
+    // (original text + timestamps + confidence) and only segment 3 runs fresh.
+    #[tokio::test]
+    #[serial]
+    async fn start_stop_resume_yields_then_loads_checkpoints_on_resume() {
+        reset_flags();
+        let pool = checkpoint_pool().await;
+        let meeting_id = "meet-yield-resume";
+
+        let segments = vec![seg(0., 1000.), seg(1000., 2000.), seg(2000., 3000.), seg(3000., 4000.)];
+
+        let transcribed_indices: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(vec![]));
+        let ti = Arc::clone(&transcribed_indices);
+
+        // First invocation: closure flips SHOULD_YIELD=true during segment 2.
+        // The loop finishes segment 2 (already awaited) + writes its checkpoint,
+        // then checks SHOULD_YIELD at iteration 3 and returns YIELD_SENTINEL.
+        let yield_err = transcribe_segments_checkpointed(
+            meeting_id,
+            &segments,
+            &pool,
+            |i, _seg| {
+                let ti = Arc::clone(&ti);
+                async move {
+                    ti.lock().unwrap().push(i);
+                    if i == 2 {
+                        crate::use_cases::transcription_queue::SHOULD_YIELD
+                            .store(true, Ordering::SeqCst);
+                    }
+                    Ok((format!("initial-{}", i), 0.5f32))
+                }
+            },
+            |_, _| {},
+        )
+        .await
+        .expect_err("first invocation must yield, not complete");
+
+        assert!(
+            yield_err.to_string().contains(YIELD_SENTINEL),
+            "yield error must carry YIELD_SENTINEL, got: {}",
+            yield_err
+        );
+        assert_eq!(
+            *transcribed_indices.lock().unwrap(),
+            vec![0, 1, 2],
+            "yield must fire at a chunk boundary after segment 2 completes; segments 0–2 transcribed"
+        );
+
+        // Scheduler resumes the job: clear the preempt flag.
+        crate::use_cases::transcription_queue::SHOULD_YIELD.store(false, Ordering::SeqCst);
+
+        let ti2 = Arc::clone(&transcribed_indices);
+        let (all, total_conf) = transcribe_segments_checkpointed(
+            meeting_id,
+            &segments,
+            &pool,
+            |i, _seg| {
+                let ti = Arc::clone(&ti2);
+                async move {
+                    ti.lock().unwrap().push(i);
+                    Ok((format!("resumed-{}", i), 0.7f32))
+                }
+            },
+            |_, _| {},
+        )
+        .await
+        .expect("resume must complete (SHOULD_YIELD cleared)");
+
+        // transcribed_indices is cumulative (both closures pushed into the same
+        // Arc) — resume added only index 3.
+        assert_eq!(
+            *transcribed_indices.lock().unwrap(),
+            vec![0, 1, 2, 3],
+            "resume must skip checkpointed 0–2 and only transcribe segment 3"
+        );
+
+        // Accumulator: 0–2 from checkpoints (preserved text + timestamps),
+        // segment 3 freshly transcribed.
+        assert_eq!(all.len(), 4, "all four transcripts must reach the accumulator");
+        assert_eq!(all[0].0, "initial-0", "segment 0 must come from checkpoint");
+        assert_eq!(all[0].1, 0.0, "checkpoint start_ms preserved");
+        assert_eq!(all[0].2, 1000.0, "checkpoint end_ms preserved");
+        assert_eq!(all[1].0, "initial-1");
+        assert_eq!(all[1].1, 1000.0);
+        assert_eq!(all[1].2, 2000.0);
+        assert_eq!(all[2].0, "initial-2");
+        assert_eq!(all[2].1, 2000.0);
+        assert_eq!(all[2].2, 3000.0);
+        assert_eq!(all[3].0, "resumed-3", "segment 3 must be freshly transcribed");
+        assert_eq!(all[3].1, 3000.0, "segment 3 timestamp from live segment, not checkpoint");
+        assert_eq!(all[3].2, 4000.0);
+
+        // Confidence: 3 checkpointed at 0.5 + 1 fresh at 0.7 = 2.2.
+        assert!(
+            (total_conf - 2.2).abs() < 1e-5,
+            "total confidence must sum checkpointed (0.5×3) + fresh (0.7), got {}",
+            total_conf
+        );
+
+        reset_flags();
+    }
+
+    // Gold-standard resume oracle on REAL audio: load meeting-95db, run the
+    // production VAD path to get real SpeechSegments (variable lengths, real
+    // silero boundaries, possible short segments), then drive the same
+    // yield-then-resume flow as the synthetic test above against that real
+    // segment structure.
+    //
+    // Why: the synthetic test pins the resume LOGIC on hand-built segments
+    // with clean 1000ms spacing. Real silero VAD produces uneven segment
+    // lengths, sub-1600-sample segments (skipped by the <1600 guard at
+    // retranscription.rs:250), and real (start_ms, end_ms) pairs that
+    // `match_checkpoints` must validate. A resume bug that only manifests on
+    // non-uniform segment geometry would pass the synthetic test and fail
+    // here. This is the exact "real GPU transcription + timed pause/resume"
+    // item the archive originally deferred as task 3.2 — the stub closure
+    // removes the GPU dependency without weakening the checkpoint-path
+    // coverage (the decode is never the thing under test; the
+    // checkpoint/resume loop is).
+    //
+    // `cargo test -p meetily-flash -- --ignored test_resume_on_real_95db_audio`
+    #[tokio::test]
+    #[serial]
+    #[ignore]
+    async fn test_resume_on_real_95db_audio() {
+        reset_flags();
+        let pool = checkpoint_pool().await;
+        let meeting_id = "meeting-95db-yield-resume";
+
+        let db_path = r"C:\Users\user\AppData\Roaming\com.meetily.ai\meeting_minutes.sqlite";
+        let db_pool = sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=rw", db_path))
+            .await
+            .expect("DB connect");
+        let meeting_row_id = "meeting-00000000-0000-4000-8000-000000000002";
+        let row = sqlx::query("SELECT folder_path FROM meetings WHERE id = ?")
+            .bind(meeting_row_id)
+            .fetch_optional(&db_pool)
+            .await
+            .expect("fetch meeting");
+        let folder_path: Option<String> = row.and_then(|r| sqlx::Row::get(&r, "folder_path"));
+        let folder = folder_path.expect("meeting-95db folder_path missing");
+
+        let audio_path = find_real_audio_in_folder(std::path::Path::new(&folder))
+            .expect("audio file in meeting-95db folder");
+        let decoded = crate::audio::decoder::decode_audio_file(&audio_path)
+            .expect("decode audio");
+        let samples = decoded.to_whisper_format();
+
+        // Production VAD path with the production redemption time.
+        let segments = crate::audio::vad::get_speech_chunks(&samples, VAD_REDEMPTION_TIME_MS)
+            .expect("VAD on real audio");
+        eprintln!(
+            "Real-audio resume: {} VAD segments from meeting-95db ({:.1}s audio)",
+            segments.len(),
+            samples.len() as f64 / 16000.0
+        );
+        // Need enough segments to yield mid-flight and still have a tail.
+        assert!(
+            segments.len() >= 6,
+            "test needs ≥6 VAD segments to exercise yield+resume, got {}; \
+             pick a longer real recording",
+            segments.len()
+        );
+
+        // Pick a yield point past the first few segments. The closure flips
+        // SHOULD_YIELD=true during segment `yield_after`'s "decode"; the loop
+        // then returns YIELD_SENTINEL at the top of iteration `yield_after+1`.
+        let yield_after = (segments.len() / 3).max(2);
+
+        let run1_indices: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(vec![]));
+        let r1 = Arc::clone(&run1_indices);
+
+        let yield_err = transcribe_segments_checkpointed(
+            meeting_id,
+            &segments,
+            &pool,
+            |i, _seg| {
+                let r1 = Arc::clone(&r1);
+                async move {
+                    r1.lock().unwrap().push(i);
+                    if i == yield_after {
+                        crate::use_cases::transcription_queue::SHOULD_YIELD
+                            .store(true, Ordering::SeqCst);
+                    }
+                    Ok((format!("initial-{}", i), 0.5f32))
+                }
+            },
+            |_, _| {},
+        )
+        .await
+        .expect_err("first invocation must yield, not complete");
+
+        assert!(
+            yield_err.to_string().contains(YIELD_SENTINEL),
+            "yield error must carry YIELD_SENTINEL, got: {}",
+            yield_err
+        );
+
+        let run1_idx = run1_indices.lock().unwrap().clone();
+        assert_eq!(
+            *run1_idx.last().unwrap(),
+            yield_after,
+            "last transcribed segment in run 1 must be the yield-trigger index"
+        );
+
+        // Every index the closure saw in run 1 MUST have a checkpoint row —
+        // that's the invariant resume depends on.
+        let checkpoints_after_run1 =
+            load_checkpoints(&pool, meeting_id).await.expect("load checkpoints");
+        let cp_indices: std::collections::HashSet<usize> = checkpoints_after_run1
+            .iter()
+            .map(|c| c.segment_index)
+            .collect();
+        for &i in &run1_idx {
+            assert!(
+                cp_indices.contains(&i),
+                "segment {} was transcribed in run 1 but has no checkpoint; \
+                 resume cannot skip it",
+                i
+            );
+        }
+        eprintln!(
+            "  run 1: transcribed {} segments, {} checkpoints persisted",
+            run1_idx.len(),
+            cp_indices.len()
+        );
+
+        // Scheduler resumes the job: clear the preempt flag.
+        crate::use_cases::transcription_queue::SHOULD_YIELD.store(false, Ordering::SeqCst);
+
+        let run2_indices: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(vec![]));
+        let r2 = Arc::clone(&run2_indices);
+        let (all, _total_conf) = transcribe_segments_checkpointed(
+            meeting_id,
+            &segments,
+            &pool,
+            |i, _seg| {
+                let r2 = Arc::clone(&r2);
+                async move {
+                    r2.lock().unwrap().push(i);
+                    Ok((format!("resumed-{}", i), 0.7f32))
+                }
+            },
+            |_, _| {},
+        )
+        .await
+        .expect("resume must complete (SHOULD_YIELD cleared)");
+
+        let run2_idx = run2_indices.lock().unwrap().clone();
+
+        // THE CORE INVARIANT: run 2's closure must NEVER be called on an
+        // index that was checkpointed in run 1. If it is, a real user's
+        // resumed job is silently re-transcribing work that's already done —
+        // the exact regression this test exists to catch.
+        for &i in &run2_idx {
+            assert!(
+                !cp_indices.contains(&i),
+                "segment {} was checkpointed in run 1 but re-transcribed in run 2; \
+                 resume is NOT skipping checkpointed segments on real audio",
+                i
+            );
+        }
+
+        // The yield-trigger index itself MUST be skipped on resume (it was
+        // checkpointed before the yield). Segments after it that aren't too
+        // short must be transcribed.
+        assert!(
+            !run2_idx.contains(&yield_after),
+            "yield-trigger segment {} was checkpointed; it must NOT be re-transcribed",
+            yield_after
+        );
+
+        eprintln!(
+            "  run 2: transcribed {} segments (all > {} — the checkpointed prefix)",
+            run2_idx.len(),
+            yield_after
+        );
+
+        // Accumulator carries real segment timestamps from both runs —
+        // proves checkpoints preserved their (start_ms, end_ms) intact and
+        // `match_checkpoints` accepted them against the re-derived VAD
+        // segments on the second invocation.
+        assert!(
+            !all.is_empty(),
+            "accumulator must carry transcripts from checkpointed + fresh segments"
+        );
+        for (i, (text, start, end)) in all.iter().enumerate() {
+            assert!(
+                !text.trim().is_empty(),
+                "accumulator[{}] text is empty; checkpoint or decode lost it",
+                i
+            );
+            assert!(
+                *end > *start,
+                "accumulator[{}] has non-monotonic timestamps (start={} end={})",
+                i,
+                start,
+                end
+            );
+        }
+
+        reset_flags();
+    }
+
+    /// Locate the audio file inside a meeting folder. Mirrors the private
+    /// `find_audio_in_folder` in `speaker/commands.rs` — duplicated so this
+    /// test module is self-contained.
+    fn find_real_audio_in_folder(folder: &std::path::Path) -> Option<std::path::PathBuf> {
+        for name in &[
+            "audio.mp4", "audio.m4a", "audio.wav", "audio.mp3",
+            "audio.flac", "audio.ogg", "recording.mp4",
+        ] {
+            let p = folder.join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        None
     }
 }

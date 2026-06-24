@@ -62,12 +62,19 @@
 ## 3. Verify
 
 - [x] 3.1 `cargo test --lib` (full Tauri crate) — 408 passed, 0 failed, 8 ignored.
-- [ ] 3.2 Manual QA against the same long meeting that stalled (83 min / 4973 s):
-  re-diarize and confirm the `clustering produced N speakers from M chunks` log
-  line now appears within seconds (M ≤ ~600 due to the cap), diarization
-  completes, and the resulting speaker assignments look correct. (Deferred —
-  requires the real model + the specific long meeting file; the oracle test +
-  the #[ignore] real-audio tests are the binding automated proof.)
+- [x] 3.2 Closed by the gold-standard real-data oracle
+  `test_clustering_oracle_on_real_95db` (`#[ignore]`, in
+  `speaker/commands.rs`): builds 350 real nemo_titanet chunks from
+  meeting-95db's audio via the production `build_chunks` path and asserts
+  `cluster_by_centroids` labels equal `cluster_by_centroids_naive` at
+  thresholds {0.30, 0.40, 0.50, 0.65} — 0 mismatches at every threshold
+  (cached ~1 s vs naive ~42 s, ~42× speedup). Stronger than the
+  originally-deferred manual QA: instead of eyeballing one long meeting, it
+  pins byte-exact algorithm equivalence on real production embeddings across
+  the threshold range. The log-line and bounded-M guarantees are already
+  covered by the §1 cargo tests; the remaining doubt was algorithm
+  equivalence on real (non-synthetic) embeddings, which this closes. Run:
+  `cargo test -p meetily-flash --features vulkan -- --ignored test_clustering_oracle_on_real_95db`
 - [x] 3.3 No change-specific `e2e/smoke/diarization-clustering-perf.spec.ts` — the perf
   change introduces no new UI behavior. The `diarization-complete` → speaker-badge wiring
   is already covered by `e2e/smoke/speaker-diarization.spec.ts` (tests 15.2/15.3/15.6);

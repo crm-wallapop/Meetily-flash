@@ -564,7 +564,7 @@ pub(crate) fn cluster_by_centroids(chunks: &[Chunk], threshold: f32) -> (Vec<u32
 }
 
 #[cfg(test)]
-fn cluster_by_centroids_naive(chunks: &[Chunk], threshold: f32) -> (Vec<u32>, HashMap<u32, Vec<f32>>) {
+pub(crate) fn cluster_by_centroids_naive(chunks: &[Chunk], threshold: f32) -> (Vec<u32>, HashMap<u32, Vec<f32>>) {
     let n = chunks.len();
     if n == 0 {
         return (Vec::new(), HashMap::new());
@@ -1160,6 +1160,36 @@ mod tests {
         assert!(!centroids.is_empty());
     }
 
+    // Perf-regression guard (diarization-clustering-perf task 1.2/2.3). The old
+    // full-rescan AHC was O(n³); at the real freeze scale (n≈1640) it took 10+
+    // minutes. The cached-matrix path is sub-second at the production cap. This
+    // test runs at every `cargo test` (not #[ignore]) and fails if clustering
+    // n=MAX_DIARIZATION_CHUNKS blows past the deadline — catching a regression
+    // that reverts to full-rescan OR removes the cap. The deadline is 15 s, not
+    // the 5 s an O(n³) revert would still clear: a debug build under `cargo
+    // test` parallel load can spike 5× over its isolated runtime (~1 s here), so
+    // the tighter bound flakes. 15 s stays ~60× under an O(n³) revert (minutes).
+    #[test]
+    fn production_scale_clustering_completes_under_wall_clock_deadline() {
+        let dim = 8usize;
+        let chunks: Vec<Chunk> = (0..MAX_DIARIZATION_CHUNKS)
+            .map(|i| random_unit_chunk(i as u64, dim, 3.0))
+            .collect();
+
+        let start = std::time::Instant::now();
+        let (labels, centroids) = cluster_by_centroids(&chunks, 0.40);
+        let elapsed = start.elapsed();
+
+        assert_eq!(labels.len(), MAX_DIARIZATION_CHUNKS);
+        assert!(!centroids.is_empty());
+        assert!(
+            elapsed.as_secs() < 15,
+            "n={} clustering took {:?} — regression past the cached-matrix O(n² log n) bound",
+            MAX_DIARIZATION_CHUNKS,
+            elapsed,
+        );
+    }
+
     #[test]
     fn empty_and_single_chunk_no_panic() {
         let (empty_labels, empty_cent) = cluster_by_centroids(&[], 0.40);
@@ -1247,6 +1277,117 @@ mod tests {
         assert!(
             !others.contains(&nan_label) || others.iter().filter(|&&l| l == nan_label).count() == 0,
             "NaN chunk must not corrupt other clusters"
+        );
+    }
+
+    // Verification gap on diarization-clustering-perf: oracle_new_equals_naive
+    // _across_grid only covers degenerate geometries (orthogonal basis vectors,
+    // all-identical, fully-random unit vectors). Real nemo_titanet embeddings
+    // produce 4–8 loosely separated clusters in 192-d with Gaussian within-
+    // cluster noise — creating the intermediate similarities and near-tie merge
+    // candidates that exercise the cached-matrix rescan path. If the perf
+    // refactor is behavior-preserving on realistic structure, labels and
+    // centroids must match byte-for-byte.
+
+    fn lcg_uniform(seed: &mut u64) -> f64 {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((*seed >> 11) as f64) / ((1u64 << 53) as f64)
+    }
+    fn lcg_gaussian(seed: &mut u64) -> f32 {
+        let u1 = lcg_uniform(seed).max(1e-12);
+        let u2 = lcg_uniform(seed);
+        let r = (-2.0 * u1.ln()).sqrt();
+        let theta = 2.0 * std::f64::consts::PI * u2;
+        (r * theta.cos()) as f32
+    }
+
+    #[test]
+    fn cached_matrix_matches_naive_on_realistic_cluster_structure() {
+        let dim = 192usize;
+        let n_clusters = 4usize;
+        let per_cluster = 50usize;
+        // sigma=0.08 in 192-d: ||n||≈1.11, so within-cluster cosine ≈ 1/(1+1.23)≈0.45
+        // and between-cluster ≈ 0/(1+1.23)=0 — straddling thr=0.40 so the loop hits
+        // real merge-order decisions rather than trivially identical vectors.
+        let noise_sigma: f32 = 0.08;
+        let threshold = 0.40f32;
+
+        let mut seed: u64 = 0xA11C_E5E1_4B6D_2F3A;
+
+        // 4 random unit-vector centers in 192-d (mutual cosine ≈ 0).
+        let mut centers: Vec<Vec<f32>> = Vec::with_capacity(n_clusters);
+        for _ in 0..n_clusters {
+            let mut c = vec![0.0f32; dim];
+            let mut norm: f32 = 0.0;
+            for v in c.iter_mut() {
+                let x = (lcg_uniform(&mut seed) * 2.0 - 1.0) as f32;
+                *v = x;
+                norm += x * x;
+            }
+            let norm = norm.sqrt().max(1e-12);
+            for v in c.iter_mut() {
+                *v /= norm;
+            }
+            centers.push(c);
+        }
+
+        // Emit embeddings INTERLEAVED by cluster so members are not contiguous —
+        // forces the matrix scan to cross cluster boundaries every iteration
+        // and exercise the cached rescan under realistic near-tie candidates.
+        // Built directly in interleaved order to avoid needing Chunk: Clone.
+        let mut chunks: Vec<Chunk> = Vec::with_capacity(n_clusters * per_cluster);
+        for i in 0..per_cluster {
+            for c in 0..n_clusters {
+                let center = &centers[c];
+                let mut e = vec![0.0f32; dim];
+                let mut norm: f32 = 0.0;
+                for d in 0..dim {
+                    let val = center[d] + lcg_gaussian(&mut seed) * noise_sigma;
+                    e[d] = val;
+                    norm += val * val;
+                }
+                let norm = norm.sqrt().max(1e-12);
+                for v in e.iter_mut() {
+                    *v /= norm;
+                }
+                // start_sample varies so chunks are distinguishable (mirrors
+                // production where each chunk covers a distinct audio window).
+                let start_sample = (i * n_clusters + c) * 48000;
+                let mut chunk = make_chunk(e, 3.0);
+                chunk.start_sample = start_sample;
+                chunk.end_sample = start_sample + 48000;
+                chunks.push(chunk);
+            }
+        }
+
+        let (new_labels, new_cent) = cluster_by_centroids(&chunks, threshold);
+        let (old_labels, old_cent) = cluster_by_centroids_naive(&chunks, threshold);
+
+        // Sanity: the test is non-degenerate — it actually produced multiple
+        // clusters (otherwise the equivalence check is vacuously true).
+        let unique: std::collections::HashSet<u32> = new_labels.iter().copied().collect();
+        assert!(
+            (2..=n_clusters as u32 + 1).contains(&(unique.len() as u32)),
+            "expected 2..={} clusters from synthetic structure, got {}; adjust noise_sigma",
+            n_clusters,
+            unique.len()
+        );
+
+        assert_eq!(
+            new_labels, old_labels,
+            "cached-matrix labels must equal naive oracle on realistic 4-cluster Gaussian structure \
+             ({} embeddings, dim={}, sigma={}, thr={}); divergence means the perf refactor changed \
+             clustering behavior, not just speed",
+            chunks.len(),
+            dim,
+            noise_sigma,
+            threshold,
+        );
+        assert!(
+            centroids_equal(&new_cent, &old_cent, 1e-4),
+            "cached-matrix centroids must match naive oracle within 1e-4 on realistic structure \
+             (cluster count = {})",
+            unique.len(),
         );
     }
 }

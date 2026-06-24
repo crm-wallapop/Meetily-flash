@@ -576,5 +576,123 @@ mod tests {
             assert!(duration_ms >= 200.0, "Segment {} too short: {:.0}ms", i, duration_ms);
         }
     }
+
+    /// Gold-standard VAD-determinism oracle: run the production VAD path
+    /// (`get_speech_chunks` at `VAD_REDEMPTION_TIME_MS = 2000`, the constant
+    /// `retranscription.rs` uses) TWICE on the SAME real audio from
+    /// meeting-95db and assert byte-identical segment boundaries.
+    ///
+    /// Why this matters: `match_checkpoints` (retranscription-checkpoint
+    /// Decision 3) trusts a checkpoint's `(start_ms, end_ms)` iff it matches
+    /// the re-derived VAD segment at that index. If VAD were
+    /// non-deterministic — returned different boundaries on a second pass over
+    /// the same samples — every checkpoint from a prior run would be
+    /// invalidated on resume, silently re-transcribing the whole meeting and
+    /// negating the checkpoint optimization. The synthetic test
+    /// `match_checkpins_is_deterministic_for_identical_segments` pins the
+    /// matching LAYER; this test pins the VAD layer it depends on, on real
+    /// speech (silero edge cases, real pauses, real noise floor).
+    ///
+    /// `cargo test -p meetily-flash -- --ignored test_vad_determinism_on_real_95db`
+    #[tokio::test]
+    #[ignore]
+    async fn test_vad_determinism_on_real_95db() {
+        let db_path = r"C:\Users\user\AppData\Roaming\com.meetily.ai\meeting_minutes.sqlite";
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=rw", db_path))
+            .await
+            .expect("DB connect");
+
+        let meeting_id = "meeting-00000000-0000-4000-8000-000000000002";
+        let row = sqlx::query("SELECT folder_path FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(&pool)
+            .await
+            .expect("fetch meeting");
+        let folder_path: Option<String> = row.and_then(|r| sqlx::Row::get(&r, "folder_path"));
+        let folder = folder_path.expect("meeting-95db folder_path missing");
+
+        let audio_path = find_real_audio_in_folder(std::path::Path::new(&folder))
+            .expect("audio file in meeting-95db folder");
+
+        let decoded = crate::audio::decoder::decode_audio_file(&audio_path)
+            .expect("decode audio");
+        let samples = decoded.to_whisper_format();
+        eprintln!(
+            "VAD determinism: {} samples ({:.1}s) from meeting-95db",
+            samples.len(),
+            samples.len() as f64 / 16000.0
+        );
+
+        // Same production redemption time the retranscription path uses.
+        let run1 = get_speech_chunks(&samples, 2000).expect("VAD run 1");
+        let run2 = get_speech_chunks(&samples, 2000).expect("VAD run 2");
+
+        assert_eq!(
+            run1.len(),
+            run2.len(),
+            "VAD segment COUNT must be deterministic; run1={} run2={}",
+            run1.len(),
+            run2.len()
+        );
+
+        let mut boundary_mismatches = 0usize;
+        for (i, (a, b)) in run1.iter().zip(run2.iter()).enumerate() {
+            let start_match = (a.start_timestamp_ms - b.start_timestamp_ms).abs() < 1e-6;
+            let end_match = (a.end_timestamp_ms - b.end_timestamp_ms).abs() < 1e-6;
+            let samples_match = a.samples.len() == b.samples.len();
+            if !(start_match && end_match && samples_match) {
+                boundary_mismatches += 1;
+                if boundary_mismatches <= 5 {
+                    eprintln!(
+                        "  mismatch at segment {}: start {} vs {} (Δ={:.3}ms), end {} vs {} (Δ={:.3}ms), samples {} vs {}",
+                        i,
+                        a.start_timestamp_ms, b.start_timestamp_ms,
+                        (a.start_timestamp_ms - b.start_timestamp_ms).abs(),
+                        a.end_timestamp_ms, b.end_timestamp_ms,
+                        (a.end_timestamp_ms - b.end_timestamp_ms).abs(),
+                        a.samples.len(), b.samples.len()
+                    );
+                }
+            }
+        }
+
+        eprintln!(
+            "VAD determinism: {} segments, {} boundary mismatches",
+            run1.len(),
+            boundary_mismatches
+        );
+
+        assert_eq!(
+            boundary_mismatches, 0,
+            "VAD must be byte-deterministic on identical input ({} of {} segments differ); \
+             checkpoint resume depends on this invariant",
+            boundary_mismatches,
+            run1.len()
+        );
+
+        // Sanity: meeting-95db is a real multi-minute recording; a 0-segment
+        // result would mean we loaded the wrong file or VAD regressed.
+        assert!(
+            run1.len() >= 10,
+            "expected double-digit segments from a real meeting, got {}; wrong file?",
+            run1.len()
+        );
+    }
+
+    /// Locate the audio file inside a meeting folder. Mirrors the private
+    /// `find_audio_in_folder` in `speaker/commands.rs` — duplicated here so the
+    /// determinism test is self-contained without widening the module's API.
+    fn find_real_audio_in_folder(folder: &std::path::Path) -> Option<std::path::PathBuf> {
+        for name in &[
+            "audio.mp4", "audio.m4a", "audio.wav", "audio.mp3",
+            "audio.flac", "audio.ogg", "recording.mp4",
+        ] {
+            let p = folder.join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        None
+    }
 }
 

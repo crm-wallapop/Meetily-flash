@@ -1072,6 +1072,132 @@ mod tests {
         assert_ne!(s6, s9, "the two groups must be different speakers");
     }
 
+    /// Gold-standard oracle: build REAL chunks from meeting-95db's audio via the
+    /// production `build_chunks` path, then run BOTH the cached-matrix
+    /// `cluster_by_centroids` AND the naive O(n³) oracle on those chunks.
+    /// Divergence would mean the diarization-clustering-perf refactor changed
+    /// clustering behavior on real meeting audio — invalidating the 0.40
+    /// threshold calibration and the seg_6==seg_7 / seg_9==seg_10 acceptance
+    /// lines pinned by `test_rediarize_verify_95db`.
+    ///
+    /// The synthetic Gaussian equivalence test
+    /// (`cached_matrix_matches_naive_on_realistic_cluster_structure`) covers
+    /// realistic STRUCTURE; this test covers realistic SCALE + real embedding
+    /// geometry (nemo_titanet on actual speech, not a synthetic center+noise
+    /// model). Both must agree.
+    ///
+    /// `cargo test -p meetily-flash -- --ignored test_clustering_oracle_on_real_95db`
+    #[tokio::test]
+    #[ignore]
+    async fn test_clustering_oracle_on_real_95db() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let db_path = r"C:\Users\user\AppData\Roaming\com.meetily.ai\meeting_minutes.sqlite";
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=rw", db_path))
+            .await
+            .expect("DB connect");
+
+        let meeting_id = "meeting-00000000-0000-4000-8000-000000000002";
+
+        let row = sqlx::query("SELECT folder_path FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(&pool)
+            .await
+            .expect("fetch meeting");
+        let folder_path: Option<String> = row.and_then(|r| sqlx::Row::get(&r, "folder_path"));
+        let folder = folder_path.expect("meeting-95db folder_path missing");
+        let audio_path = find_audio_in_folder(std::path::Path::new(&folder))
+            .expect("audio file in meeting-95db folder");
+
+        let decoded = crate::audio::decoder::decode_audio_file(&audio_path)
+            .expect("decode audio");
+        let samples = decoded.to_whisper_format();
+        let audio_duration = decoded.duration_seconds;
+
+        let transcript_segments = fetch_transcript_timestamps(&pool, meeting_id, audio_duration)
+            .await
+            .expect("fetch transcript timestamps");
+        assert!(
+            !transcript_segments.is_empty(),
+            "meeting-95db must have transcript segments to build chunks from"
+        );
+
+        let models_dir = dirs::home_dir().unwrap_or_default().join(".meetily-models");
+        let embedding_path = models_dir.join(crate::audio::speaker::model_download::embedding_filename());
+        let segmentation_path = models_dir.join("pyannote-segmentation.onnx");
+        assert!(embedding_path.exists(), "nemo_titanet embedding model missing");
+        assert!(segmentation_path.exists(), "pyannote segmentation model missing");
+
+        let threshold_fp = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(
+            (0.40f32 * 65536.0) as u32,
+        ));
+        let adapter = crate::audio::speaker::sherpa_adapter::SherpaOnnxDiarizationAdapter::with_shared_threshold(
+            embedding_path.to_str().unwrap(),
+            segmentation_path.to_str().unwrap(),
+            threshold_fp,
+        )
+        .expect("create adapter");
+
+        // build_chunks is CPU-bound (runs the embedding model on each segment);
+        // offload to a blocking thread exactly as run_diarization_for_meeting does.
+        let samples_arc = std::sync::Arc::new(samples);
+        let segments_arc = std::sync::Arc::new(transcript_segments.clone());
+        let adapter_arc = std::sync::Arc::new(adapter);
+        let chunks = tokio::task::spawn_blocking(move || {
+            adapter_arc.build_chunks(&samples_arc, DIARIZATION_SAMPLE_RATE, &segments_arc)
+        })
+        .await
+        .expect("blocking task panicked");
+
+        eprintln!(
+            "Gold-standard oracle: {} real chunks from meeting-95db ({} transcript segments)",
+            chunks.len(),
+            transcript_segments.len()
+        );
+        assert!(!chunks.is_empty(), "build_chunks must produce chunks");
+
+        // Run BOTH algorithms at multiple thresholds spanning the production
+        // range. Equivalence must hold at every threshold — a divergence at any
+        // one invalidates the refactor.
+        for &threshold in &[0.30f32, 0.40, 0.50, 0.65] {
+            let t0 = std::time::Instant::now();
+            let (new_labels, _) = crate::audio::speaker::sherpa_adapter::cluster_by_centroids(&chunks, threshold);
+            let new_elapsed = t0.elapsed().as_secs_f64();
+
+            let t1 = std::time::Instant::now();
+            let (old_labels, _) = crate::audio::speaker::sherpa_adapter::cluster_by_centroids_naive(&chunks, threshold);
+            let old_elapsed = t1.elapsed().as_secs_f64();
+
+            let mismatches: Vec<(usize, u32, u32)> = new_labels
+                .iter()
+                .zip(old_labels.iter())
+                .enumerate()
+                .filter(|(_, (n, o))| n != o)
+                .map(|(i, (n, o))| (i, *n, *o))
+                .collect();
+
+            let new_unique: std::collections::HashSet<u32> = new_labels.iter().copied().collect();
+            eprintln!(
+                "  thr={:.2}: {} clusters | cached {:.2}s vs naive {:.2}s | {} label mismatches",
+                threshold,
+                new_unique.len(),
+                new_elapsed,
+                old_elapsed,
+                mismatches.len(),
+            );
+
+            assert_eq!(
+                mismatches.len(),
+                0,
+                "cached-matrix and naive oracle disagree on {} of {} labels at thr={:.2} \
+                 (first 5 mismatches: {:?}); refactor is NOT behavior-preserving on real audio",
+                mismatches.len(),
+                new_labels.len(),
+                threshold,
+                &mismatches[..mismatches.len().min(5)],
+            );
+        }
+    }
+
     /// Per-meeting max_speakers override takes precedence over the global default.
     /// Sets the global cap wide (10) and the per-meeting override narrow (3), then
     /// asserts diarization yields <= 3 speakers — proving the override, not the
