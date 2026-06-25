@@ -47,9 +47,15 @@ pub type FocusHistory = Arc<Mutex<VecDeque<(String, Instant)>>>;
 
 /// Resolves the best default title for a `meeting-detected` event using the
 /// priority chain from D10.
+///
+/// `now` is the adapter clock (the `now()` seam), not a fresh `Instant::now()`, so
+/// the focus-history TTL cutoff stays coherent with the injected test clock — the
+/// comprehensive-seam bar (design.md, task 1.14) covers every wall-clock read inside
+/// `current_state()`, and this function is reached from there.
 pub fn resolve_default_title(
     observation: &DetectorObservation,
     focus_history: &FocusHistory,
+    now: Instant,
 ) -> String {
     let re = meet_title_regex();
 
@@ -61,7 +67,7 @@ pub fn resolve_default_title(
 
     {
         let history = focus_history.lock().unwrap_or_else(|e| e.into_inner());
-        let cutoff = Instant::now().checked_sub(FOCUS_HISTORY_TTL).unwrap_or_else(Instant::now);
+        let cutoff = now.checked_sub(FOCUS_HISTORY_TTL).unwrap_or(now);
         if let Some((title, _)) = history.iter().rev().find(|(_, t)| *t >= cutoff) {
             return strip_google_meet_suffix(title);
         }
@@ -818,7 +824,7 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
         };
 
         if !obs.meet_windows.is_empty() {
-            obs.default_title = resolve_default_title(&obs, &self.focus_history);
+            obs.default_title = resolve_default_title(&obs, &self.focus_history, self.now());
         }
 
         obs
@@ -858,6 +864,9 @@ pub fn spawn_focus_tracker(history: FocusHistory) -> tokio::task::JoinHandle<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::use_cases::meeting_detection::{
+        spawn_detector, DetectorEventEmitter, DetectorSettings,
+    };
     use proptest::prelude::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -984,7 +993,7 @@ mod tests {
     fn resolve_default_title_fallback_is_non_empty() {
         let obs = make_obs(&["Meet - Sprint planning"]);
         let history = empty_history();
-        let title = resolve_default_title(&obs, &history);
+        let title = resolve_default_title(&obs, &history, Instant::now());
         assert!(!title.is_empty());
     }
 
@@ -1441,9 +1450,14 @@ mod tests {
         let obs1 = det.current_state();
         assert!(obs1.stable_capture);
 
-        set_bc(&bc, true); // recovery + second stable run
+        // The second run is deliberately SHORT (< window). The latch was set
+        // Some(true) by the first drop and is immutable, so the exit still reads
+        // stable. A "clear-on-recovery + recompute-on-drop" mutation would see the
+        // short second run and flip to Some(false) — the mutation a long second run
+        // could not catch.
+        set_bc(&bc, true); // recovery
         let _ = det.current_state();
-        advance(&clock, STABLE_CONFIDENCE_WINDOW);
+        advance(&clock, Duration::from_secs(2));
         set_bc(&bc, false); // real exit (second drop): latch held from the first drop
         let obs2 = det.current_state();
         assert_eq!(det.exit_stable_latch, Some(true), "latch held from first drop");
@@ -1702,6 +1716,81 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    // C1 (end-to-end through the spawn loop, shark I6) — a real-adapter stable
+    // exit drives meeting-ended at the SHORT debounce. Lives here in windows.rs
+    // (not fake.rs) so the documented `cargo test --lib` runs it: fake.rs is gated
+    // behind the non-default `dev-detector` feature, which would hide the only
+    // deterministic end-to-end short-debounce test from the merge-gate command. The
+    // injected clock drives the latch run-length; real tokio time advances the
+    // SHORT/LONG debounce windows.
+    #[tokio::test]
+    async fn stable_capture_true_drives_short_debounce_to_ended() {
+        let bc_flag = Arc::new(AtomicBool::new(false));
+        let clock = Arc::new(Mutex::new(Instant::now()));
+        let bc_for_probe = Arc::clone(&bc_flag);
+        let clock_for_probe = Arc::clone(&clock);
+        let probes = DetectorProbes {
+            has_turn: Box::new(|| false),
+            has_conn: Box::new(|| true),
+            has_capture: Box::new(move || bc_for_probe.load(Ordering::SeqCst)),
+            meet_windows: Box::new(|| {
+                vec![MeetWindow { hwnd_id: 1, pid: 100, title: "Meet - Short".to_string() }]
+            }),
+        };
+        let history: FocusHistory = Arc::new(Mutex::new(VecDeque::new()));
+        let mut det = WindowsMeetingDetector::with_probes(history, probes);
+        det.clock = Some(Box::new(move || *clock_for_probe.lock().unwrap()));
+
+        let emitter = Arc::new(EndedEmitter(Mutex::new(0u32)));
+        let suppress = Arc::new(AtomicBool::new(false));
+        let settings = DetectorSettings {
+            debounce_duration: Duration::from_millis(400),           // LONG
+            stable_udp_debounce_duration: Duration::from_millis(60), // SHORT
+            turn_debounce_duration: Duration::from_millis(400),
+        };
+        let task = spawn_detector(
+            det,
+            Arc::clone(&emitter),
+            Duration::from_millis(5),
+            settings,
+            suppress,
+        );
+
+        // bc starts false: first poll sees no connection, so the later join
+        // registers as a NEW meeting (C_FSA > detector_start), not pre-existing.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Join: advance the clock 1 s (C_FSA > detector_start) and set bc=true.
+        *clock.lock().unwrap() += Duration::from_secs(1);
+        bc_flag.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        // Advance the clock past the window so the run ≥ STABLE_CONFIDENCE_WINDOW,
+        // then drop bc. The real latch computes Some(true) → stable_capture=true.
+        *clock.lock().unwrap() += STABLE_CONFIDENCE_WINDOW + Duration::from_secs(1);
+        bc_flag.store(false, Ordering::SeqCst);
+
+        // Past SHORT (60 ms) + poll slack, well under LONG (400 ms).
+        tokio::time::sleep(Duration::from_millis(160)).await;
+        let ended_before_long = *emitter.0.lock().unwrap();
+        task.abort();
+
+        assert!(
+            ended_before_long >= 1,
+            "stable_capture=true (real latch) must end at SHORT (~60ms), not LONG (400ms); ended={ended_before_long}"
+        );
+    }
+
+    // Counts `emit_ended` calls for C1. The full `RecEmitter` (which also records
+    // detected titles) lives in fake.rs for the dev-detector tests that need titles.
+    struct EndedEmitter(Mutex<u32>);
+    impl DetectorEventEmitter for Arc<EndedEmitter> {
+        fn emit_detected(&self, _default_title: String, _candidate_titles: Vec<String>) {}
+        fn emit_ended(&self) {
+            *self.0.lock().unwrap() += 1;
         }
     }
 

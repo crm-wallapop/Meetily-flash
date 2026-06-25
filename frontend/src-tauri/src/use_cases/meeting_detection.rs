@@ -14,10 +14,12 @@ pub struct DetectorSettings {
     /// (Chrome mic re-acquisition) with 5 s margin. Also the conservative default
     /// when the adapter has not populated `stable_capture`.
     pub debounce_duration: Duration,
-    /// Debounce for UDP calls on a stable-mic setup (`stable_capture = true`): no
-    /// bc drop has been observed during the call, so a drop now is a high-confidence
-    /// leave signal. 4 s absorbs the ~1–2 s getUserMedia release lag + 2 s poll
-    /// granularity + margin, matching the empirically validated TURN debounce.
+    /// Debounce for UDP calls classified stable by the adapter's locked-first-drop
+    /// latch (`stable_capture = true`): the call's first `has_browser_capture_session`
+    /// drop was preceded by ≥ `STABLE_CONFIDENCE_WINDOW` of continuous capture, so it
+    /// is a high-confidence leave signal. 4 s absorbs the ~1–2 s getUserMedia release
+    /// lag + 2 s poll granularity + margin, matching the empirically validated TURN
+    /// debounce.
     pub stable_udp_debounce_duration: Duration,
     /// Debounce for TCP TURN calls (`is_turn_exit = true`): shorter because TURN is a
     /// reliable signal (drops within ~1 s of leaving) and transient TURN blips recover

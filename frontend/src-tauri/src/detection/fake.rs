@@ -220,91 +220,12 @@ mod tests {
         let _ = format!("{snap:?}");
     }
 
-    // C1 — stable_capture=true drives the SHORT debounce through the REAL
-    // spawn_detector loop, end-to-end, with the latch driven by the REAL
-    // WindowsMeetingDetector (not a hand-set field on a fake). The bc signal is an
-    // AtomicBool and the adapter clock is an Arc<Mutex<Instant>>; the test begins
-    // bc=false (so the first join stamps C_FSA > detector_start and registers as a
-    // new meeting, not pre-existing), advances the clock past STABLE_CONFIDENCE_WINDOW,
-    // then drops bc so the locked-first-drop latch computes Some(true). test_2_1
-    // uses SHORT==LONG==50ms so it cannot discriminate the two paths; here
-    // LONG >> SHORT. (shark I6 — kept as a fast deterministic loop test, not
-    // #[ignore]-only.)
-    #[tokio::test]
-    #[cfg(target_os = "windows")]
-    async fn stable_capture_true_drives_short_debounce_to_ended() {
-        use crate::detection::windows::{
-            DetectorProbes, FocusHistory, WindowsMeetingDetector, STABLE_CONFIDENCE_WINDOW,
-        };
-        use std::collections::VecDeque;
-        use std::sync::atomic::Ordering;
-        use std::time::Instant;
-
-        // bc starts false: the first poll sees no connection so the later join
-        // registers as a NEW meeting (C_FSA > detector_start), not pre-existing.
-        let bc_flag = Arc::new(AtomicBool::new(false));
-        let clock = Arc::new(Mutex::new(Instant::now()));
-        let bc_for_probe = Arc::clone(&bc_flag);
-        let clock_for_probe = Arc::clone(&clock);
-        let probes = DetectorProbes {
-            has_turn: Box::new(|| false),
-            has_conn: Box::new(|| true),
-            has_capture: Box::new(move || bc_for_probe.load(Ordering::SeqCst)),
-            meet_windows: Box::new(|| {
-                vec![MeetWindow { hwnd_id: 1, pid: 100, title: "Meet - Short".to_string() }]
-            }),
-        };
-        let history: FocusHistory = Arc::new(Mutex::new(VecDeque::new()));
-        let mut det = WindowsMeetingDetector::with_probes(history, probes);
-        det.clock = Some(Box::new(move || *clock_for_probe.lock().unwrap()));
-
-        let emitter = Arc::new(RecEmitter {
-            detected: Mutex::new(vec![]),
-            ended: Mutex::new(0),
-        });
-        let suppress = Arc::new(AtomicBool::new(false));
-        let settings = DetectorSettings {
-            debounce_duration: Duration::from_millis(400),           // LONG
-            stable_udp_debounce_duration: Duration::from_millis(60), // SHORT
-            turn_debounce_duration: Duration::from_millis(400),
-        };
-        let task = spawn_detector(
-            det,
-            Arc::clone(&emitter),
-            Duration::from_millis(5),
-            settings,
-            suppress,
-        );
-
-        // First polls: bc=false, no connection, detector stays Idle.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
-        // Join: advance the clock 1s (so C_FSA > detector_start) and set bc=true.
-        // C_FSA and bc_true_since stamp from the clock at the false→true edge.
-        *clock.lock().unwrap() += Duration::from_secs(1);
-        bc_flag.store(true, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(40)).await;
-
-        // Advance the clock past the window so the run ≥ STABLE_CONFIDENCE_WINDOW,
-        // then drop bc. The real latch computes Some(true) → stable_capture=true.
-        *clock.lock().unwrap() += STABLE_CONFIDENCE_WINDOW + Duration::from_secs(1);
-        bc_flag.store(false, Ordering::SeqCst);
-
-        // Past SHORT (60ms) + poll slack, well under LONG (400ms).
-        tokio::time::sleep(Duration::from_millis(160)).await;
-        let ended_before_long = *emitter.ended.lock().unwrap();
-        task.abort();
-
-        assert!(
-            ended_before_long >= 1,
-            "stable_capture=true (real latch) must end at SHORT (~60ms), not LONG (400ms); ended={ended_before_long}"
-        );
-    }
-
-    // C2 — stable_capture=false holds meeting-ended through LONG. Symmetric to
-    // C1: a transient-prone exit observation must NOT fire ended at SHORT
-    // elapsed. Pins that the LONG branch is actually reachable through the
-    // spawn loop, not only at the pure step_detector altitude.
+    // C2 — stable_capture=false holds meeting-ended through LONG: a transient-prone
+    // exit observation must NOT fire ended at SHORT elapsed. Pins that the LONG
+    // branch is actually reachable through the spawn loop, not only at the pure
+    // step_detector altitude. (The short-path C1 test lives in detection/windows.rs
+    // so it runs under the default `cargo test --lib`; this C2 test uses the fake
+    // adapter and stays dev-detector-gated.)
     #[tokio::test]
     async fn stable_capture_false_holds_ended_through_long_debounce() {
         let fake = FakeMeetingDetector::new();
