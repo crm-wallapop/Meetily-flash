@@ -345,6 +345,17 @@ The effective max_speakers cap for a meeting SHALL be the meeting's per-meeting 
 - **WHEN** diarization produces 3 clusters
 - **THEN** no merging occurs and the 3 clusters are preserved
 
+#### Scenario: Degenerate centroid from garbled output is clamped, not propagated
+
+- **GIVEN** diarization produces a cluster whose duration-weighted centroid is degenerate (contains NaN or Inf values — e.g. from a garbled, non-silent Whisper chunk whose ONNX embedding extraction numerically underflows or overflows; genuinely silent audio is rejected upstream by the embedding extractor's `is_effectively_silent` energy guard before any embedding is produced)
+- **AND** the cluster count exceeds the effective max_speakers cap so the most-isolated-cluster merge runs
+- **WHEN** the cap enforcement selects and merges clusters
+- **THEN** the cosine similarity between a degenerate centroid and any other centroid SHALL be clamped to a finite 0.0 by two conjuncts acting together: the `norm > 0.0` guard (which catches NaN, since a NaN norm makes the `>` comparison false) AND the `dot.is_finite()` guard (which catches Inf, since an Inf centroid has an Inf norm that passes `norm > 0.0` and would otherwise yield Inf/Inf = NaN at the division) — both conjuncts are required, so the degenerate cluster ranks as most-isolated (0.0) rather than corrupting the isolation ranking with a NaN
+- **AND** the degenerate cluster SHALL be absorbed into its nearest neighbour with both the survivor's and the absorbed centroid's values clamped to finite (a non-finite value contributes 0.0, not its non-finite geometry, so the survivor's centroid is not corrupted)
+- **AND** every surviving centroid SHALL remain finite after the cap completes, so the degeneracy cannot cascade into the remaining clusters on subsequent merges nor reach the `speaker_embeddings` table (whose storage layer requires all values finite)
+
+> **Scope:** This scenario governs the cap-enforcement path only (`cosine_similarity_centroids` in `commands.rs`, whose sole non-test caller is `enforce_max_speakers_cap`). The upstream clustering and short-speaker-merge paths use a separate similarity helper without the `dot.is_finite()` conjunct; their defense against non-finite values is `is_effectively_silent` (which rejects silence but not garbled non-silent audio that can still yield a non-finite ONNX output) plus the `speaker_embeddings` storage finite-check, which rejects non-finite values at persistence time.
+
 ### Requirement: Re-transcription clears and re-enqueues diarization
 
 When a user re-transcribes a meeting with a different model, the system SHALL clear all speaker labels from the meeting's transcript rows and re-enqueue a `Diarizing` phase job for that meeting.

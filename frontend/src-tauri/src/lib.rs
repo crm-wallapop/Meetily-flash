@@ -223,7 +223,6 @@ fn handle_deep_link(app: &tauri::AppHandle, uri: &str) {
     let _ = app.emit(
         "deep-link-dispatched",
         serde_json::json!({
-            "uri": uri,
             "action": format!("{action:?}"),
             "outcome": format!("{outcome:?}"),
         }),

@@ -619,14 +619,14 @@ async fn run_retranscription<R: Runtime>(
                 }
             }
         },
-        |i, total| {
-            let progress = 25 + ((i as f32 / total as f32) * 55.0) as u32;
+        |done, total| {
+            let progress = 25 + ((done as f32 / total as f32) * 55.0) as u32;
             emit_progress(
                 &app_for_progress,
                 &meeting_id_for_progress,
                 "transcribing",
                 progress,
-                &format!("Transcribing segment {} of {}...", i + 1, total),
+                &format!("Transcribed {} of {} segments...", done, total),
             );
         },
     )
@@ -1718,6 +1718,72 @@ mod tests {
         }
         assert_eq!(*recorded.last().unwrap(), 4,
             "final progress must report all segments done: {recorded:?}");
+    }
+
+    // §4 resume edge: when EVERY segment is already checkpointed, completed
+    // starts at total and the sequence must still be monotonic and reach total.
+    #[tokio::test]
+    #[serial]
+    async fn progress_reaches_total_when_all_segments_checkpointed() {
+        reset_flags();
+        let pool = checkpoint_pool().await;
+        let meeting_id = "meet-all-checkpointed";
+
+        let segments = vec![seg(0., 1.), seg(1., 2.), seg(2., 3.), seg(3., 4.)];
+        save_checkpoint(&pool, meeting_id, 0, "a", 0., 1., 0.9).await.unwrap();
+        save_checkpoint(&pool, meeting_id, 1, "b", 1., 2., 0.9).await.unwrap();
+        save_checkpoint(&pool, meeting_id, 2, "c", 2., 3., 0.9).await.unwrap();
+        save_checkpoint(&pool, meeting_id, 3, "d", 3., 4., 0.9).await.unwrap();
+
+        let calls: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(vec![]));
+        let c = Arc::clone(&calls);
+        let (_all, _) = transcribe_segments_checkpointed(
+            meeting_id,
+            &segments,
+            &pool,
+            |_i, _seg| async { panic!("fully-checkpointed meeting must skip transcription") },
+            move |done, _total| { c.lock().unwrap().push(done); },
+        )
+        .await
+        .unwrap();
+
+        let recorded = calls.lock().unwrap().clone();
+        for w in recorded.windows(2) {
+            assert!(w[1] >= w[0], "monotonic: {recorded:?}");
+        }
+        assert_eq!(*recorded.last().unwrap(), 4, "reaches total: {recorded:?}");
+    }
+
+    // §4 Empty-transcript: Whisper returning "" for every segment must still
+    // advance completed to total (the += 1 is outside the !trimmed.is_empty()
+    // guard), so the bar never stalls below 100%.
+    #[tokio::test]
+    #[serial]
+    async fn progress_reaches_total_when_all_transcripts_empty() {
+        reset_flags();
+        let pool = checkpoint_pool().await;
+        let meeting_id = "meet-all-empty";
+
+        let segments = vec![seg(0., 1.), seg(1., 2.), seg(2., 3.), seg(3., 4.)];
+
+        let calls: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(vec![]));
+        let c = Arc::clone(&calls);
+        let (_all, _) = transcribe_segments_checkpointed(
+            meeting_id,
+            &segments,
+            &pool,
+            |_i, _seg| async { Ok(("".to_string(), 0.5f32)) },
+            move |done, _total| { c.lock().unwrap().push(done); },
+        )
+        .await
+        .unwrap();
+
+        let recorded = calls.lock().unwrap().clone();
+        for w in recorded.windows(2) {
+            assert!(w[1] >= w[0], "monotonic: {recorded:?}");
+        }
+        assert_eq!(*recorded.last().unwrap(), 4,
+            "empty transcripts must still reach total: {recorded:?}");
     }
 
     // Start-stop-resume lifecycle (verification gap on the YIELD path). Every

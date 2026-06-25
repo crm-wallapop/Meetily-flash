@@ -814,7 +814,17 @@ fn cosine_similarity_centroids(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a[..min_len].iter().zip(&b[..min_len]).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a[..min_len].iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b[..min_len].iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a > 0.0 && norm_b > 0.0 { dot / (norm_a * norm_b) } else { 0.0 }
+    // A degenerate centroid makes dot/norm non-finite. The norm>0 guard already
+    // maps a NaN norm to 0.0, but an Inf centroid has an Inf norm that passes that
+    // guard and yields Inf/Inf = NaN similarity — poisoning the isolation ranking.
+    // The dot.is_finite() conjunct closes that hole, clamping the Inf case to a
+    // finite 0.0 (most-isolated) so the degenerate cluster is absorbed cleanly by
+    // the NaN-safe merge below rather than corrupting the selection.
+    if norm_a > 0.0 && norm_b > 0.0 && dot.is_finite() {
+        dot / (norm_a * norm_b)
+    } else {
+        0.0
+    }
 }
 
 fn resolve_effective_cap(meeting_override: Option<i64>, global_default: i64) -> usize {
@@ -915,7 +925,14 @@ fn enforce_max_speakers_cap(
                 let w_nn = dur_nn as f32 / total as f32;
                 if let Some(cent_nn) = centroids.get_mut(&nn_of_isolated) {
                     for (i, v) in cent_iso.iter().enumerate() {
-                        cent_nn[i] = cent_nn[i] * w_nn + v * w_iso;
+                        // Whisper can emit NaN/Inf for silent or garbled chunks; a
+                        // degenerate cluster selected as most-isolated would otherwise
+                        // write its non-finite values into the survivor, and the NaN
+                        // spreads to every remaining cluster on the next merge. Clamp
+                        // both sides so a degenerate cluster contributes no geometry.
+                        let nn_val = if cent_nn[i].is_finite() { cent_nn[i] } else { 0.0 };
+                        let iso_val = if v.is_finite() { *v } else { 0.0 };
+                        cent_nn[i] = nn_val * w_nn + iso_val * w_iso;
                     }
                 }
             }
@@ -1483,6 +1500,94 @@ mod tests {
             0,
             "segments must be relabelled away from the absorbed cluster"
         );
+        // The survivor's centroid must be the duration-weighted recompute, not
+        // the stale pre-merge value. Here cluster 2 (dur 1.0s) absorbs into
+        // cluster 1 (dur 0.0s): w_iso=1, w_nn=0, so survivor == absorbed vector.
+        assert_eq!(centroids[&1], vec![0.0_f32, 1.0_f32]);
+    }
+
+    #[test]
+    fn enforce_cap_recompute_weights_both_durations() {
+        // Both the absorbed and surviving clusters have nonzero duration, so the
+        // survivor must be a non-trivial weighted average — not just the absorbed
+        // vector (w_iso=1) and not just the survivor (w_nn=1).
+        let mut centroids = std::collections::HashMap::<u32, Vec<f32>>::new();
+        centroids.insert(0, vec![1.0, 0.0]);
+        centroids.insert(1, vec![0.95, 0.05]);
+        centroids.insert(2, vec![0.0, 1.0]);
+        let mut segments = vec![
+            SpeakerSegment { start_seconds: 0.0, end_seconds: 2.0, speaker_id: 2 },
+            SpeakerSegment { start_seconds: 2.0, end_seconds: 3.0, speaker_id: 1 },
+        ];
+        enforce_max_speakers_cap(&mut centroids, &mut segments, 2);
+        assert!(!centroids.contains_key(&2));
+        let c = &centroids[&1];
+        // w_iso = 2/3 (absorbed cluster 2), w_nn = 1/3 (survivor cluster 1)
+        assert!((c[0] - 0.95 * (1.0 / 3.0)).abs() < 1e-5, "x: {}", c[0]);
+        assert!((c[1] - (0.05 * (1.0 / 3.0) + 1.0 * (2.0 / 3.0))).abs() < 1e-5, "y: {}", c[1]);
+    }
+
+    #[test]
+    fn enforce_cap_floors_at_two_speakers() {
+        // cap.max(2) prevents collapsing below two clusters — a single-speaker
+        // diarization is meaningless, so even an explicit max_speakers=1 floors at 2.
+        let mut centroids = std::collections::HashMap::<u32, Vec<f32>>::new();
+        centroids.insert(0, vec![1.0, 0.0]);
+        centroids.insert(1, vec![0.0, 1.0]);
+        centroids.insert(2, vec![1.0, 1.0]);
+        let mut segments = vec![
+            SpeakerSegment { start_seconds: 0.0, end_seconds: 1.0, speaker_id: 0 },
+            SpeakerSegment { start_seconds: 1.0, end_seconds: 2.0, speaker_id: 1 },
+            SpeakerSegment { start_seconds: 2.0, end_seconds: 3.0, speaker_id: 2 },
+        ];
+        enforce_max_speakers_cap(&mut centroids, &mut segments, 1);
+        assert_eq!(centroids.len(), 2, "cap=1 floors at 2 via cap.max(2)");
+    }
+
+    #[test]
+    fn enforce_cap_does_not_propagate_nan_from_degenerate_centroid() {
+        // §4 adversarial (garbled output): a degenerate NaN embedding — Whisper can
+        // emit one for a silent or garbled chunk — must not poison the surviving
+        // centroid when the cluster is merged under the cap. The NaN centroid reads
+        // as most-isolated (its similarity to every other cluster is 0.0), so it is
+        // the cluster that gets absorbed; without the finite-check the weighted
+        // average writes NaN into the survivor, and it spreads to every remaining
+        // cluster on subsequent merge iterations.
+        let mut centroids = std::collections::HashMap::<u32, Vec<f32>>::new();
+        centroids.insert(0, vec![1.0, 0.0]);
+        centroids.insert(1, vec![0.9, 0.1]);
+        centroids.insert(2, vec![f32::NAN, f32::NAN]);
+        let mut segments = vec![
+            SpeakerSegment { start_seconds: 0.0, end_seconds: 1.0, speaker_id: 0 },
+            SpeakerSegment { start_seconds: 1.0, end_seconds: 2.0, speaker_id: 1 },
+            SpeakerSegment { start_seconds: 2.0, end_seconds: 3.0, speaker_id: 2 },
+        ];
+        enforce_max_speakers_cap(&mut centroids, &mut segments, 2);
+
+        for (id, c) in &centroids {
+            for v in c {
+                assert!(v.is_finite(), "NaN/Inf propagated into surviving centroid {id}: {c:?}");
+            }
+        }
+        assert!(!centroids.contains_key(&2), "degenerate cluster 2 must be absorbed");
+        assert_eq!(
+            segments.iter().filter(|s| s.speaker_id == 2).count(),
+            0,
+            "degenerate cluster's segments must be relabelled, not orphaned"
+        );
+    }
+
+    #[test]
+    fn cosine_similarity_clamps_inf_centroid_to_finite_zero() {
+        // §4 adversarial (garbled output): an Inf-laden centroid must not yield a
+        // NaN similarity. Unlike the NaN case (caught by the pre-existing norm>0
+        // guard), an Inf centroid has an Inf norm that PASSES norm>0 and reaches
+        // the division, where Inf/(Inf·finite) = NaN — poisoning the isolation
+        // ranking. The dot.is_finite() conjunct is what clamps this to 0.0.
+        let inf = f32::INFINITY;
+        assert_eq!(cosine_similarity_centroids(&[inf, 0.0], &[1.0, 0.0]), 0.0);
+        // Finite-vs-finite is unchanged: the guard is a no-op for a finite dot.
+        assert!((cosine_similarity_centroids(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 1e-6);
     }
 
     // Integration: wires the REAL AHC clustering (cluster_by_centroids) into the REAL

@@ -1112,6 +1112,153 @@ mod tests {
             "is_turn_exit must be false after notify_exit() resets turn_established");
     }
 
+    // Regression guard for the self-heal trap (commit 715c810, reverted 693ff90).
+    // The real Chrome exit sequence is: TURN relay drops first (~1s), then WASAPI
+    // browser-capture releases ~2s later. A self-heal that clears turn_established
+    // on (!turn && !bc) fires on THIS poll — flipping is_turn_exit false mid-exit
+    // and bumping the debounce 4s->15s, because step_detector recomputes the
+    // duration every poll. turn_established must stay latched until notify_exit.
+    #[test]
+    fn turn_latch_survives_bc_drop_during_exit() {
+        let probes_active = DetectorProbes {
+            has_turn:    Box::new(|| true),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        };
+        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_active);
+
+        // Poll 1: TURN + capture active — latch sets.
+        let obs1 = det.current_state();
+        assert!(!obs1.is_turn_exit);
+        assert!(det.turn_established);
+
+        // Poll 2: TURN drops, WASAPI capture still active (~2s lag) — is_turn_exit true.
+        det.probes = Some(DetectorProbes {
+            has_turn:    Box::new(|| false),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        });
+        let obs2 = det.current_state();
+        assert!(obs2.is_turn_exit, "TURN drop must set is_turn_exit while bc lags");
+
+        // Poll 3: WASAPI releases capture (turn=false, bc=false) — the self-heal
+        // trap poll. is_turn_exit MUST stay true; turn_established must NOT clear.
+        det.probes = Some(DetectorProbes {
+            has_turn:    Box::new(|| false),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| false),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        });
+        let obs3 = det.current_state();
+        assert!(det.turn_established,
+            "turn_established must survive the bc-drop poll (self-heal trap)");
+        assert!(obs3.is_turn_exit,
+            "is_turn_exit must stay true across the WASAPI bc-drop mid-exit");
+    }
+
+    // §4 adversarial (device disconnected): a WASAPI capture-device loss mid-call
+    // drives has_browser_capture_session false even though the user has not left —
+    // the enumerated device simply vanished. The detector must not conflate this
+    // transient with a clean leave: the bc-drop latch fires so the call is treated
+    // as transient-prone (the conservative long debounce applies, buying time for
+    // the device to recover), and on recovery the call is still reported active.
+    // The latch is monotonic — recovery must NOT flip stable_capture back to true,
+    // or a subsequent real exit on a flaky call would wrongly get the short debounce.
+    #[test]
+    fn device_disconnect_mid_call_latches_unstable_without_confusing_leave() {
+        let probes_active = DetectorProbes {
+            has_turn:    Box::new(|| true),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        };
+        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_active);
+
+        // Poll 1: in-call, capture healthy.
+        let obs1 = det.current_state();
+        assert!(obs1.has_browser_capture_session);
+        assert!(obs1.stable_capture, "a never-blipped call starts stable");
+        assert!(!det.bc_drop_observed_this_call);
+
+        // Poll 2: capture device lost mid-call (WASAPI enumeration fails). The TURN
+        // relay is still alive, so this is NOT a leave.
+        det.probes = Some(DetectorProbes {
+            has_turn:    Box::new(|| true),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| false),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        });
+        let obs2 = det.current_state();
+        assert!(!obs2.has_browser_capture_session, "live bc must reflect the device loss");
+        assert!(det.bc_drop_observed_this_call, "the bc-drop latch must fire on the device loss");
+        assert!(!obs2.stable_capture, "a transient-prone call reports unstable so the long debounce applies");
+        assert!(!obs2.is_turn_exit, "TURN still alive → not a TURN exit; device loss is not a leave");
+
+        // Poll 3: device recovers. The call is still active, but stable_capture must
+        // STAY false — recovery does not un-poison a transient-prone call.
+        det.probes = Some(DetectorProbes {
+            has_turn:    Box::new(|| true),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        });
+        let obs3 = det.current_state();
+        assert!(obs3.has_browser_capture_session, "capture restored → call still active");
+        assert!(det.bc_drop_observed_this_call, "bc-drop latch is monotonic across recovery");
+        assert!(!obs3.stable_capture, "recovery must NOT flip stable_capture back to true");
+    }
+
+    // §4 adversarial (concurrent / rapid rejoin): the user clicks Leave then
+    // immediately Rejoins within the ~2 s WASAPI capture-release lag. bc therefore
+    // NEVER actually drops (capture was never released), so the call must NOT be
+    // poisoned as transient-prone by a bc-drop that never happened. is_turn_exit
+    // tracks the TURN signal (true on the brief leave, false again on rejoin) so
+    // the state machine's debounce — not the adapter — decides if the blip was real.
+    #[test]
+    fn rapid_leave_rejoin_within_wasapi_lag_keeps_capture_stable() {
+        let probes_active = DetectorProbes {
+            has_turn:    Box::new(|| true),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        };
+        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_active);
+
+        // Poll 1: in-call.
+        let obs1 = det.current_state();
+        assert!(det.turn_established);
+        assert!(obs1.stable_capture);
+
+        // Poll 2: user clicks Leave — TURN relay drops, but WASAPI capture is still
+        // active (the ~2 s release lag). bc never went false, so no bc-drop latch.
+        det.probes = Some(DetectorProbes {
+            has_turn:    Box::new(|| false),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        });
+        let obs2 = det.current_state();
+        assert!(det.turn_established, "turn_established must survive a turn-only drop (self-heal trap)");
+        assert!(obs2.is_turn_exit, "TURN drop with the latch set must signal a TURN exit");
+        assert!(!det.bc_drop_observed_this_call, "bc never dropped → no transient-prone latch");
+        assert!(obs2.stable_capture, "capture stayed continuous → call stays stable");
+
+        // Poll 3: user clicks Rejoin within the lag window — TURN returns, bc was
+        // true throughout. The blip must leave no residue.
+        det.probes = Some(DetectorProbes {
+            has_turn:    Box::new(|| true),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            meet_windows: probe_windows(&["Meet - standup"]),
+        });
+        let obs3 = det.current_state();
+        assert!(!obs3.is_turn_exit, "TURN restored → no longer a TURN exit");
+        assert!(!det.bc_drop_observed_this_call, "rapid rejoin must not poison the call as transient-prone");
+        assert!(obs3.stable_capture, "the call retains its stable characterization");
+    }
+
     // (d) D15 / C-NEW-2: Meet window minimized at startup — first poll sees empty
     //     window list while a Google TCP connection already exists. The first-poll
     //     branch must stamp C_FSA = detector_start unconditionally (no window gate).

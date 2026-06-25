@@ -348,6 +348,21 @@ mod tests {
     }
 
     #[test]
+    fn extract_handles_multibyte_argv_without_panic() {
+        // argv can carry UTF-8 multibyte entries (e.g. an install path under a
+        // non-ASCII username). The byte-slice prefix check is safe because
+        // `meetily:` and `//` are pure ASCII (1 byte/char), so slicing at offsets
+        // 8 and 10 lands on ASCII boundaries regardless of what follows. A
+        // multibyte entry must be skipped without panicking, and a later valid
+        // URI must still be found.
+        let a = argv(&[
+            "C:\\Users\\user\\debug\\meetily-flash.exe",
+            "meetily://recording/stop",
+        ]);
+        assert_eq!(extract_meetily_uri(&a), Some("meetily://recording/stop"));
+    }
+
+    #[test]
     fn extract_matches_scheme_case_insensitively() {
         assert_eq!(
             extract_meetily_uri(&argv(&["Meetily://recording/stop"])),
