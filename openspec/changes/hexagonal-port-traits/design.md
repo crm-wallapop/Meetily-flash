@@ -4,6 +4,61 @@
 D1–D6 below without reading this section — **they were written against
 incorrect premises about the current code.**
 
+### Re-examined 2026-06-25 — decision stands, two reasoning errors corrected
+
+A re-exploration confirmed the deferral still holds (no new caller; YAGNI), but
+two of the deferral's own claims below are wrong and would mislead the next
+person who opens this change.
+
+**Correction 1 — "Option 1 is tautological" overstates it.** `background_shutdown`
+(`recording_commands.rs:702-827`) is not "call flush and done" — it is an
+error-path state machine: flush with continue-on-error (the comment at `:715`
+cites design D3), a 300 s `save_recording_only` timeout (`:762`) whose
+ERR/TIMEOUT branches clear the gate and return (`:770-778`), an idempotent
+SQLite transcript save (`:802` `MeetingAlreadyExists`), and a data-extraction
+step before the DB write (`:787-791`). A fake `AudioCapturePort` + an extracted
+shutdown use case would test that sequencing — not nothing. The "tautological"
+label is too strong.
+
+**Correction 2 — the value frame ignored the shutdown error paths.** "Why
+deferred" and "What is already covered" measure value as G1 + G2 only. But the
+two historical bugs this path is notorious for — the 2-minute stop lag and
+`folder_path = null` — lived in exactly those shutdown error paths (flush/save
+timing, data extraction), which are untested and which a manager port *would*
+reach. So "what's at stake" was mis-stated: it is not two already-covered
+guarantees, it is the bug-adjacent error surface, none of it cargo-tested.
+
+**Cost correction — Option 1.5 exists and is much cheaper than Option 2.** The
+16-site `RECORDING_MANAGER` global→app-state migration ("The Option 2 path"
+step 1) is only required for full D3 — command-level DI — and the command level
+is already phase-machine-tested (G1). `background_shutdown` already receives the
+owned `Option<RecordingManager>` from `.take()`, so changing that one signature
+to `Option<Box<dyn AudioCapturePort + Send>>` and boxing the real manager at
+the spawn site makes the shutdown use case fake-injectable **without touching
+the 16 sites.** Call this Option 1.5: ≈ 1 trait + impl + 1 signature refactor +
+extracted use case + fakes.
+
+**Honest bound on Option 1.5's value.** `background_shutdown` is also coupled
+to `AppHandle` (`app.emit`, `app.state::<TranscriptionQueueState>`,
+`app.state::<AppState>`) and the `RECORDING_PHASE` global. So a manager port
+reaches the flush + save + extraction *sequencing* — but NOT the richest logic
+in the function: the M1/M2 `compare_exchange(Saving→Idle)` phase race (`:743`)
+and the DB-save branches. Those stay untested until `AppHandle`/state is also
+abstracted, which drifts back toward Option 2's cost. The slice is real but
+bounded.
+
+**Why YAGNI still holds despite the corrections.** The reframe shows the value
+was *undercounted*, not that it *clears the bar*. The detection-port precedent
+does not transfer cleanly: `step_detector` has dense state-machine branching
+(TURN/UDP, stable/flaky, entry/exit) — which is why the §4 detector coverage
+committed 2026-06-25 (`device_disconnect_mid_call…`, `rapid_leave_rejoin…`,
+`turn_latch…` in commit f067e6e) was only writable because
+`MeetingDetectorPort` existed. The recording shutdown, by contrast, is mostly
+straight-line error handling with the one interesting race (M1/M2) sitting
+behind `AppHandle` coupling that Option 1.5 cannot cross. No new caller has
+appeared. "Latent risk on bug-adjacent untested error paths, nothing biting"
+is the speculative-build case YAGNI exists to stop.
+
 ### What the code actually does (the original design got these wrong)
 
 1. **The flush is NOT on the synchronous stop path.** `stop_streams_and_force_flush`
@@ -47,12 +102,20 @@ incorrect premises about the current code.**
 - Net: G1 is already permanently gated, G2 is already `#[ignore]`-covered; both
   options are either thin (1) or speculative+risky (2).
 
-### Trigger to revisit
+### Trigger to revisit (sharpened 2026-06-25)
 
-A concrete **§4 adversarial need** that requires faking the capture lifecycle
-without real hardware — device-disconnect mid-recording, permission-denied, or
-sample-rate-mismatch. When one lands, YAGNI no longer holds and the port earns
-its full cost.
+Either of:
+1. A concrete **§4 adversarial need** that requires faking the capture
+   lifecycle without real hardware — device-disconnect mid-recording,
+   permission-denied, or sample-rate-mismatch; OR
+2. **Any change that touches the `background_shutdown` error paths** (flush /
+   `save_recording_only` / data extraction / analytics in
+   `recording_commands.rs:702+`). In that case the port pays off *inside that
+   same change* — the work becomes testable rather than speculative — and
+   **Option 1.5** (port at the `background_shutdown` signature only, no
+   app-state migration) is the right scope, not full Option 2.
+
+Whichever fires first flips the recommendation to build.
 
 ### The Option 2 path (when revisited)
 

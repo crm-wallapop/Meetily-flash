@@ -6,7 +6,12 @@
 > premises (the flush is in `background_shutdown`, not the sync path; the manager
 > is a global static consumed on stop, not app state) — see `design.md`
 > § "DEFERRED & architecture corrections" for the real architecture, the deferral
-> reasoning, and the corrected Option 2 implementation path. Revisit when a §4
+> reasoning, and the corrected Option 2 implementation path. **Re-examined
+> 2026-06-25: deferral still stands. design.md § "Re-examined 2026-06-25"
+> corrects two errors in the deferral reasoning (Option 1 is less tautological
+> than claimed; the value frame ignored the shutdown error paths where the
+> historical bugs lived) and sharpens the trigger to include "any change
+> touching `background_shutdown`".** Revisit when a §4
 > adversarial need (device-disconnect / permission-denied / sample-rate-mismatch)
 > demands a swappable capture port.
 
