@@ -229,6 +229,7 @@ memory-stats = "1.0"
 strsim = "0.10.0"
 tracing-subscriber = "0.3.16"
 serial_test = "3"
+proptest = "1"
 
 [patch.crates-io]
 cpal = { git = "https://github.com/RustAudio/cpal", rev = "51c3b43" }

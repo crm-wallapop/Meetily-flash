@@ -9,7 +9,7 @@
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 
@@ -29,6 +29,14 @@ const FOCUS_HISTORY_CAP: usize = 10;
 
 /// How long to retain focus history entries.
 const FOCUS_HISTORY_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Minimum continuous `has_browser_capture_session()` run preceding the call's FIRST
+/// `true → false` drop required to classify the exit as stable (4 s UDP debounce).
+/// Below this the exit is transient-prone (15 s). Chosen above the spec's ~10 s WASAPI
+/// transient ceiling with margin: a real meeting holds capture for minutes, so the guard
+/// is satisfied for essentially all genuine calls; only pathologically short or flaky
+/// sessions fall back to 15 s (the safe direction). A `const` (not configurable — YAGNI).
+pub const STABLE_CONFIDENCE_WINDOW: Duration = Duration::from_secs(20);
 
 // ── Focus tracker ─────────────────────────────────────────────────────────
 
@@ -575,18 +583,34 @@ pub struct WindowsMeetingDetector {
     /// Used to emit an `info`-level log on every `bc` transition so smoke tests can
     /// measure the exact WASAPI-drop lag after "Leave call" without needing `RUST_LOG=debug`.
     last_bc: Option<bool>,
-    /// Per-call latch: flips to `true` on the first observed `bc` `Some(true) → false`
-    /// transition (a WASAPI capture-session drop). `bc` stability is the in-call
-    /// discriminator the detector already relies on — a drop proves the setup is
-    /// transient-prone (device switch, brief WASAPI hiccup), so once observed the call
-    /// uses the long 15 s UDP debounce for any subsequent exit; a stable-mic call (the
-    /// common case) keeps the 4 s debounce. Monotonic false→true; reset only by
-    /// `notify_exit()` on the `InCall → Idle` transition so back-to-back calls start
-    /// fresh. `pub(crate)` so adapter tests can set it directly.
-    pub(crate) bc_drop_observed_this_call: bool,
+    /// Start of the current unbroken `bc == true` run. Set on a `false → true` edge
+    /// and on the first poll if `bc == true` (stamped to `self.now()`, the first-poll
+    /// instant — the unknowable pre-start history cannot be recovered, so a mid-call
+    /// app start measures conservatively). Cleared to `None` on a `true → false` edge
+    /// AFTER the run length is read. Once `exit_stable_latch` is `Some`, this field is
+    /// no longer consulted (the decision is locked). `pub(crate)` so adapter tests can
+    /// read it.
+    pub(crate) bc_true_since: Option<Instant>,
+    /// Locked-first-drop exit-stability decision (design D1–D3). `None` until the
+    /// call's FIRST `bc` `true → false` drop; on that drop set ONCE to
+    /// `Some(run_len >= STABLE_CONFIDENCE_WINDOW)` where `run_len = now − bc_true_since`.
+    /// Once `Some(v)`, IMMUTABLE until `notify_exit()` — neither a `false → true`
+    /// recovery nor a later drop may change it. This immutability is the anti-self-heal
+    /// guarantee: `step_detector` recomputes the debounce every poll, so the
+    /// `stable_capture` value driving it must not flip mid-debounce (the recovery-based
+    /// draft recreated the detector-turn-latch trap of commit 693ff90). `pub(crate)` so
+    /// adapter tests can read it.
+    pub(crate) exit_stable_latch: Option<bool>,
     /// Injectable probes for unit tests — absent in release builds (D test seam).
     #[cfg(test)]
     pub(crate) probes: Option<DetectorProbes>,
+    /// Test-overridable clock — absent in release builds. Production reads
+    /// `Instant::now()`; tests that drive ≥ `STABLE_CONFIDENCE_WINDOW` runs
+    /// deterministically inject a controlled instant. The `now()` helper is the ONLY
+    /// sanctioned way to read the current instant inside `current_state()` so every
+    /// read is seam-divertible (design task 1.14).
+    #[cfg(test)]
+    pub(crate) clock: Option<Box<dyn Fn() -> Instant + Send + Sync>>,
 }
 
 impl WindowsMeetingDetector {
@@ -598,10 +622,28 @@ impl WindowsMeetingDetector {
             focus_history,
             turn_established: false,
             last_bc: None,
-            bc_drop_observed_this_call: false,
+            bc_true_since: None,
+            exit_stable_latch: None,
             #[cfg(test)]
             probes: None,
+            #[cfg(test)]
+            clock: None,
         }
+    }
+
+    /// The current instant. Production: `Instant::now()`. Tests: a controlled clock may
+    /// be injected via `clock` so ≥ `STABLE_CONFIDENCE_WINDOW` runs are driven
+    /// deterministically without real sleeps. EVERY `Instant::now()` read inside
+    /// `current_state()` MUST go through this helper (design task 1.14) — a partial seam
+    /// lets tests pass while production diverges.
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        {
+            if let Some(clock) = &self.clock {
+                return clock();
+            }
+        }
+        Instant::now()
     }
 }
 
@@ -621,9 +663,11 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
         // Reset the sticky TURN flag so the next call (potentially UDP-only)
         // goes through the full join/exit detection flow again (D7).
         self.turn_established = false;
-        // Reset the per-call bc-drop latch so the next call starts assumed-stable
-        // (4 s debounce). A transient-prone previous call must not poison the next.
-        self.bc_drop_observed_this_call = false;
+        // Reset the locked-first-drop latch + run-length timer so the next call decides
+        // stability afresh. A transient-prone previous call must not poison the next;
+        // an immutable latch must not survive across calls (design D4).
+        self.exit_stable_latch = None;
+        self.bc_true_since = None;
     }
 
     fn current_state(&mut self) -> DetectorObservation {
@@ -669,12 +713,26 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
                 bc,
                 if bc { "active" } else { "dropped" },
             );
-            // Latch the per-call bc-drop flag on the first Some(true) → false
-            // transition. Must read `last_bc` BEFORE reassigning it below. Once
-            // observed, the call is treated as transient-prone for its remainder
-            // (15 s UDP debounce); reset only by `notify_exit()`.
-            if self.last_bc == Some(true) && !bc {
-                self.bc_drop_observed_this_call = true;
+            // Locked-first-drop latch (design D1–D3). Decide exit stability ONCE, at the
+            // call's first true→false drop, from the unbroken true-run preceding it.
+            // Once exit_stable_latch is Some(v) it is IMMUTABLE until notify_exit() —
+            // neither a recovery nor a later drop may change it. This is the
+            // anti-self-heal guarantee: step_detector recomputes the debounce every
+            // poll, so stable_capture must not flip mid-debounce (the recovery-based
+            // draft recreated the detector-turn-latch trap of commit 693ff90).
+            let dropped = self.last_bc == Some(true) && !bc;
+            let recovered = self.last_bc == Some(false) && bc;
+            if self.exit_stable_latch.is_none() {
+                if dropped {
+                    let run_len = self
+                        .bc_true_since
+                        .map(|start| self.now().saturating_duration_since(start))
+                        .unwrap_or(Duration::ZERO);
+                    self.exit_stable_latch = Some(run_len >= STABLE_CONFIDENCE_WINDOW);
+                    self.bc_true_since = None;
+                } else if recovered {
+                    self.bc_true_since = Some(self.now());
+                }
             }
             self.last_bc = Some(bc);
         }
@@ -723,12 +781,23 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
                 // D15: stamp any connection at startup as pre-existing regardless of
                 // whether a Meet window is visible. Window gate removed from this branch:
                 // a minimized Meet window on poll 1 would leave C_FSA = None, then poll 2
-                // would set C_FSA = Instant::now() (> detector_start), making the
-                // connection look new and bypassing D15.
+                // would set C_FSA = now() (> detector_start), making the connection look
+                // new and bypassing D15.
                 self.connection_first_seen_at = Some(self.detector_start);
             }
+            // First-poll bc stamp (design First-poll semantics): if capture is already
+            // active at the first poll (app started mid-call), the pre-start run length
+            // is unknowable — stamp to the first-poll instant so a later exit's run_len
+            // is measured conservatively from app start, not true capture onset. Uses
+            // self.now() (not detector_start) so the test clock seam is coherent: a
+            // controlled clock advances both this stamp and the drop-time read together.
+            // If the first poll is bc=false (app started before getUserMedia opened),
+            // bc_true_since stays None until the first false→true edge begins the run.
+            if bc {
+                self.bc_true_since = Some(self.now());
+            }
         } else if has_conn && !meet_windows.is_empty() && self.connection_first_seen_at.is_none() {
-            self.connection_first_seen_at = Some(Instant::now());
+            self.connection_first_seen_at = Some(self.now());
         } else if !has_conn {
             self.connection_first_seen_at = None;
         }
@@ -745,7 +814,7 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
             connection_first_seen_at: self.connection_first_seen_at,
             default_title: String::new(),
             is_turn_exit,
-            stable_capture: !self.bc_drop_observed_this_call,
+            stable_capture: self.exit_stable_latch.unwrap_or(false),
         };
 
         if !obs.meet_windows.is_empty() {
@@ -789,6 +858,8 @@ pub fn spawn_focus_tracker(history: FocusHistory) -> tokio::task::JoinHandle<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn make_obs(titles: &[&str]) -> DetectorObservation {
         DetectorObservation {
@@ -1158,107 +1229,6 @@ mod tests {
             "is_turn_exit must stay true across the WASAPI bc-drop mid-exit");
     }
 
-    // §4 adversarial (device disconnected): a WASAPI capture-device loss mid-call
-    // drives has_browser_capture_session false even though the user has not left —
-    // the enumerated device simply vanished. The detector must not conflate this
-    // transient with a clean leave: the bc-drop latch fires so the call is treated
-    // as transient-prone (the conservative long debounce applies, buying time for
-    // the device to recover), and on recovery the call is still reported active.
-    // The latch is monotonic — recovery must NOT flip stable_capture back to true,
-    // or a subsequent real exit on a flaky call would wrongly get the short debounce.
-    #[test]
-    fn device_disconnect_mid_call_latches_unstable_without_confusing_leave() {
-        let probes_active = DetectorProbes {
-            has_turn:    Box::new(|| true),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(|| true),
-            meet_windows: probe_windows(&["Meet - standup"]),
-        };
-        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_active);
-
-        // Poll 1: in-call, capture healthy.
-        let obs1 = det.current_state();
-        assert!(obs1.has_browser_capture_session);
-        assert!(obs1.stable_capture, "a never-blipped call starts stable");
-        assert!(!det.bc_drop_observed_this_call);
-
-        // Poll 2: capture device lost mid-call (WASAPI enumeration fails). The TURN
-        // relay is still alive, so this is NOT a leave.
-        det.probes = Some(DetectorProbes {
-            has_turn:    Box::new(|| true),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(|| false),
-            meet_windows: probe_windows(&["Meet - standup"]),
-        });
-        let obs2 = det.current_state();
-        assert!(!obs2.has_browser_capture_session, "live bc must reflect the device loss");
-        assert!(det.bc_drop_observed_this_call, "the bc-drop latch must fire on the device loss");
-        assert!(!obs2.stable_capture, "a transient-prone call reports unstable so the long debounce applies");
-        assert!(!obs2.is_turn_exit, "TURN still alive → not a TURN exit; device loss is not a leave");
-
-        // Poll 3: device recovers. The call is still active, but stable_capture must
-        // STAY false — recovery does not un-poison a transient-prone call.
-        det.probes = Some(DetectorProbes {
-            has_turn:    Box::new(|| true),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(|| true),
-            meet_windows: probe_windows(&["Meet - standup"]),
-        });
-        let obs3 = det.current_state();
-        assert!(obs3.has_browser_capture_session, "capture restored → call still active");
-        assert!(det.bc_drop_observed_this_call, "bc-drop latch is monotonic across recovery");
-        assert!(!obs3.stable_capture, "recovery must NOT flip stable_capture back to true");
-    }
-
-    // §4 adversarial (concurrent / rapid rejoin): the user clicks Leave then
-    // immediately Rejoins within the ~2 s WASAPI capture-release lag. bc therefore
-    // NEVER actually drops (capture was never released), so the call must NOT be
-    // poisoned as transient-prone by a bc-drop that never happened. is_turn_exit
-    // tracks the TURN signal (true on the brief leave, false again on rejoin) so
-    // the state machine's debounce — not the adapter — decides if the blip was real.
-    #[test]
-    fn rapid_leave_rejoin_within_wasapi_lag_keeps_capture_stable() {
-        let probes_active = DetectorProbes {
-            has_turn:    Box::new(|| true),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(|| true),
-            meet_windows: probe_windows(&["Meet - standup"]),
-        };
-        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_active);
-
-        // Poll 1: in-call.
-        let obs1 = det.current_state();
-        assert!(det.turn_established);
-        assert!(obs1.stable_capture);
-
-        // Poll 2: user clicks Leave — TURN relay drops, but WASAPI capture is still
-        // active (the ~2 s release lag). bc never went false, so no bc-drop latch.
-        det.probes = Some(DetectorProbes {
-            has_turn:    Box::new(|| false),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(|| true),
-            meet_windows: probe_windows(&["Meet - standup"]),
-        });
-        let obs2 = det.current_state();
-        assert!(det.turn_established, "turn_established must survive a turn-only drop (self-heal trap)");
-        assert!(obs2.is_turn_exit, "TURN drop with the latch set must signal a TURN exit");
-        assert!(!det.bc_drop_observed_this_call, "bc never dropped → no transient-prone latch");
-        assert!(obs2.stable_capture, "capture stayed continuous → call stays stable");
-
-        // Poll 3: user clicks Rejoin within the lag window — TURN returns, bc was
-        // true throughout. The blip must leave no residue.
-        det.probes = Some(DetectorProbes {
-            has_turn:    Box::new(|| true),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(|| true),
-            meet_windows: probe_windows(&["Meet - standup"]),
-        });
-        let obs3 = det.current_state();
-        assert!(!obs3.is_turn_exit, "TURN restored → no longer a TURN exit");
-        assert!(!det.bc_drop_observed_this_call, "rapid rejoin must not poison the call as transient-prone");
-        assert!(obs3.stable_capture, "the call retains its stable characterization");
-    }
-
     // (d) D15 / C-NEW-2: Meet window minimized at startup — first poll sees empty
     //     window list while a Google TCP connection already exists. The first-poll
     //     branch must stamp C_FSA = detector_start unconditionally (no window gate).
@@ -1360,102 +1330,453 @@ mod tests {
             "after notify_exit(), persistent Otter.ai WASAPI does not block next call");
     }
 
-    // ── meeting-udp-media-signal — adversarial RED tests ────────────────────
+    // ── meeting-udp-confidence-debounce — adversarial RED tests ─────────────
     //
-    // These pin the per-call bc-drop latch that drives the adaptive UDP debounce.
-    // They FAIL on the pre-change code: `stable_capture` does not exist, so the
-    // field cannot be read and the latch is never tripped.
+    // These drive the REAL WindowsMeetingDetector latch (locked-first-drop, design
+    // D1–D4) through bc drop/recovery/flicker sequences via a controllable clock +
+    // bc flag. They FAIL on the pre-change code, which latched
+    // `bc_drop_observed_this_call` ON the exit drop — making every exit report
+    // stable_capture=false and the 4 s debounce unreachable.
 
-    // Task 1.1 — A call with continuously-active bc (no drop) must report
-    // stable_capture=true so step_detector selects the 4 s short debounce.
-    #[test]
-    fn stable_call_sets_stable_capture_true() {
+    /// Test harness: a detector whose `bc` signal is an `AtomicBool` and whose clock
+    /// is an `Arc<Mutex<Instant>>` advanced by `advance()`. Lets ≥ STABLE_CONFIDENCE_WINDOW
+    /// runs be driven deterministically without real sleeps. `turn` sets the TURN probe
+    /// (true for device-disconnect scenarios where TURN stays alive mid-call).
+    fn latched_detector(
+        turn: bool,
+        bc_initial: bool,
+    ) -> (
+        WindowsMeetingDetector,
+        Arc<AtomicBool>,
+        Arc<Mutex<Instant>>,
+    ) {
+        let bc_flag = Arc::new(AtomicBool::new(bc_initial));
+        let start = Instant::now();
+        let clock = Arc::new(Mutex::new(start));
+        let bc_for_probe = Arc::clone(&bc_flag);
+        let clock_for_probe = Arc::clone(&clock);
         let probes = DetectorProbes {
-            has_turn:    Box::new(|| false),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(|| true),
+            has_turn: Box::new(move || turn),
+            has_conn: Box::new(|| true),
+            has_capture: Box::new(move || bc_for_probe.load(Ordering::SeqCst)),
             meet_windows: probe_windows(&["Meet - standup"]),
         };
         let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
-        // Poll several times with bc continuously true. No Some(true) → false
-        // transition occurs, so the latch stays false and stable_capture stays true.
-        for i in 0..3 {
+        det.clock = Some(Box::new(move || *clock_for_probe.lock().unwrap()));
+        (det, bc_flag, clock)
+    }
+
+    fn set_bc(flag: &Arc<AtomicBool>, v: bool) {
+        flag.store(v, Ordering::SeqCst);
+    }
+
+    fn advance(clock: &Arc<Mutex<Instant>>, dur: Duration) {
+        *clock.lock().unwrap() += dur;
+    }
+
+    // Task 1.1 — A bc=true run ≥ STABLE_CONFIDENCE_WINDOW followed by a single
+    // bc=false drop latches Some(true) so the 4 s debounce applies. FAILS on the
+    // pre-change code: the drop self-latches false (bc_drop_observed_this_call).
+    #[test]
+    fn first_drop_after_window_latches_stable_true() {
+        let (mut det, bc, clock) = latched_detector(false, true);
+        let _ = det.current_state();
+        advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(1));
+        set_bc(&bc, false);
+        let obs = det.current_state();
+        assert_eq!(det.exit_stable_latch, Some(true), "run ≥ window → latch Some(true)");
+        assert!(obs.stable_capture, "stable_capture must be true so the 4 s debounce applies");
+    }
+
+    // Task 1.2 (self-heal guard, shark C1) — once Some(true) is set on the first
+    // drop, a 1-poll WASAPI flicker (false → true → false) during the debounce
+    // MUST NOT clear or flip the latch. The recovery-based draft failed this: it
+    // cleared the latch on the false→true edge, flipping a running 4 s exit to 15 s.
+    #[test]
+    fn flicker_during_debounce_does_not_flip_latch() {
+        let (mut det, bc, clock) = latched_detector(false, true);
+        let _ = det.current_state();
+        advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(5));
+        set_bc(&bc, false);
+        let obs_drop = det.current_state();
+        assert_eq!(det.exit_stable_latch, Some(true));
+        assert!(obs_drop.stable_capture);
+
+        // 1-poll WASAPI flicker: bc returns true for one poll.
+        set_bc(&bc, true);
+        let obs_flicker = det.current_state();
+        assert_eq!(det.exit_stable_latch, Some(true), "flicker must NOT clear the latch");
+        assert!(obs_flicker.stable_capture, "stable_capture stays true through the flicker");
+
+        // Flicker ends: bc drops again. Latch still Some(true).
+        set_bc(&bc, false);
+        let obs_post = det.current_state();
+        assert_eq!(det.exit_stable_latch, Some(true), "latch immutable across the second drop");
+        assert!(obs_post.stable_capture);
+    }
+
+    // Task 1.3 — A bc=true run shorter than the window, then a drop, latches
+    // Some(false) → stable_capture false → 15 s debounce.
+    #[test]
+    fn short_stable_run_then_drop_is_15s() {
+        let (mut det, bc, clock) = latched_detector(false, true);
+        let _ = det.current_state();
+        advance(&clock, Duration::from_secs(5)); // < 20 s window
+        set_bc(&bc, false);
+        let obs = det.current_state();
+        assert_eq!(det.exit_stable_latch, Some(false), "run < window → latch Some(false)");
+        assert!(!obs.stable_capture, "stable_capture false → 15 s debounce");
+    }
+
+    // Task 1.4 (the D1 relaxation) — a call that ran stable ≥ window, suffered a
+    // recovered transient, then really exits, STILL exits at 4 s: the first drop's
+    // run was ≥ window so the latch is Some(true), and the recovery + later drop
+    // cannot change it (immutability). The old "transient ⟹ 15 s" rule is relaxed.
+    #[test]
+    fn recovered_transient_after_window_still_exits_4s() {
+        let (mut det, bc, clock) = latched_detector(false, true);
+        let _ = det.current_state();
+        advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(5));
+        set_bc(&bc, false); // first drop (the "transient"): latch Some(true)
+        let obs1 = det.current_state();
+        assert!(obs1.stable_capture);
+
+        set_bc(&bc, true); // recovery + second stable run
+        let _ = det.current_state();
+        advance(&clock, STABLE_CONFIDENCE_WINDOW);
+        set_bc(&bc, false); // real exit (second drop): latch held from the first drop
+        let obs2 = det.current_state();
+        assert_eq!(det.exit_stable_latch, Some(true), "latch held from first drop");
+        assert!(obs2.stable_capture, "the real exit still gets the 4 s debounce");
+    }
+
+    // Task 1.5 — After a stable exit latches Some(true), several consecutive
+    // bc=false polls must all report stable_capture == true (step_detector
+    // recomputes the debounce every poll, so the value must be stable across the
+    // debounce window).
+    #[test]
+    fn latch_held_stable_across_consecutive_false_polls() {
+        let (mut det, bc, clock) = latched_detector(false, true);
+        let _ = det.current_state();
+        advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(1));
+        set_bc(&bc, false);
+        for i in 0..5 {
             let obs = det.current_state();
+            assert_eq!(det.exit_stable_latch, Some(true));
             assert!(obs.stable_capture,
-                "poll {i}: continuously-stable bc must yield stable_capture=true");
+                "consecutive false poll {i}: stable_capture must stay true");
         }
     }
 
-    // Task 1.2 — The first bc drop (Some(true) → false) latches
-    // bc_drop_observed_this_call=true. stable_capture must then be false on
-    // every subsequent poll, EVEN AFTER bc returns true (the latch is monotonic
-    // for the remainder of the call).
+    // Task 1.6 — notify_exit() resets the latch so the next call's first drop is
+    // classified afresh (no inheritance of the prior call's stability assessment).
     #[test]
-    fn first_bc_drop_latches_stable_capture_false() {
-        let bc_flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let bc_for_probe = Arc::clone(&bc_flag);
-        let probes = DetectorProbes {
-            has_turn:    Box::new(|| false),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(move || bc_for_probe.load(std::sync::atomic::Ordering::SeqCst)),
-            meet_windows: probe_windows(&["Meet - standup"]),
-        };
-        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
-
-        // Poll 1: bc=true (stable so far).
+    fn notify_exit_clears_latch_for_next_call() {
+        let (mut det, bc, clock) = latched_detector(false, true);
+        let _ = det.current_state();
+        advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(1));
+        set_bc(&bc, false);
         let obs = det.current_state();
-        assert!(obs.stable_capture, "before any drop: stable_capture must be true");
+        assert_eq!(det.exit_stable_latch, Some(true));
+        assert!(obs.stable_capture);
 
-        // Poll 2: bc drops (a transient). Latch trips.
-        bc_flag.store(false, std::sync::atomic::Ordering::SeqCst);
-        let obs = det.current_state();
-        assert!(!obs.stable_capture,
-            "after first Some(true) → false transition: stable_capture must be false");
+        det.notify_exit();
+        assert!(det.exit_stable_latch.is_none(), "notify_exit clears the latch");
+        assert!(det.bc_true_since.is_none(), "notify_exit clears bc_true_since");
 
-        // Poll 3: bc returns. The latch must remain tripped (monotonic per call).
-        bc_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        let obs = det.current_state();
-        assert!(!obs.stable_capture,
-            "after bc returns: the latch must stay tripped for the rest of the call");
-
-        // Poll 4: bc drops again. Still false.
-        bc_flag.store(false, std::sync::atomic::Ordering::SeqCst);
-        let obs = det.current_state();
-        assert!(!obs.stable_capture, "a second drop must keep stable_capture false");
+        // Next call: short run → Some(false). No inheritance of Some(true).
+        set_bc(&bc, true);
+        let _ = det.current_state();
+        advance(&clock, Duration::from_secs(3));
+        set_bc(&bc, false);
+        let obs2 = det.current_state();
+        assert_eq!(det.exit_stable_latch, Some(false), "next call classified afresh");
+        assert!(!obs2.stable_capture, "no inheritance of the prior stable latch");
     }
 
-    // Task 1.3 — notify_exit() resets the latch so the next call starts
-    // assumed-stable. A transient-prone previous call must not poison the next.
+    // Task 1.7 (shark C2) — Rapid leave/rejoin within the ~2 s WASAPI release lag:
+    // bc reads true throughout (capture was never released), so there is no
+    // true→false edge and no latch must be set. bc_true_since stays continuous.
     #[test]
-    fn notify_exit_resets_bc_drop_latch_for_next_call() {
-        let bc_flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    fn rapid_leave_rejoin_within_wasapi_lag_no_spurious_drop() {
+        let (mut det, _bc, clock) = latched_detector(false, true);
+        let _ = det.current_state();
+        let since_after_first = det.bc_true_since;
+        assert!(since_after_first.is_some(), "first-poll bc=true stamps bc_true_since");
+
+        for _ in 0..3 {
+            advance(&clock, Duration::from_millis(500));
+            let obs = det.current_state();
+            assert!(det.exit_stable_latch.is_none(), "no drop → latch never set");
+            assert!(!obs.stable_capture, "no drop → stable_capture stays false (default)");
+        }
+        assert_eq!(det.bc_true_since, since_after_first, "bc_true_since continuous, never reset");
+    }
+
+    // Task 1.8 (shark C1, rewritten) — A WASAPI device loss mid-call drives bc
+    // false even though the user has not left (the enumerated device vanished).
+    // This IS a true→false drop, so the latch fires and classifies by run length —
+    // NOT by whether it was a "real leave". TURN relay stays alive so is_turn_exit
+    // == false throughout. Two variants: ≥window disconnect → Some(true);
+    // <window → Some(false).
+    #[test]
+    fn device_disconnect_mid_call_classified_by_run_length() {
+        // Variant A: long run before the disconnect → Some(true).
+        {
+            let (mut det, bc, clock) = latched_detector(true, true);
+            let _ = det.current_state();
+            advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(5));
+            set_bc(&bc, false); // device lost
+            let obs = det.current_state();
+            assert!(!obs.is_turn_exit, "TURN alive → device loss is not a TURN exit");
+            assert_eq!(det.exit_stable_latch, Some(true), "≥window disconnect → stable");
+            assert!(obs.stable_capture);
+        }
+        // Variant B: short run before the disconnect → Some(false).
+        {
+            let (mut det, bc, clock) = latched_detector(true, true);
+            let _ = det.current_state();
+            advance(&clock, Duration::from_secs(3)); // < window
+            set_bc(&bc, false);
+            let obs = det.current_state();
+            assert!(!obs.is_turn_exit);
+            assert_eq!(det.exit_stable_latch, Some(false), "<window disconnect → unstable");
+            assert!(!obs.stable_capture);
+        }
+    }
+
+    // Task 1.9 (shark I2) — Detector constructed mid-call (bc already true at first
+    // poll). The pre-start run length is unknowable, so bc_true_since is stamped to
+    // the first-poll instant; an immediate drop measures run_len ≈ 0 < window →
+    // Some(false) (conservative).
+    #[test]
+    fn mid_call_app_start_measures_short_run() {
+        let (mut det, bc, clock) = latched_detector(false, true);
+        let _ = det.current_state();
+        assert!(det.bc_true_since.is_some());
+        advance(&clock, Duration::from_millis(1));
+        set_bc(&bc, false);
+        let obs = det.current_state();
+        assert_eq!(det.exit_stable_latch, Some(false), "mid-call start + immediate drop → conservative 15 s");
+        assert!(!obs.stable_capture);
+    }
+
+    // Task 1.10 (shark I4) — Pin the >= comparison at the boundary: run_len exactly
+    // STABLE_CONFIDENCE_WINDOW → Some(true); window − ε → Some(false);
+    // window + ε → Some(true).
+    #[test]
+    fn window_boundary_pins_gte() {
+        // Exactly at window → true.
+        {
+            let (mut det, bc, clock) = latched_detector(false, true);
+            let _ = det.current_state();
+            advance(&clock, STABLE_CONFIDENCE_WINDOW);
+            set_bc(&bc, false);
+            let _ = det.current_state();
+            assert_eq!(det.exit_stable_latch, Some(true), "run_len == window → true (>= comparison)");
+        }
+        // Window − ε → false.
+        {
+            let (mut det, bc, clock) = latched_detector(false, true);
+            let _ = det.current_state();
+            advance(&clock, STABLE_CONFIDENCE_WINDOW - Duration::from_millis(1));
+            set_bc(&bc, false);
+            let _ = det.current_state();
+            assert_eq!(det.exit_stable_latch, Some(false), "window − ε → false");
+        }
+        // Window + ε → true.
+        {
+            let (mut det, bc, clock) = latched_detector(false, true);
+            let _ = det.current_state();
+            advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_millis(1));
+            set_bc(&bc, false);
+            let _ = det.current_state();
+            assert_eq!(det.exit_stable_latch, Some(true), "window + ε → true");
+        }
+    }
+
+    // Task 1.11 (shark C3) — If the app dies mid-debounce before notify_exit()
+    // fires, the stale latch dies with the process. A freshly-constructed detector
+    // starts with exit_stable_latch = None and bc_true_since = None (reconstruction
+    // is the crash-path safety net; notify_exit covers the normal path).
+    #[test]
+    fn fresh_detector_after_crash_has_no_inherited_latch() {
+        let (mut prior, bc, clock) = latched_detector(false, true);
+        let _ = prior.current_state();
+        advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(1));
+        set_bc(&bc, false);
+        let _ = prior.current_state();
+        assert_eq!(prior.exit_stable_latch, Some(true));
+        // `prior` is dropped here (simulated crash) — no notify_exit.
+
+        let fresh = WindowsMeetingDetector::new(empty_history());
+        assert!(fresh.exit_stable_latch.is_none(), "fresh detector has no inherited latch");
+        assert!(fresh.bc_true_since.is_none(), "fresh detector has no inherited bc_true_since");
+    }
+
+    // Task 1.16 (shark round-2 I-R1) — The detector's FIRST poll reads bc == false
+    // (app started before the browser opened getUserMedia). bc_true_since stays None
+    // through the initial false polls, then is stamped at the false→true edge. A
+    // later exit's run_len is measured from that edge, NOT from detector start.
+    // Every other §1 test starts bc == true on poll 1, so this is the sole cover of
+    // the None→false first-poll path.
+    #[test]
+    fn first_poll_false_then_stable_run_measured_from_edge() {
+        let (mut det, bc, clock) = latched_detector(false, false); // bc starts false
+        let obs = det.current_state();
+        assert!(det.bc_true_since.is_none(), "first-poll bc=false → bc_true_since stays None");
+        assert!(!obs.stable_capture);
+
+        for _ in 0..3 {
+            advance(&clock, Duration::from_secs(2));
+            let _ = det.current_state();
+            assert!(det.bc_true_since.is_none(), "bc still false → bc_true_since still None");
+        }
+
+        // false→true edge: bc_true_since stamped at the edge instant, not detector start.
+        let edge_time = *clock.lock().unwrap();
+        set_bc(&bc, true);
+        let _ = det.current_state();
+        assert_eq!(det.bc_true_since, Some(edge_time), "stamped at the edge instant, not detector start");
+
+        advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(1));
+        set_bc(&bc, false);
+        let obs = det.current_state();
+        assert_eq!(det.exit_stable_latch, Some(true), "run measured from the edge ≥ window → stable");
+        assert!(obs.stable_capture);
+    }
+
+    // Task 1.15 (shark I5 + round-2 I-R2) — Property: for any bc poll sequence, once
+    // exit_stable_latch == Some(v) it stays Some(v) until notify_exit(); and
+    // Some(v) ⟹ ((run_len at the first drop) >= STABLE_CONFIDENCE_WINDOW) == v. The
+    // generator biases true-run lengths to 1-15 polls (2-30 s at the 2 s poll
+    // interval) so runs straddle the 20 s boundary; notify_exit() at random run
+    // boundaries exercises multiple calls' first-drops. A naive bool generator almost
+    // never yields a ≥window run, making the property vacuous.
+    proptest! {
+        #[test]
+        fn locked_latch_invariant_holds(
+            runs in prop::collection::vec((1u32..16u32, any::<bool>()), 1..20)
+        ) {
+            let (mut det, bc, clock) = latched_detector(false, false);
+            let poll_interval = Duration::from_secs(2);
+            let mut latched_value: Option<bool> = None;
+
+            for (run_idx, &(num_polls, notify_exit_before)) in runs.iter().enumerate() {
+                if notify_exit_before {
+                    det.notify_exit();
+                    latched_value = None;
+                }
+                // bc alternates each run (even=true, odd=false) so true→false drops occur.
+                set_bc(&bc, run_idx % 2 == 0);
+
+                for _ in 0..num_polls {
+                    advance(&clock, poll_interval);
+                    let bc_true_since_before = det.bc_true_since;
+                    let now = *clock.lock().unwrap();
+                    let obs = det.current_state();
+
+                    // Invariant 1: once latched, the value is immutable until notify_exit.
+                    if let Some(v) = latched_value {
+                        prop_assert_eq!(det.exit_stable_latch, Some(v),
+                            "latch immutable: stays Some({})", v);
+                        prop_assert_eq!(obs.stable_capture, v);
+                    }
+
+                    // Invariant 2: the latched value equals (run_len >= window) at the first
+                    // drop, where run_len is independently recomputed from the observed
+                    // bc_true_since and the controlled clock.
+                    if latched_value.is_none() && det.exit_stable_latch.is_some() {
+                        let run_len = bc_true_since_before
+                            .map(|start| now.saturating_duration_since(start))
+                            .unwrap_or(Duration::ZERO);
+                        let expected = run_len >= STABLE_CONFIDENCE_WINDOW;
+                        prop_assert_eq!(
+                            det.exit_stable_latch,
+                            Some(expected),
+                            "latch value must equal (run_len {:?} >= window) == {}",
+                            run_len,
+                            expected
+                        );
+                        latched_value = det.exit_stable_latch;
+                    }
+                }
+            }
+        }
+    }
+
+    // Task 4.1 — #[ignore] real-clock test: a stable exit (latch Some(true)) drives
+    // meeting-ended within the 4 s debounce + poll slack on a REAL wall clock, NOT
+    // the 15 s path. Runs via `cargo test -- --ignored`. The injected clock drives
+    // the latch run-length (so no 20 s real sleep is needed); the debounce itself is
+    // measured in real Instant::now() time — this is the latency guarantee under test.
+    #[test]
+    #[ignore = "wall-clock timing: sleeps ~5 s; run with cargo test -- --ignored"]
+    fn stable_exit_fires_within_short_debounce_real_clock() {
+        use crate::use_cases::meeting_detection::{
+            step_detector, DetectorEvent, DetectorSettings, DetectorState,
+        };
+
+        let bc_flag = Arc::new(AtomicBool::new(false));
+        let clock = Arc::new(Mutex::new(Instant::now()));
         let bc_for_probe = Arc::clone(&bc_flag);
+        let clock_for_probe = Arc::clone(&clock);
         let probes = DetectorProbes {
-            has_turn:    Box::new(|| false),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(move || bc_for_probe.load(std::sync::atomic::Ordering::SeqCst)),
-            meet_windows: probe_windows(&["Meet - standup"]),
+            has_turn: Box::new(|| false),
+            has_conn: Box::new(|| true),
+            has_capture: Box::new(move || bc_for_probe.load(Ordering::SeqCst)),
+            meet_windows: probe_windows(&["Meet - real-clock"]),
         };
         let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
+        det.clock = Some(Box::new(move || *clock_for_probe.lock().unwrap()));
 
-        // Establish bc=true first so the subsequent drop is a real Some(true) → false
-        // transition (last_bc must be Some(true) before the drop poll).
-        let _ = det.current_state();
+        let settings = DetectorSettings::default(); // SHORT=4 s, LONG=15 s
+        let suppress = AtomicBool::new(false);
+        let detector_start = Instant::now();
+        let poll_interval = Duration::from_millis(500);
+        let mut state = DetectorState::Idle;
 
-        // Trip the latch with a drop during the first call.
-        bc_flag.store(false, std::sync::atomic::Ordering::SeqCst);
-        let obs = det.current_state();
-        assert!(!obs.stable_capture, "first call: drop must trip the latch");
+        // First poll: bc=false → Idle, no connection.
+        let (next, _) =
+            step_detector(state, &det.current_state(), detector_start, Instant::now(), &suppress, &settings);
+        state = next;
 
-        // notify_exit fires on InCall → Idle. Adapter resets the latch.
-        det.notify_exit();
+        // Join: advance the injected clock 1 s (C_FSA > detector_start → not
+        // pre-existing) and set bc=true. bc_true_since stamps from the clock edge.
+        *clock.lock().unwrap() += Duration::from_secs(1);
+        bc_flag.store(true, Ordering::SeqCst);
+        std::thread::sleep(poll_interval);
+        let (next, events) =
+            step_detector(state, &det.current_state(), detector_start, Instant::now(), &suppress, &settings);
+        assert!(
+            events.iter().any(|e| matches!(e, DetectorEvent::MeetingDetected { .. })),
+            "join must fire meeting-detected"
+        );
+        state = next;
 
-        // Second call: bc continuously true. stable_capture must be true again.
-        bc_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        for i in 0..3 {
-            let obs = det.current_state();
-            assert!(obs.stable_capture,
-                "poll {i} after notify_exit: next call must start assumed-stable");
+        // Advance the injected clock past the window, drop bc → latch Some(true).
+        *clock.lock().unwrap() += STABLE_CONFIDENCE_WINDOW + Duration::from_secs(1);
+        bc_flag.store(false, Ordering::SeqCst);
+        let drop_time = Instant::now();
+
+        // Poll until meeting-ended fires. Real-clock debounce must be ~4 s, not ~15 s.
+        loop {
+            let now = Instant::now();
+            let (next, events) =
+                step_detector(state, &det.current_state(), detector_start, now, &suppress, &settings);
+            state = next;
+            if events.iter().any(|e| matches!(e, DetectorEvent::MeetingEnded)) {
+                let elapsed = now.duration_since(drop_time);
+                assert!(elapsed >= Duration::from_secs(4),
+                    "must not fire before the 4 s debounce; fired at {elapsed:?}");
+                assert!(elapsed < Duration::from_secs(8),
+                    "stable exit must fire within ~4-6 s (4 s debounce + poll slack), took {elapsed:?}");
+                return;
+            }
+            if now.duration_since(drop_time) > Duration::from_secs(12) {
+                panic!("stable exit did not fire within 12 s — likely on the 15 s path");
+            }
+            std::thread::sleep(poll_interval);
         }
     }
 }

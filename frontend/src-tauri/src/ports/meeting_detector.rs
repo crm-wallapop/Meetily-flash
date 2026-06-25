@@ -40,14 +40,20 @@ pub struct DetectorObservation {
     /// Resets to `false` when TURN returns (transient blip), allowing the debounce timer
     /// to be cleared. `false` on all other paths.
     pub is_turn_exit: bool,
-    /// Adaptive UDP-exit discriminator: `true` only while no `has_browser_capture_session`
-    /// drop (a `true → false` transition) has been observed during the current call. The
-    /// adapter latches it to `false` on the first such drop (the setup proved itself
-    /// transient-prone) and resets it to `false` (conservative) in `notify_exit()`. The
-    /// pure `step_detector` selects the UDP debounce from this flag: 4 s when `true`
-    /// (stable-mic common case), 15 s when `false` (transient-prone). Ignored on the TURN
-    /// path (`is_turn_exit` gates there). Mirrors the `is_turn_exit` plumbing: adapter-set
-    /// bool consumed by the pure use case, no trait-method change.
+    /// Adaptive UDP-exit discriminator. Decided ONCE per call, at the first
+    /// `has_browser_capture_session()` `true → false` drop, from the length of the
+    /// unbroken `true` run immediately preceding that drop: `true` iff that run was ≥
+    /// `STABLE_CONFIDENCE_WINDOW` (~20 s), else `false`. Stored in the adapter's
+    /// per-call `exit_stable_latch` and held IMMUTABLE for the rest of the call —
+    /// neither a `false → true` recovery nor a later drop may change it — until
+    /// `notify_exit()` resets it. The immutability is mandatory: `step_detector`
+    /// recomputes the debounce every poll, so the value driving it must not flip
+    /// mid-debounce (the prior recovery-based design recreated the self-heal trap of
+    /// commit 693ff90). The pure `step_detector` selects the UDP debounce from this
+    /// flag: 4 s when `true` (stable-mic common case), 15 s when `false`
+    /// (transient-prone / short run). Ignored on the TURN path (`is_turn_exit` gates
+    /// there). Mirrors the `is_turn_exit` plumbing: adapter-set bool consumed by the
+    /// pure use case, no trait-method change.
     pub stable_capture: bool,
 }
 

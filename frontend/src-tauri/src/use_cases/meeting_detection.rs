@@ -127,9 +127,12 @@ pub fn step_detector(
                 )
             } else {
                 // TURN path (is_turn_exit) gates first — stable_capture is ignored there.
-                // UDP path selects the debounce adaptively: 4 s when no bc drop was
-                // observed this call (stable_capture=true, the common case), 15 s
-                // otherwise (transient-prone, or the adapter has not populated the flag).
+                // UDP path selects the debounce from the adapter's locked-first-drop latch
+                // (detection/windows.rs, design D1–D3): 4 s when the call's first bc drop was
+                // preceded by ≥ STABLE_CONFIDENCE_WINDOW of continuous capture
+                // (stable_capture=true), 15 s otherwise (short/flaky first-drop run, or no
+                // drop yet). The latch is immutable for the rest of the call, so recomputing
+                // the debounce every poll is safe — the value cannot flip mid-debounce.
                 let debounce = if observation.is_turn_exit {
                     settings.turn_debounce_duration
                 } else if observation.stable_capture {
@@ -1279,5 +1282,42 @@ pub mod tests {
         assert!(matches!(s_stable, DetectorState::Idle), "UDP stable at 12 s must fire");
         let (s_transient, _) = step_incall_lost(12, &obs_udp_exit(false));
         assert!(matches!(s_transient, DetectorState::InCall { .. }), "UDP transient at 12 s must NOT fire");
+    }
+
+    // Task 3.2 — stable_capture=true held across multiple InCall exit polls keeps
+    // the 4 s debounce selection stable. step_detector recomputes the debounce every
+    // poll, so this asserts per-poll recompute is safe given the latch's immutability
+    // (design D3 / §1.5): the debounce does not flip mid-exit. Drives the pure state
+    // machine through a real-clock sequence (Instant::now base + Duration offsets).
+    #[test]
+    fn step_detector_stable_capture_drives_4s_when_latched() {
+        let obs = obs_udp_exit(true); // bc dropped, UDP path, stable_capture=true
+        let start = Instant::now();
+        let settings = default_settings(); // SHORT=4 s, LONG=15 s, TURN=4 s
+        let suppress = AtomicBool::new(false);
+        let mut state = DetectorState::InCall { connection_lost_at: Some(start) };
+
+        // Poll at 1 s, 2 s, 3 s: within the 4 s debounce → InCall, no event.
+        for elapsed_secs in [1u64, 2, 3] {
+            let now = start + Duration::from_secs(elapsed_secs);
+            let (next, events) =
+                step_detector(state, &obs, start, now, &suppress, &settings);
+            assert!(
+                matches!(next, DetectorState::InCall { .. }),
+                "at {elapsed_secs} s (< 4 s): must stay InCall — debounce not yet elapsed"
+            );
+            assert!(events.is_empty(), "at {elapsed_secs} s: no meeting-ended yet");
+            state = next;
+        }
+
+        // Poll at 4 s: debounce elapsed → Idle + MeetingEnded. The 4 s selection held
+        // stable across every poll (a mid-exit flip to 15 s would suppress this).
+        let now = start + Duration::from_secs(4);
+        let (next, events) = step_detector(state, &obs, start, now, &suppress, &settings);
+        assert!(
+            matches!(next, DetectorState::Idle),
+            "at 4 s with stable_capture=true: must fire (4 s debounce held stable)"
+        );
+        assert_eq!(events, vec![DetectorEvent::MeetingEnded]);
     }
 }
