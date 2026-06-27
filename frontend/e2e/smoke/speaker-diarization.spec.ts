@@ -1,8 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { TAURI_MOCK_INIT_SCRIPT } from '../mocks/init-script';
 import { SMOKE_DEFAULTS_INIT_SCRIPT } from './_defaults';
-import { SMOKE_MEETING_DETAILS_INIT_SCRIPT } from './_meeting-details';
 import { SMOKE_SETTINGS_INIT_SCRIPT } from './_settings';
+import { bootstrap, speakerCalls } from './_speaker-helpers';
 
 // Backfill of the speaker-diarization change's manual section-15 scenarios that are
 // expressible as UI-wiring smoke (15.2 inline label, 15.3 re-diarize, 15.5
@@ -13,55 +13,6 @@ import { SMOKE_SETTINGS_INIT_SCRIPT } from './_settings';
 // 15.1 (record a real multi-speaker meeting) needs a human + live mic and stays
 // manual; 15.4 (import audio) is covered by the real-audio harness run; 15.7 by
 // the settings-page describe below.
-
-const MEETING_URL = '/meeting-details?id=meet-summary-001';
-
-interface SmokeTranscript {
-  id: string;
-  text: string;
-  timestamp: string;
-  audio_start_time: number;
-  speaker?: string;
-}
-
-interface SpeakerCall {
-  cmd: string;
-  meetingId?: string;
-  clusterLabel?: string;
-  speakerName?: string;
-  speakerLabel?: string;
-}
-
-async function setTranscripts(
-  page: import('@playwright/test').Page,
-  transcripts: SmokeTranscript[],
-): Promise<void> {
-  await page.addInitScript((t) => {
-    (window as unknown as { __smokeTranscripts?: SmokeTranscript[] }).__smokeTranscripts = t;
-  }, transcripts);
-}
-
-async function bootstrap(
-  page: import('@playwright/test').Page,
-  transcripts: SmokeTranscript[],
-): Promise<void> {
-  page.on('dialog', (d) => d.dismiss());
-  await page.addInitScript(TAURI_MOCK_INIT_SCRIPT);
-  await page.addInitScript(SMOKE_DEFAULTS_INIT_SCRIPT);
-  await page.addInitScript(SMOKE_MEETING_DETAILS_INIT_SCRIPT);
-  await setTranscripts(page, transcripts);
-  await page.goto(MEETING_URL);
-  await page.waitForFunction(
-    () => (window as unknown as { __tauriCoreMockActive?: boolean }).__tauriCoreMockActive === true,
-    { timeout: 15_000 },
-  );
-}
-
-async function speakerCalls(page: import('@playwright/test').Page): Promise<SpeakerCall[]> {
-  return page.evaluate(() =>
-    (window as unknown as { __smokeSpeakerCalls?: SpeakerCall[] }).__smokeSpeakerCalls ?? [],
-  );
-}
 
 test.describe('speaker-diarization smoke (section 15 backfill)', () => {
   test.beforeEach(() => {

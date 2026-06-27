@@ -115,6 +115,7 @@ export function SpeakerLabelInput({
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={handleKeyDown}
+        onBlur={onCancel}
         placeholder="Enter speaker name..."
         className="px-2 py-0.5 text-xs border rounded w-40"
         autoFocus
@@ -135,6 +136,8 @@ export function SpeakerLabelInput({
                 key={s}
                 type="button"
                 className="text-xs px-1.5 py-0.5 rounded bg-gray-100 hover:bg-gray-200"
+                onMouseDown={(e) => e.preventDefault()}
+                // Keep focus on the input so onBlur cancel doesn't unmount the chip before its click fires.
                 onClick={() => onSubmit(s)}
               >
                 {s}
