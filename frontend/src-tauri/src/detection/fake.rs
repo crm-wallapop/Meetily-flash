@@ -7,7 +7,7 @@
 //! spawned `spawn_detector` task (which polls `current_state`) and the command
 //! handler via an `Arc<Mutex<DetectorObservation>>`.
 
-use crate::ports::meeting_detector::{DetectorObservation, MeetWindow, MeetingDetectorPort};
+use crate::ports::meeting_detector::{BrowserWindow, DetectorObservation, MeetingDetectorPort};
 use std::sync::{Arc, Mutex};
 
 pub type SharedObservation = Arc<Mutex<DetectorObservation>>;
@@ -60,11 +60,12 @@ impl FakeDetectorHandle {
             "joined" => {
                 let resolved = title.unwrap_or("Simulated meeting").to_string();
                 *g = DetectorObservation {
-                    meet_windows: vec![MeetWindow {
+                    browser_windows: vec![BrowserWindow {
                         hwnd_id: 1,
                         pid: 1,
                         title: resolved.clone(),
                     }],
+                    candidate_titles: vec![],
                     has_meet_connection: true,
                     has_browser_capture_session: true,
                     // Strictly after `detector_start` (captured at spawn time) so the

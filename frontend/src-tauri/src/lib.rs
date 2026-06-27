@@ -938,9 +938,15 @@ pub fn run() {
                         #[cfg(not(feature = "dev-detector"))]
                         let detector = {
                             use detection::windows::{FocusHistory, WindowsMeetingDetector, spawn_focus_tracker};
+                            use detection::signaling::meet::MeetSignalingAdapter;
+                            use detection::titles::meet::MeetTitleExtractor;
                             let focus_history: FocusHistory = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
                             let _focus_task = spawn_focus_tracker(focus_history.clone());
-                            WindowsMeetingDetector::new(focus_history.clone())
+                            WindowsMeetingDetector::new(
+                                focus_history.clone(),
+                                Arc::new(MeetSignalingAdapter::new()),
+                                Arc::new(MeetTitleExtractor::new()),
+                            )
                         };
                         #[cfg(feature = "dev-detector")]
                         let detector = {
@@ -966,13 +972,9 @@ pub fn run() {
                                 // event below). The actionable toast fires once at record-start,
                                 // not here — firing at detection time produced a premature,
                                 // semantically-wrong notification (see notification-actions spec).
-                                let stripped: Vec<String> = candidate_titles
-                                    .into_iter()
-                                    .map(|t| crate::detection::windows::strip_google_meet_suffix(&t))
-                                    .collect();
                                 let _ = self.0.emit("meeting-detected", serde_json::json!({
                                     "default_title": default_title,
-                                    "candidate_titles": stripped,
+                                    "candidate_titles": candidate_titles,
                                 }));
                             }
                             fn emit_ended(&self) {

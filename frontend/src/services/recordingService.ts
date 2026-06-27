@@ -117,10 +117,10 @@ export class RecordingService {
     detectorStarted: boolean = false
   ): Promise<StartRecordingResult> {
     return invoke<StartRecordingResult>('start_recording_with_devices_and_meeting', {
-      mic_device_name: micDeviceName,
-      system_device_name: systemDeviceName,
-      meeting_name: meetingName,
-      detector_started: detectorStarted
+      micDeviceName: micDeviceName,
+      systemDeviceName: systemDeviceName,
+      meetingName: meetingName,
+      detectorStarted: detectorStarted
     });
   }
 

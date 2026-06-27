@@ -12,13 +12,13 @@
 //! To run a single test:
 //!
 //! ```text
-//! cargo test --test detector_smoke -p meetily-flash -- --ignored --nocapture enumerate_meet_windows_smoke
+//! cargo test --test detector_smoke -p meetily-flash -- --ignored --nocapture enumerate_browser_windows_smoke
 //! cargo test --test detector_smoke -p meetily-flash -- --ignored --nocapture detector_60s_smoke
 //! ```
 //!
 //! # Setup
 //!
-//! ## `enumerate_meet_windows_smoke` (window enumeration + network signals)
+//! ## `enumerate_browser_windows_smoke` (window enumeration + network signals)
 //!
 //!   1. Open Chrome or Microsoft Edge.
 //!   2. Navigate to <https://meet.google.com> — leave the tab open on the lobby
@@ -56,9 +56,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use app_lib::detection::windows::{
-    enumerate_meet_windows, has_meet_connection, has_turn_connection, FocusHistory,
+    enumerate_browser_windows, has_turn_connection, FocusHistory,
     WindowsMeetingDetector,
 };
+use app_lib::detection::signaling::meet::MeetSignalingAdapter;
+use app_lib::detection::titles::meet::MeetTitleExtractor;
+use app_lib::ports::call_signaling::CallSignalingPort;
 use app_lib::ports::meeting_detector::MeetingDetectorPort;
 use app_lib::use_cases::meeting_detection::{
     step_detector, DetectorEvent, DetectorSettings, DetectorState,
@@ -90,7 +93,7 @@ fn state_label(s: &DetectorState) -> &'static str {
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-/// Calls `enumerate_meet_windows()` and the two network-signal functions, then
+/// Calls `enumerate_browser_windows()` and the two network-signal functions, then
 /// prints what is visible right now.
 ///
 /// Pass criteria (human review):
@@ -101,10 +104,10 @@ fn state_label(s: &DetectorState) -> &'static str {
 ///   - `has_turn_connection` should be `true` only while inside a live call.
 #[test]
 #[ignore]
-fn enumerate_meet_windows_smoke() {
+fn enumerate_browser_windows_smoke() {
     init_logger();
-    let windows = enumerate_meet_windows();
-    println!("\n── enumerate_meet_windows_smoke ───────────────────────────────────");
+    let windows = enumerate_browser_windows();
+    println!("\n── enumerate_browser_windows_smoke ─────────────────────────────────");
     println!("  Windows found: {}", windows.len());
     for (i, w) in windows.iter().enumerate() {
         let pwa = w.title.starts_with("Google Meet - Meet ");
@@ -117,9 +120,9 @@ fn enumerate_meet_windows_smoke() {
         );
     }
 
-    let broad = has_meet_connection();
+    let signaling = MeetSignalingAdapter::new().is_call_signaling_active();
     let turn = has_turn_connection();
-    println!("\n  has_meet_connection  (broad Google IPs) : {broad}");
+    println!("\n  signaling_active    (broad Google IPs) : {signaling}");
     println!("  has_turn_connection  (TURN relay IPs)   : {turn}");
 
     if windows.is_empty() {
@@ -147,7 +150,11 @@ fn detector_60s_smoke() {
     const TOTAL_POLLS: u32 = 30;
     const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-    let mut port = WindowsMeetingDetector::new(empty_focus_history());
+    let mut port = WindowsMeetingDetector::new(
+        empty_focus_history(),
+        Arc::new(MeetSignalingAdapter::new()),
+        Arc::new(MeetTitleExtractor::new()),
+    );
     let suppress = Arc::new(AtomicBool::new(false));
     let settings = DetectorSettings::default(); // 10-s debounce
     let detector_start = Instant::now();
@@ -175,7 +182,7 @@ fn detector_60s_smoke() {
             &settings,
         );
 
-        let win_titles: Vec<&str> = obs.meet_windows.iter().map(|w| w.title.as_str()).collect();
+        let win_titles: Vec<&str> = obs.browser_windows.iter().map(|w| w.title.as_str()).collect();
         println!(
             "  [{:02}] t={:5.1}s  {}  has_conn={}  turn={}  windows={}",
             i + 1,

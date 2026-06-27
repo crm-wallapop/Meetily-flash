@@ -13,21 +13,15 @@ import Analytics from '@/lib/analytics';
 import { SettingsModals } from './_components/SettingsModal';
 import { TranscriptPanel } from './_components/TranscriptPanel';
 import { useModalState } from '@/hooks/useModalState';
-import { useRecordingStateSync } from '@/hooks/useRecordingStateSync';
-import { useRecordingStart } from '@/hooks/useRecordingStart';
-import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
-import { AutoDetectBanner } from '@/components/AutoDetectBanner';
-import { useAutoDetect } from '@/hooks/useAutoDetect';
+import { useRecordingControl } from '@/contexts/RecordingControlContext';
 import { indexedDBService } from '@/services/indexedDBService';
 import { onQueueChanged, toQueueJobStatus } from '@/services/queueService';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
 
 export default function Home() {
-  // Local page state (not moved to contexts)
-  const [isRecording, setIsRecordingState] = useState(false);
   const [barHeights, setBarHeights] = useState(['58%', '76%', '58%']);
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
 
@@ -41,30 +35,15 @@ export default function Home() {
 
   // Hooks
   const { hasMicrophone } = usePermissionCheck();
-  const { setIsMeetingActive, isCollapsed: sidebarCollapsed, refetchMeetings } = useSidebar();
+  const { isCollapsed: sidebarCollapsed, refetchMeetings } = useSidebar();
   const { modals, messages, showModal, hideModal } = useModalState(transcriptModelConfig);
-  const { isRecordingDisabled, setIsRecordingDisabled } = useRecordingStateSync(isRecording, setIsRecordingState, setIsMeetingActive);
-  const { handleRecordingStart } = useRecordingStart(isRecording, setIsRecordingState, showModal);
-
-  // Get handleRecordingStop function and setIsStopping (state comes from global context)
-  const { handleRecordingStop, setIsStopping } = useRecordingStop(
-    setIsRecordingState,
-    setIsRecordingDisabled
-  );
-
-  // Auto-detect banner (Tasks 7.1–7.5)
   const {
-    banner: autoDetectBanner,
-    detectTimeoutSeconds,
-    stopTimeoutSeconds,
-    handleBannerConfirm,
-    handleBannerCancel,
-  } = useAutoDetect({
-    isRecording: recordingState.isRecording,
+    isRecording,
+    isRecordingDisabled,
     handleRecordingStart,
     handleRecordingStop,
-    setIsRecording: setIsRecordingState,
-  });
+    setIsStopping,
+  } = useRecordingControl();
 
   // Recovery hook
   const {
@@ -250,22 +229,6 @@ export default function Home() {
         onDelete={deleteRecoverableMeeting}
         onLoadPreview={loadMeetingTranscripts}
       />
-
-      {/* Auto-detect banner (Tasks 7.1–7.5) */}
-      {autoDetectBanner.visible && (
-        <AutoDetectBanner
-          mode={autoDetectBanner.mode}
-          initialTitle={autoDetectBanner.initialTitle}
-          candidateTitles={autoDetectBanner.candidateTitles}
-          onConfirm={handleBannerConfirm}
-          onCancel={handleBannerCancel}
-          timeoutSeconds={
-            autoDetectBanner.mode === 'detect-prompt'
-              ? detectTimeoutSeconds
-              : stopTimeoutSeconds
-          }
-        />
-      )}
       <div className="flex flex-1 overflow-hidden">
         <TranscriptPanel
           isProcessingStop={isProcessingStop}

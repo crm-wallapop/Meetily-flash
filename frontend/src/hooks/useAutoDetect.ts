@@ -135,7 +135,9 @@ export function useAutoDetect({
   // ── Event handlers ────────────────────────────────────────────────────────
 
   const handleDetected = useCallback(async (payload: MeetingDetectedPayload) => {
-    if (!autoDetectMeetings) return;
+    if (!autoDetectMeetings) {
+      return;
+    }
 
     // D17 / Task 7.4: dismiss an active stop-prompt — the call re-engaged within the debounce window
     if (isStopPromptActiveForRedetect(bannerRef.current)) {
@@ -145,7 +147,9 @@ export function useAutoDetect({
     }
 
     // D17 / Task 7.5: don't double-start if already recording (manual or detector)
-    if (!shouldStartOnDetected({ autoDetectMeetings, isRecording: isRecordingRef.current })) return;
+    if (!shouldStartOnDetected({ autoDetectMeetings, isRecording: isRecordingRef.current })) {
+      return;
+    }
 
     try {
       await handleRecordingStart(payload.default_title, true);
@@ -213,7 +217,7 @@ export function useAutoDetect({
         // best effort — even if this fails the recording is cancelled
       }
       try {
-        await invoke('cancel_recording', { meeting_id: activeMeetingId || '' });
+        await invoke('cancel_recording', { meetingId: activeMeetingId || '' });
       } catch (err) {
         console.error('[useAutoDetect] cancel_recording failed:', err);
       }
@@ -231,6 +235,7 @@ export function useAutoDetect({
   useEffect(() => {
     let unlistenDetected: (() => void) | undefined;
     let unlistenEnded: (() => void) | undefined;
+    let cancelled = false;
 
     const setup = async () => {
       unlistenDetected = await listen<MeetingDetectedPayload>('meeting-detected', event => {
@@ -239,11 +244,21 @@ export function useAutoDetect({
       unlistenEnded = await listen<void>('meeting-ended', () => {
         handleEnded();
       });
+      // Cleanup ran while the async listen() calls were still in flight — remove
+      // the listeners we just registered so the orphan can't catch an event meant
+      // for a fresher subscription. Without this, React StrictMode dev
+      // mount→unmount→remount leaves subscribed listeners that were never torn
+      // down, so one meeting-detected emit fans out to N starts.
+      if (cancelled) {
+        unlistenDetected();
+        unlistenEnded();
+      }
     };
 
     setup().catch(console.error);
 
     return () => {
+      cancelled = true;
       unlistenDetected?.();
       unlistenEnded?.();
     };

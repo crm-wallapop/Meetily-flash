@@ -15,8 +15,7 @@ interface UseRecordingStartReturn {
 
 export function useRecordingStart(
   isRecording: boolean,
-  setIsRecording: (value: boolean) => void,
-  showModal?: (name: 'modelSelector', message?: string) => void
+  setIsRecording: (value: boolean) => void
 ): UseRecordingStartReturn {
   const [isAutoStarting, setIsAutoStarting] = useState(false);
 

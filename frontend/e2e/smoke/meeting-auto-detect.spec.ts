@@ -56,6 +56,21 @@ async function callLogIncludes(
   );
 }
 
+async function callLogCount(
+  page: import('@playwright/test').Page,
+  cmd: string,
+): Promise<number> {
+  return page.evaluate(
+    (c) =>
+      (
+        window as unknown as {
+          __tauriMockDispatcher: { callLog: () => string[] };
+        }
+      ).__tauriMockDispatcher.callLog().filter((x) => x === c).length,
+    cmd,
+  );
+}
+
 test.describe('meeting-auto-detect smoke (detection-result wiring)', () => {
   test.beforeEach(() => {
     test.setTimeout(120_000);
@@ -101,11 +116,14 @@ test.describe('meeting-auto-detect smoke (detection-result wiring)', () => {
     await expect(titleInput).toHaveValue(DETECTED_TITLE);
 
     // shouldStartOnDetected auto-starts the recording via the normal start path.
+    // Exactly one invoke per emit — guards the useAutoDetect async-listener
+    // cleanup (StrictMode mount→unmount→remount must not leave an orphan that
+    // fans one emit out to N starts).
     await expect
-      .poll(() => callLogIncludes(page, 'start_recording_with_devices_and_meeting'), {
+      .poll(() => callLogCount(page, 'start_recording_with_devices_and_meeting'), {
         timeout: 10_000,
       })
-      .toBe(true);
+      .toBe(1);
   });
 
   test('meeting-ended shows the stop-prompt banner for a detector-started recording', async ({ page }) => {

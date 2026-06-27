@@ -83,7 +83,6 @@ pub fn step_detector(
 ) -> (DetectorState, Vec<DetectorEvent>) {
     match state {
         DetectorState::Idle => {
-            let has_title = !observation.meet_windows.is_empty();
             let has_conn = observation.has_meet_connection;
             // Only fire for connections that appeared after the detector started (D15).
             let not_preexisting = observation
@@ -91,13 +90,13 @@ pub fn step_detector(
                 .map(|t| t > detector_start)
                 .unwrap_or(false);
 
-            if has_title && has_conn && not_preexisting {
+            // Vendor-neutral gate (design §4): entry is `has_conn && not_preexisting`.
+            // The title requirement is dropped — detection is driven by the call-signaling
+            // + WASAPI conjunction, not window-title matching. The wired
+            // MeetingTitleExtractorPort handles title decoration separately.
+            if has_conn && not_preexisting {
                 let default_title = observation.default_title.clone();
-                let candidate_titles = observation
-                    .meet_windows
-                    .iter()
-                    .map(|w| w.title.clone())
-                    .collect();
+                let candidate_titles = observation.candidate_titles.clone();
                 let event = DetectorEvent::MeetingDetected {
                     default_title,
                     candidate_titles,
@@ -237,7 +236,7 @@ where
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::ports::meeting_detector::{DetectorObservation, MeetWindow, MeetingDetectorPort};
+    use crate::ports::meeting_detector::{BrowserWindow, DetectorObservation, MeetingDetectorPort};
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -329,8 +328,8 @@ pub mod tests {
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
-    fn meet_window(title: &str) -> MeetWindow {
-        MeetWindow {
+    fn browser_window(title: &str) -> BrowserWindow {
+        BrowserWindow {
             hwnd_id: 1,
             pid: 100,
             title: title.to_string(),
@@ -339,7 +338,8 @@ pub mod tests {
 
     fn idle_obs() -> DetectorObservation {
         DetectorObservation {
-            meet_windows: vec![],
+            browser_windows: vec![],
+            candidate_titles: vec![],
             has_meet_connection: false,
             has_browser_capture_session: false,
             connection_first_seen_at: None,
@@ -349,11 +349,12 @@ pub mod tests {
         }
     }
 
-    /// An observation that should trigger detection: title match + fresh connection.
+    /// An observation that should trigger detection: connection present + fresh.
     fn detected_obs(title: &str, detector_start: Instant) -> DetectorObservation {
         let conn_seen = detector_start + Duration::from_millis(500); // appeared after start
         DetectorObservation {
-            meet_windows: vec![meet_window(title)],
+            browser_windows: vec![browser_window(title)],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
@@ -376,14 +377,15 @@ pub mod tests {
     }
 
     // ── 2.1 ───────────────────────────────────────────────────────────────
-    // Idle → InCall: title match + connection + fresh → emit meeting-detected.
+    // Idle → InCall: connection + fresh → emit meeting-detected.
     #[test]
     fn test_2_1_idle_transitions_to_in_call_on_valid_observation() {
         let start = Instant::now();
         let conn_seen = start + Duration::from_millis(500);
 
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Weekly sync")],
+            browser_windows: vec![browser_window("Meet - Weekly sync")],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
@@ -415,7 +417,8 @@ pub mod tests {
         let start = Instant::now();
         // connection_first_seen_at == detector_start_time → pre-existing
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - All-hands")],
+            browser_windows: vec![browser_window("Meet - All-hands")],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: Some(start),
@@ -446,7 +449,8 @@ pub mod tests {
         let lost_5s_ago = now - Duration::from_secs(5);
 
         let obs = DetectorObservation {
-            meet_windows: vec![],
+            browser_windows: vec![],
+            candidate_titles: vec![],
             has_meet_connection: false,
             has_browser_capture_session: false,
             connection_first_seen_at: None,
@@ -481,7 +485,8 @@ pub mod tests {
         let lost_11s_ago = now - Duration::from_secs(16);
 
         let obs = DetectorObservation {
-            meet_windows: vec![],
+            browser_windows: vec![],
+            candidate_titles: vec![],
             has_meet_connection: false,
             has_browser_capture_session: false,
             connection_first_seen_at: None,
@@ -519,7 +524,8 @@ pub mod tests {
         let suppress = AtomicBool::new(true); // frontend signalled cancel
 
         let obs_lost = DetectorObservation {
-            meet_windows: vec![],
+            browser_windows: vec![],
+            candidate_titles: vec![],
             has_meet_connection: false,
             has_browser_capture_session: false,
             connection_first_seen_at: None,
@@ -540,7 +546,8 @@ pub mod tests {
 
         // Step 2: connection returns (< 10s) → still InCall, no re-emit.
         let obs_back = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Sync")],
+            browser_windows: vec![browser_window("Meet - Sync")],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: Some(start + Duration::from_millis(500)),
@@ -559,7 +566,8 @@ pub mod tests {
             connection_lost_at: Some(lost_11s_ago),
         };
         let obs_gone = DetectorObservation {
-            meet_windows: vec![],
+            browser_windows: vec![],
+            candidate_titles: vec![],
             has_meet_connection: false,
             has_browser_capture_session: false,
             connection_first_seen_at: None,
@@ -574,7 +582,8 @@ pub mod tests {
         // Step 4: new connection → must re-emit.
         let conn_seen = now + Duration::from_millis(500);
         let obs_new = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - New call")],
+            browser_windows: vec![browser_window("Meet - New call")],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
@@ -600,7 +609,8 @@ pub mod tests {
         };
 
         let obs_false = DetectorObservation {
-            meet_windows: vec![],
+            browser_windows: vec![],
+            candidate_titles: vec![],
             has_meet_connection: false,
             has_browser_capture_session: false,
             connection_first_seen_at: None,
@@ -609,7 +619,8 @@ pub mod tests {
             stable_capture: false,
         };
         let obs_true = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Sprint")],
+            browser_windows: vec![browser_window("Meet - Sprint")],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
@@ -637,12 +648,15 @@ pub mod tests {
     }
 
     // ── 2.7 ───────────────────────────────────────────────────────────────
-    // Title match WITHOUT has_meet_connection (Meet tab open, user not joined) → Idle.
+    // Browser windows present WITHOUT a Meet connection (tab open, user not
+    // joined) → Idle. The title-is-present signal is no longer load-bearing
+    // (D3); the signaling+bc conjunction is the sole discriminator.
     #[test]
-    fn test_2_7_title_without_connection_stays_idle() {
+    fn test_2_7_browser_windows_without_connection_stays_idle() {
         let start = Instant::now();
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Sync")],
+            browser_windows: vec![browser_window("Meet - Sync")],
+            candidate_titles: vec![],
             has_meet_connection: false,
             has_browser_capture_session: false,
             connection_first_seen_at: None,
@@ -665,13 +679,18 @@ pub mod tests {
     }
 
     // ── 2.8 ───────────────────────────────────────────────────────────────
-    // has_meet_connection WITHOUT title match → Idle.
+    // §4 gate change: connection present + fresh, even with NO browser windows,
+    // now FIRES detection. The title gate is dropped — entry is driven by the
+    // call-signaling + WASAPI conjunction alone. This is the known FP-risk trade-off
+    // (a non-Meet browser app with mic access could fire); it is documented in the
+    // design and accepted as the cost of vendor-neutral detection.
     #[test]
-    fn test_2_8_connection_without_title_stays_idle() {
+    fn test_2_8_connection_without_title_fires_detection() {
         let start = Instant::now();
         let conn_seen = start + Duration::from_millis(500);
         let obs = DetectorObservation {
-            meet_windows: vec![],
+            browser_windows: vec![],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
@@ -689,8 +708,8 @@ pub mod tests {
             &default_settings(),
         );
 
-        assert!(matches!(state, DetectorState::Idle));
-        assert!(events.is_empty());
+        assert!(matches!(state, DetectorState::InCall { .. }), "connection + fresh fires without title gate");
+        assert_eq!(events.len(), 1, "must emit meeting-detected");
     }
 
     // ── 2.9 ───────────────────────────────────────────────────────────────
@@ -712,7 +731,8 @@ pub mod tests {
         let lost_14s_ago = now - Duration::from_secs(14);
 
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Standup")],
+            browser_windows: vec![browser_window("Meet - Standup")],
+            candidate_titles: vec![],
             has_meet_connection: false,         // TCP dropped (90s+ UDP call)
             has_browser_capture_session: true,  // WASAPI capture still Active
             connection_first_seen_at: None,
@@ -753,7 +773,8 @@ pub mod tests {
     fn test_2_10_turn_exit_fires_fast_4s_debounce() {
         let now = Instant::now();
         let obs = DetectorObservation {
-            meet_windows: vec![],
+            browser_windows: vec![],
+            candidate_titles: vec![],
             has_meet_connection: false,
             has_browser_capture_session: false,
             connection_first_seen_at: None,
@@ -793,7 +814,8 @@ pub mod tests {
 
         // TURN just dropped; WASAPI still streaming.
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Standup")],
+            browser_windows: vec![browser_window("Meet - Standup")],
+            candidate_titles: vec![],
             has_meet_connection: false,
             has_browser_capture_session: true,
             connection_first_seen_at: None,
@@ -835,7 +857,8 @@ pub mod tests {
         // TURN debounce was started 3 s ago but TURN has now returned.
         let state = DetectorState::InCall { connection_lost_at: Some(now - Duration::from_secs(3)) };
         let obs_turn_back = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Standup")],
+            browser_windows: vec![browser_window("Meet - Standup")],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: Some(now - Duration::from_secs(60)),
@@ -866,7 +889,8 @@ pub mod tests {
         let conn_seen = start + Duration::from_millis(500);
 
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Standup")],
+            browser_windows: vec![browser_window("Meet - Standup")],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
@@ -900,7 +924,8 @@ pub mod tests {
         let start = Instant::now();
         let conn_seen = start + Duration::from_millis(5);
         let in_call = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Standup")],
+            browser_windows: vec![browser_window("Meet - Standup")],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
@@ -944,7 +969,8 @@ pub mod tests {
         let start = Instant::now();
         let conn_seen = start + Duration::from_millis(100);
         let success_obs = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Resilience")],
+            browser_windows: vec![browser_window("Meet - Resilience")],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
@@ -991,7 +1017,8 @@ pub mod tests {
     fn test_4_6_spotify_fp_title_match_no_connection_stays_idle() {
         let start = Instant::now();
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - All-hands")],
+            browser_windows: vec![browser_window("Meet - All-hands")],
+            candidate_titles: vec![],
             has_meet_connection: false, // Spotify: no Google-IP connection
             has_browser_capture_session: false,
             connection_first_seen_at: None,
@@ -1020,7 +1047,8 @@ pub mod tests {
     fn test_4_7_discord_pwa_fp_title_match_no_connection_stays_idle() {
         let start = Instant::now();
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Team call")],
+            browser_windows: vec![browser_window("Meet - Team call")],
+            candidate_titles: vec![],
             has_meet_connection: false, // Discord: connection is not to Google IPs
             has_browser_capture_session: false,
             connection_first_seen_at: None,
@@ -1052,7 +1080,8 @@ pub mod tests {
         let detector_start = Instant::now();
 
         let obs = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Q4 review")],
+            browser_windows: vec![browser_window("Meet - Q4 review")],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             // connection_first_seen_at == detector_start → pre-existing (D15)
@@ -1090,7 +1119,8 @@ pub mod tests {
 
         // ── Step 1: Idle → InCall, meeting-detected fires ──────────────────
         let obs_detected = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Sprint planning")],
+            browser_windows: vec![browser_window("Meet - Sprint planning")],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen),
@@ -1114,7 +1144,8 @@ pub mod tests {
         let suppress = AtomicBool::new(true); // frontend cancel signal set
         let now_8s = conn_seen + Duration::from_secs(8);
         let obs_dropped = DetectorObservation {
-            meet_windows: vec![],
+            browser_windows: vec![],
+            candidate_titles: vec![],
             has_meet_connection: false,
             has_browser_capture_session: false,
             connection_first_seen_at: None,
@@ -1131,7 +1162,8 @@ pub mod tests {
         // ── Step 3: Connection returns → stays InCall, no re-detect ────────
         let now_9s = now_8s + Duration::from_secs(1);
         let obs_returned = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Sprint planning")],
+            browser_windows: vec![browser_window("Meet - Sprint planning")],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen + Duration::from_millis(500)),
@@ -1172,7 +1204,8 @@ pub mod tests {
         let now_rejoin = now_22s + Duration::from_secs(5);
         let conn_seen_new = now_rejoin;
         let obs_new_call = DetectorObservation {
-            meet_windows: vec![meet_window("Meet - Sprint planning")],
+            browser_windows: vec![browser_window("Meet - Sprint planning")],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: Some(conn_seen_new),
@@ -1204,7 +1237,8 @@ pub mod tests {
         // bc=false so the InCall exit branch engages; is_turn_exit=false so the
         // UDP (not TURN) path runs; stable_capture is the variable under test.
         DetectorObservation {
-            meet_windows: vec![],
+            browser_windows: vec![],
+            candidate_titles: vec![],
             has_meet_connection: false,
             has_browser_capture_session: false,
             connection_first_seen_at: None,
@@ -1217,7 +1251,8 @@ pub mod tests {
     fn obs_turn_exit(stable_capture: bool) -> DetectorObservation {
         // TURN drop: is_turn_exit=true. bc is irrelevant (TURN gates first).
         DetectorObservation {
-            meet_windows: vec![],
+            browser_windows: vec![],
+            candidate_titles: vec![],
             has_meet_connection: false,
             has_browser_capture_session: false,
             connection_first_seen_at: None,

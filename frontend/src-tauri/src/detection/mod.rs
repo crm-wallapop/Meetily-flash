@@ -1,4 +1,11 @@
 pub mod google_cidrs;
+pub mod titles;
+
+#[cfg(target_os = "windows")]
+pub mod browser_process;
+
+#[cfg(target_os = "windows")]
+pub mod signaling;
 
 #[cfg(target_os = "windows")]
 pub mod windows;

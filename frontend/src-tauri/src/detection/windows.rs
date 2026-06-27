@@ -2,7 +2,8 @@
 //!   - `EnumWindows` + `GetWindowTextW` + `GetWindowThreadProcessId` for window enumeration
 //!   - `GetExtendedUdpTable` / `GetExtendedTcpTable` (iphlpapi) for network socket scanning
 //!
-//! All Win32 calls are confined to this file. The rest of the codebase sees only the port trait.
+//! All Win32 calls are confined to this file (and the extracted `signaling/` and
+//! `browser_process` helpers). The rest of the codebase sees only the port traits.
 
 #![cfg(target_os = "windows")]
 
@@ -11,20 +12,16 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use regex::Regex;
+use crate::ports::call_signaling::CallSignalingPort;
+use crate::ports::meeting_detector::{BrowserWindow, DetectorObservation, MeetingDetectorPort};
+use crate::ports::meeting_title_extractor::MeetingTitleExtractorPort;
 
-use crate::ports::meeting_detector::{DetectorObservation, MeetWindow, MeetingDetectorPort};
-
-use super::google_cidrs::{is_in_google_cidrs, is_in_turn_cidrs};
+use super::browser_process::{is_browser_process, process_name_for_pid, BROWSER_PROCESSES};
+use super::google_cidrs::is_in_turn_cidrs;
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
-// Chrome and Edge release the getUserMedia WASAPI capture session within ~1-2s of "Leave call".
-// Firefox and Brave are included in detection but their capture-session release timing on
-// Meet leave is unverified; exit detection may be delayed or blocked for those browsers.
-const BROWSER_PROCESSES: &[&str] = &["chrome.exe", "msedge.exe", "firefox.exe", "brave.exe"];
-
-/// Maximum number of (title, instant) entries kept in the focus history.
+/// Maximum number of (window, instant) entries kept in the focus history.
 const FOCUS_HISTORY_CAP: usize = 10;
 
 /// How long to retain focus history entries.
@@ -40,79 +37,93 @@ pub const STABLE_CONFIDENCE_WINDOW: Duration = Duration::from_secs(20);
 
 // ── Focus tracker ─────────────────────────────────────────────────────────
 
-/// Shared history of recently-focused Meet windows (title, moment).
-pub type FocusHistory = Arc<Mutex<VecDeque<(String, Instant)>>>;
+/// Shared history of recently-focused browser windows (window, moment). Stores
+/// `BrowserWindow`s (not bare titles) so the title-extractor priority chain
+/// receive real window metadata (design D8 no-fabrication invariant).
+pub type FocusHistory = Arc<Mutex<VecDeque<(BrowserWindow, Instant)>>>;
+
+// ── No-op adapters (test auto-injection) ───────────────────────────────────
+
+/// No-op `CallSignalingPort` injected by `with_probes` so existing test call
+/// sites compile unchanged. The `has_conn` probe overrides it when present.
+/// Test-only: gated so release builds don't see dead code.
+#[cfg(test)]
+struct NoOpSignaling;
+#[cfg(test)]
+impl CallSignalingPort for NoOpSignaling {
+    fn is_call_signaling_active(&self) -> bool {
+        false
+    }
+}
+
+/// No-op `MeetingTitleExtractorPort` injected by `with_probes` so existing test
+/// call sites compile unchanged. Tests that exercise title extraction pass a
+/// real extractor through `new`. Test-only — see above.
+#[cfg(test)]
+struct NoOpTitleExtractor;
+#[cfg(test)]
+impl MeetingTitleExtractorPort for NoOpTitleExtractor {
+    fn extract_title(&self, _windows: &[BrowserWindow]) -> Option<String> {
+        None
+    }
+}
 
 // ── Title resolution ──────────────────────────────────────────────────────
 
 /// Resolves the best default title for a `meeting-detected` event using the
-/// priority chain from D10.
+/// priority chain from D10: foreground window → recent focus history → first
+/// enumerated browser window → timestamp fallback. At each step the wired
+/// `MeetingTitleExtractorPort` decides whether the window matches a known
+/// vendor; the first `Some` wins.
 ///
 /// `now` is the adapter clock (the `now()` seam), not a fresh `Instant::now()`, so
-/// the focus-history TTL cutoff stays coherent with the injected test clock — the
-/// comprehensive-seam bar (design.md, task 1.14) covers every wall-clock read inside
-/// `current_state()`, and this function is reached from there.
+/// the focus-history TTL cutoff stays coherent with the injected test clock.
 pub fn resolve_default_title(
     observation: &DetectorObservation,
     focus_history: &FocusHistory,
+    extractor: &dyn MeetingTitleExtractorPort,
     now: Instant,
 ) -> String {
-    let re = meet_title_regex();
-
-    if let Some(fg_title) = foreground_window_title() {
-        if re.is_match(&fg_title) {
-            return strip_google_meet_suffix(&fg_title);
+    if let Some(fg) = foreground_window() {
+        if let Some(title) = extractor.extract_title(std::slice::from_ref(&fg)) {
+            return title;
         }
     }
 
     {
         let history = focus_history.lock().unwrap_or_else(|e| e.into_inner());
         let cutoff = now.checked_sub(FOCUS_HISTORY_TTL).unwrap_or(now);
-        if let Some((title, _)) = history.iter().rev().find(|(_, t)| *t >= cutoff) {
-            return strip_google_meet_suffix(title);
+        for (win, t) in history.iter().rev() {
+            if *t >= cutoff {
+                if let Some(title) = extractor.extract_title(std::slice::from_ref(win)) {
+                    return title;
+                }
+            }
         }
     }
 
-    if let Some(win) = observation.meet_windows.first() {
-        return strip_google_meet_suffix(&win.title);
+    if let Some(win) = observation.browser_windows.first() {
+        if let Some(title) = extractor.extract_title(std::slice::from_ref(win)) {
+            return title;
+        }
     }
 
     let now = chrono::Local::now();
     format!("Meeting {}", now.format("%Y-%m-%d %H:%M"))
 }
 
-pub(crate) fn strip_google_meet_suffix(title: &str) -> String {
-    if let Some(name) = title.strip_prefix("Meet - ") {
-        name.trim().to_string()
-    } else if title.starts_with("Google Meet - Meet ") {
-        title.split('\u{2014}')  // em dash
-            .nth(1)
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| title.to_string())
-    } else if let Some(rest) = title.strip_prefix("Meet \u{2013} ") {
-        // Edge tab-group collapsed: "Meet – <code> and N more pages - <group> - Microsoft Edge"
-        rest.split_once(" and ").map(|(code, _)| code).unwrap_or(rest).trim().to_string()
-    } else if let Some(name) = title.strip_suffix(" - Google Meet") {
-        name.trim().to_string()
-    } else {
-        title.to_string()
-    }
-}
-
-// ── Meet title regex ──────────────────────────────────────────────────────
-
-fn meet_title_regex() -> &'static Regex {
-    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    // Matches title formats observed in the wild:
-    //   Chrome/Edge tab: "Meet - <name>"
-    //   PWA:             "Google Meet - Meet — <name>"
-    RE.get_or_init(|| Regex::new(r"^Meet - .+|^Meet \u{2013} .+|^Google Meet - Meet \u{2014} .+|.+ - Google Meet$").expect("meet title regex is valid"))
-}
-
 // ── Win32 helpers ─────────────────────────────────────────────────────────
 
-fn foreground_window_title() -> Option<String> {
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
+/// Returns the foreground window as a full `BrowserWindow` (HWND + PID + title),
+/// or `None` if there is no foreground window, it has no title, or its PID
+/// cannot be resolved (`pid == 0` — elevated / UAC foreground window; the same
+/// edge case `enum_windows_callback` skips). Returning the full struct (not a
+/// bare title) lets the title-extractor priority chain receive real window
+/// metadata — the D8 no-fabrication invariant.
+fn foreground_window() -> Option<BrowserWindow> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
+    };
 
     unsafe {
         let hwnd = GetForegroundWindow();
@@ -124,38 +135,24 @@ fn foreground_window_title() -> Option<String> {
         if len == 0 {
             return None;
         }
-        Some(String::from_utf16_lossy(&buf[..len as usize]))
-    }
-}
-
-fn process_name_for_pid(pid: u32) -> Option<String> {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-    use windows::core::PWSTR;
-
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buf = [0u16; 1024];
-        let mut size = buf.len() as u32;
-        let result = QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut size);
-        // HANDLE has no Drop impl in windows-rs — must close explicitly.
-        let _ = CloseHandle(handle);
-        result.ok()?;
-        let path = String::from_utf16_lossy(&buf[..size as usize]);
-        std::path::Path::new(&path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_lowercase())
+        let title = String::from_utf16_lossy(&buf[..len as usize]);
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        Some(BrowserWindow {
+            hwnd_id: hwnd.0 as *const () as usize,
+            pid,
+            title,
+        })
     }
 }
 
 // ── Window enumeration ─────────────────────────────────────────────────────
 
 thread_local! {
-    static ENUM_RESULTS: Mutex<Vec<MeetWindow>> = Mutex::new(Vec::new());
+    static ENUM_RESULTS: Mutex<Vec<BrowserWindow>> = Mutex::new(Vec::new());
 }
 
 unsafe extern "system" fn enum_windows_callback(
@@ -178,31 +175,20 @@ unsafe extern "system" fn enum_windows_callback(
     }
     let title = String::from_utf16_lossy(&buf[..len as usize]);
 
-    // avoids regex overhead for the common non-Meet case
-    if !title.starts_with("Meet - ")
-        && !title.starts_with("Meet \u{2013} ")   // en dash — Edge tab-group collapsed format
-        && !title.starts_with("Google Meet - Meet ")
-        && !title.ends_with(" - Google Meet")
-    {
-        return BOOL(1);
-    }
-
-    let re = meet_title_regex();
-    if !re.is_match(&title) {
-        return BOOL(1);
-    }
-
     let mut pid: u32 = 0;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
     if pid == 0 {
         return BOOL(1);
     }
 
+    // No vendor title pre-filter — collect ALL visible browser-process windows.
+    // The wired MeetingTitleExtractorPort decides vendor matching at resolution
+    // time; keeping the filter here would re-couple enumeration to Meet (D3).
     if let Some(name) = process_name_for_pid(pid) {
         if BROWSER_PROCESSES.contains(&name.as_str()) {
             ENUM_RESULTS.with(|r| {
                 // thread_local — no cross-thread poisoning possible; unwrap is safe
-                r.lock().unwrap().push(MeetWindow {
+                r.lock().unwrap().push(BrowserWindow {
                     hwnd_id: hwnd.0 as *const () as usize,
                     pid,
                     title,
@@ -214,8 +200,9 @@ unsafe extern "system" fn enum_windows_callback(
     BOOL(1)
 }
 
-/// All top-level Meet windows for browser processes in the allowlist.
-pub fn enumerate_meet_windows() -> Vec<MeetWindow> {
+/// All visible top-level windows owned by a browser process in the allowlist,
+/// with no title pre-filter.
+pub fn enumerate_browser_windows() -> Vec<BrowserWindow> {
     use windows::Win32::Foundation::LPARAM;
     use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
 
@@ -229,24 +216,6 @@ pub fn enumerate_meet_windows() -> Vec<MeetWindow> {
 }
 
 // ── Network socket scanning ────────────────────────────────────────────────
-
-/// Returns `true` if any browser process has an active TCP connection to a
-/// Google media-server IP.
-///
-/// TCP-only rationale: `GetExtendedUdpTable` has no remote-addr field (UDP is
-/// connectionless), so filtering by remote IP is impossible for UDP sockets.
-/// TCP connections (`GetExtendedTcpTable`) carry remote addr and are present
-/// during the HTTPS/WebSocket signalling phase that begins when a user joins.
-///
-/// PID note: `EnumWindows`→`GetWindowThreadProcessId` returns the *browser
-/// process* PID (the Chrome UI process). Since Chrome v70+, TCP connections
-/// are handled by a separate *Network Service* process (also named chrome.exe
-/// but with a different PID). Filtering by the window PID therefore finds
-/// nothing. We instead check the process *name* so any chrome.exe process
-/// (browser, network-service, or renderer) can satisfy the match.
-pub fn has_meet_connection() -> bool {
-    check_tcp4_connections() || check_tcp6_connections()
-}
 
 /// Returns `true` if any browser process has an active TCP connection to a
 /// Google TURN relay server.
@@ -327,13 +296,6 @@ fn check_turn_tcp6_connections() -> bool {
         }
         false
     }
-}
-
-/// Returns true if `pid` belongs to a known browser executable.
-fn is_browser_process(pid: u32) -> bool {
-    process_name_for_pid(pid)
-        .map(|name| BROWSER_PROCESSES.contains(&name.as_str()))
-        .unwrap_or(false)
 }
 
 // ── WASAPI browser capture detection ──────────────────────────────────────
@@ -446,119 +408,10 @@ pub fn has_browser_capture_session() -> bool {
     }
 }
 
-fn check_tcp4_connections() -> bool {
-    use windows::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, MIB_TCP_STATE_ESTAB, MIB_TCPTABLE_OWNER_PID,
-        TCP_TABLE_OWNER_PID_ALL,
-    };
-    use windows::Win32::Networking::WinSock::AF_INET;
-
-    unsafe {
-        let mut size: u32 = 0;
-        let _ = GetExtendedTcpTable(
-            None,
-            &mut size,
-            false,
-            AF_INET.0 as u32,
-            TCP_TABLE_OWNER_PID_ALL,
-            0,
-        );
-        if size == 0 {
-            return false;
-        }
-
-        let mut buf = vec![0u8; size as usize];
-        let ret = GetExtendedTcpTable(
-            Some(buf.as_mut_ptr() as *mut _),
-            &mut size,
-            false,
-            AF_INET.0 as u32,
-            TCP_TABLE_OWNER_PID_ALL,
-            0,
-        );
-        if ret != 0 {
-            return false;
-        }
-
-        let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
-        let count = table.dwNumEntries as usize;
-        let rows = std::slice::from_raw_parts(table.table.as_ptr(), count);
-
-        for row in rows {
-            if row.dwState != MIB_TCP_STATE_ESTAB.0 as u32 {
-                continue;
-            }
-            let remote_ip = IpAddr::V4(Ipv4Addr::from(u32::from_be(row.dwRemoteAddr)));
-            if is_in_google_cidrs(remote_ip) && is_browser_process(row.dwOwningPid) {
-                return true;
-            }
-        }
-        false
-    }
-}
-
-fn check_tcp6_connections() -> bool {
-    use windows::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, MIB_TCP6TABLE_OWNER_PID, MIB_TCP_STATE_ESTAB,
-        TCP_TABLE_OWNER_PID_ALL,
-    };
-    use windows::Win32::Networking::WinSock::AF_INET6;
-
-    unsafe {
-        let mut size: u32 = 0;
-        let _ = GetExtendedTcpTable(
-            None,
-            &mut size,
-            false,
-            AF_INET6.0 as u32,
-            TCP_TABLE_OWNER_PID_ALL,
-            0,
-        );
-        if size == 0 {
-            return false;
-        }
-
-        let mut buf = vec![0u8; size as usize];
-        let ret = GetExtendedTcpTable(
-            Some(buf.as_mut_ptr() as *mut _),
-            &mut size,
-            false,
-            AF_INET6.0 as u32,
-            TCP_TABLE_OWNER_PID_ALL,
-            0,
-        );
-        if ret != 0 {
-            return false;
-        }
-
-        let table = &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID);
-        let count = table.dwNumEntries as usize;
-        let rows = std::slice::from_raw_parts(table.table.as_ptr(), count);
-
-        for row in rows {
-            if row.dwState != MIB_TCP_STATE_ESTAB.0 as u32 {
-                continue;
-            }
-            let remote = &row.ucRemoteAddr;
-            let raw_ip = IpAddr::V6(Ipv6Addr::from(*remote));
-            // Unwrap IPv4-mapped addresses (::ffff:x.x.x.x) so dual-stack hosts
-            // are matched against the IPv4 CIDR table where the ranges live.
-            let ip = match raw_ip {
-                IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(raw_ip),
-                other => other,
-            };
-            if is_in_google_cidrs(ip) && is_browser_process(row.dwOwningPid) {
-                return true;
-            }
-        }
-        false
-    }
-}
-
 // ── WindowsMeetingDetector ─────────────────────────────────────────────────
 
 /// Injectable probes replacing the four Win32 free functions in test builds.
-/// The `meet_windows` probe is required alongside the network/WASAPI probes because
+/// The `browser_windows` probe is required alongside the network/WASAPI probes because
 /// `current_state()` branches on window presence before reaching the network checks —
 /// without it, adapter-layer tests that need non-empty windows would always see the
 /// empty-windows code path and never reach the TURN/WASAPI logic.
@@ -569,7 +422,7 @@ pub(crate) struct DetectorProbes {
     pub has_turn: Box<dyn Fn() -> bool + Send + Sync>,
     pub has_conn: Box<dyn Fn() -> bool + Send + Sync>,
     pub has_capture: Box<dyn Fn() -> bool + Send + Sync>,
-    pub meet_windows: Box<dyn Fn() -> Vec<MeetWindow> + Send + Sync>,
+    pub browser_windows: Box<dyn Fn() -> Vec<BrowserWindow> + Send + Sync>,
 }
 
 pub struct WindowsMeetingDetector {
@@ -607,6 +460,10 @@ pub struct WindowsMeetingDetector {
     /// draft recreated the detector-turn-latch trap of commit 693ff90). `pub(crate)` so
     /// adapter tests can read it.
     pub(crate) exit_stable_latch: Option<bool>,
+    /// The wired call-signaling adapter (vendor-neutral gate). v1: MeetSignalingAdapter.
+    signaling: Arc<dyn CallSignalingPort>,
+    /// The wired title extractor (best-effort decoration). v1: MeetTitleExtractor.
+    title_extractor: Arc<dyn MeetingTitleExtractorPort>,
     /// Injectable probes for unit tests — absent in release builds (D test seam).
     #[cfg(test)]
     pub(crate) probes: Option<DetectorProbes>,
@@ -620,7 +477,11 @@ pub struct WindowsMeetingDetector {
 }
 
 impl WindowsMeetingDetector {
-    pub fn new(focus_history: FocusHistory) -> Self {
+    pub fn new(
+        focus_history: FocusHistory,
+        signaling: Arc<dyn CallSignalingPort>,
+        title_extractor: Arc<dyn MeetingTitleExtractorPort>,
+    ) -> Self {
         Self {
             detector_start: Instant::now(),
             first_poll_done: false,
@@ -630,6 +491,8 @@ impl WindowsMeetingDetector {
             last_bc: None,
             bc_true_since: None,
             exit_stable_latch: None,
+            signaling,
+            title_extractor,
             #[cfg(test)]
             probes: None,
             #[cfg(test)]
@@ -657,8 +520,14 @@ impl WindowsMeetingDetector {
 impl WindowsMeetingDetector {
     /// Constructs a detector with injectable probes so adapter-layer tests can
     /// control Win32 outputs without real browser windows or network state.
+    /// Auto-injects NoOp signaling + title-extractor adapters — the `has_conn` probe
+    /// overrides signaling, and these tests do not exercise title extraction.
     pub(crate) fn with_probes(focus_history: FocusHistory, probes: DetectorProbes) -> Self {
-        let mut det = Self::new(focus_history);
+        let mut det = Self::new(
+            focus_history,
+            Arc::new(NoOpSignaling),
+            Arc::new(NoOpTitleExtractor),
+        );
         det.probes = Some(probes);
         det
     }
@@ -678,23 +547,21 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
 
     fn current_state(&mut self) -> DetectorObservation {
         #[cfg(test)]
-        let meet_windows = self.probes.as_ref()
-            .map_or_else(enumerate_meet_windows, |p| (p.meet_windows)());
+        let browser_windows = self.probes.as_ref()
+            .map_or_else(enumerate_browser_windows, |p| (p.browser_windows)());
         #[cfg(not(test))]
-        let meet_windows = enumerate_meet_windows();
+        let browser_windows = enumerate_browser_windows();
 
         log::debug!(
             "detector poll: windows={:?}",
-            meet_windows.iter().map(|w| format!("{}(pid={})", w.title, w.pid)).collect::<Vec<_>>(),
+            browser_windows.iter().map(|w| format!("{}(pid={})", w.title, w.pid)).collect::<Vec<_>>(),
         );
 
         // Always check the connection signals regardless of window state.
-        // meet_windows.is_empty() must not short-circuit exit detection: a transient
+        // browser_windows.is_empty() must not short-circuit exit detection: a transient
         // tab switch makes windows disappear for several seconds while the user is
         // still in the call and both network signals stay true. Gating exit on windows
         // caused false `meeting-ended` events whenever focus moved away from the Meet tab.
-        // step_detector already guards entry via `has_title && has_conn`, so empty windows
-        // only prevent join — never exit.
         #[cfg(test)]
         let turn = self.probes.as_ref()
             .map_or_else(has_turn_connection, |p| (p.has_turn)());
@@ -702,7 +569,7 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
         let turn = has_turn_connection();
 
         // Compute WASAPI capture state unconditionally for two uses:
-        //   • entry conjunction (UDP phase below): mc && bc
+        //   • entry conjunction (UDP phase below): signaling_active && bc
         //   • exit signal in observation.has_browser_capture_session (asymmetric D2):
         //     step_detector InCall branch uses this, not has_conn, so 90s+ TCP drops
         //     during an active call do not start the exit debounce.
@@ -751,7 +618,7 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
             self.turn_established = true;
         }
 
-        // Entry signal: `turn || (mc && bc)` unconditionally. The prior
+        // Entry signal: `turn || (signaling_active && bc)` unconditionally. The prior
         // `else if turn_established { false }` arm is removed — its rationale
         // ("prevent the exit debounce from starting") was stale: exit has used
         // `bc` (not has_conn) since the asymmetric-D2 redesign. The arm only
@@ -763,30 +630,31 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
             true
         } else {
             // UDP/join phase: TURN relay not yet seen. AND both signals for entry so that:
-            // • join is detected when mc && bc both true after getUserMedia opens, and
+            // • join is detected when signaling_active && bc both true after getUserMedia opens, and
             // • the conjunction is discriminating enough to avoid false-positive entry.
             // Exit detection uses bc alone via has_browser_capture_session in the observation.
             #[cfg(test)]
-            let mc = self.probes.as_ref()
-                .map_or_else(has_meet_connection, |p| (p.has_conn)());
+            let signaling_active = self.probes.as_ref()
+                .map_or_else(|| self.signaling.is_call_signaling_active(), |p| (p.has_conn)());
             #[cfg(not(test))]
-            let mc = has_meet_connection();
-            log::debug!("detector poll: has_meet_connection={mc} has_browser_capture_session={bc}");
-            mc && bc
+            let signaling_active = self.signaling.is_call_signaling_active();
+            log::debug!("detector poll: signaling_active={signaling_active} has_browser_capture_session={bc}");
+            signaling_active && bc
         };
 
         // connection_first_seen_at tracking (D15 pre-existing check):
         //   First poll: stamp any connection as pre-existing (no window gate — a minimized
-        //   Meet window at startup would bypass D15 on the second poll if gated here).
-        //   Subsequent polls: only set when a Meet window is also visible, so background
-        //   Google TCP (Gmail, Drive) never poisons the check before the user opens Meet.
+        //   browser window at startup would bypass D15 on the second poll if gated here).
+        //   Subsequent polls: `bc` in `has_conn` already prevents Gmail/Drive-at-startup
+        //   from stamping (no getUserMedia → has_conn=false → this branch is unreachable),
+        //   so the former `!browser_windows.is_empty()` window term was redundant (D9).
         //   Reset: only when has_conn drops to false.
         if !self.first_poll_done {
             self.first_poll_done = true;
             if has_conn {
                 // D15: stamp any connection at startup as pre-existing regardless of
-                // whether a Meet window is visible. Window gate removed from this branch:
-                // a minimized Meet window on poll 1 would leave C_FSA = None, then poll 2
+                // whether a browser window is visible. Window gate removed from this branch:
+                // a minimized browser window on poll 1 would leave C_FSA = None, then poll 2
                 // would set C_FSA = now() (> detector_start), making the connection look
                 // new and bypassing D15.
                 self.connection_first_seen_at = Some(self.detector_start);
@@ -802,7 +670,7 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
             if bc {
                 self.bc_true_since = Some(self.now());
             }
-        } else if has_conn && !meet_windows.is_empty() && self.connection_first_seen_at.is_none() {
+        } else if has_conn && self.connection_first_seen_at.is_none() {
             self.connection_first_seen_at = Some(self.now());
         } else if !has_conn {
             self.connection_first_seen_at = None;
@@ -813,8 +681,17 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
         // the 15 s UDP debounce, restoring the ~5 s exit latency for TCP TURN calls.
         let is_turn_exit = !turn && self.turn_established;
 
+        // Titles the wired extractor recognises from the enumerated browser windows.
+        // Per-window extraction (D9 item 3): each window is offered to the extractor;
+        // Some results are collected as candidate recording names.
+        let candidate_titles: Vec<String> = browser_windows
+            .iter()
+            .filter_map(|w| self.title_extractor.extract_title(std::slice::from_ref(w)))
+            .collect();
+
         let mut obs = DetectorObservation {
-            meet_windows,
+            browser_windows,
+            candidate_titles,
             has_meet_connection: has_conn,
             has_browser_capture_session: bc,
             connection_first_seen_at: self.connection_first_seen_at,
@@ -823,9 +700,12 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
             stable_capture: self.exit_stable_latch.unwrap_or(false),
         };
 
-        if !obs.meet_windows.is_empty() {
-            obs.default_title = resolve_default_title(&obs, &self.focus_history, self.now());
-        }
+        obs.default_title = resolve_default_title(
+            &obs,
+            &self.focus_history,
+            self.title_extractor.as_ref(),
+            self.now(),
+        );
 
         obs
     }
@@ -836,16 +716,19 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
 pub fn spawn_focus_tracker(history: FocusHistory) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let re = meet_title_regex();
-            if let Some(title) = foreground_window_title() {
-                if re.is_match(&title) {
+            // Record the foreground window whenever its owning process is a browser
+            // (vendor-neutral — the extractor filters at resolution time, D9 item 2).
+            // Storing the full BrowserWindow gives the recent-focus priority chain real
+            // window metadata (D8 no-fabrication invariant).
+            if let Some(fg) = foreground_window() {
+                if is_browser_process(fg.pid) {
                     let now = Instant::now();
                     let cutoff = now
                         .checked_sub(FOCUS_HISTORY_TTL)
                         .unwrap_or_else(Instant::now);
 
                     let mut h = history.lock().unwrap_or_else(|e| e.into_inner());
-                    h.push_back((title, now));
+                    h.push_back((fg, now));
                     while h.front().map_or(false, |(_, t)| *t < cutoff) {
                         h.pop_front();
                     }
@@ -870,131 +753,76 @@ mod tests {
     use proptest::prelude::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    fn make_obs(titles: &[&str]) -> DetectorObservation {
-        DetectorObservation {
-            meet_windows: titles
-                .iter()
-                .map(|t| MeetWindow {
-                    hwnd_id: 1,
-                    pid: 100,
-                    title: t.to_string(),
-                })
-                .collect(),
+    fn empty_history() -> FocusHistory {
+        Arc::new(Mutex::new(VecDeque::new()))
+    }
+
+    // ── §5.1 — resolve_default_title priority chain ────────────────────────
+    // Verifies the foreground → recent-focus → first-enum → timestamp chain
+    // delegates to the wired `MeetingTitleExtractorPort` at each step (D8), and
+    // that a None-returning extractor falls through to the timestamp default.
+    // The old `resolve_default_title_fallback_is_non_empty` test was deleted
+    // during extraction and never replaced — these two close that gap.
+
+    /// Stub extractor: returns `Some("opv-augt-jbm")` only for a window whose
+    /// title is the exact PWA form. The returned value is identical regardless
+    /// of which priority step fires, so the assertion holds no matter what
+    /// window happens to be foreground during `cargo test`.
+    struct StubTitleExtractor;
+    impl MeetingTitleExtractorPort for StubTitleExtractor {
+        fn extract_title(&self, windows: &[BrowserWindow]) -> Option<String> {
+            for w in windows {
+                if w.title == "Google Meet - Meet \u{2013} opv-augt-jbm" {
+                    return Some("opv-augt-jbm".to_string());
+                }
+            }
+            None
+        }
+    }
+
+    #[test]
+    fn resolve_default_title_uses_extractor_at_some_priority_step() {
+        let obs = DetectorObservation {
+            browser_windows: vec![BrowserWindow {
+                hwnd_id: 1,
+                pid: 100,
+                title: "Google Meet - Meet \u{2013} opv-augt-jbm".to_string(),
+            }],
+            candidate_titles: vec![],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: None,
             default_title: String::new(),
             is_turn_exit: false,
             stable_capture: false,
-        }
+        };
+        let title =
+            resolve_default_title(&obs, &empty_history(), &StubTitleExtractor, Instant::now());
+        assert_eq!(title, "opv-augt-jbm");
     }
 
-    fn empty_history() -> FocusHistory {
-        Arc::new(Mutex::new(VecDeque::new()))
-    }
-
-    // Chrome/Edge tab format: "Meet - <name>"
     #[test]
-    fn title_parsing_chrome_tab_format() {
-        let re = meet_title_regex();
-        assert!(re.is_match("Meet - test"));
-        assert!(re.is_match("Meet - abc-defg-hij"));
-        assert!(re.is_match("Meet - Weekly sync"));
-        assert_eq!(strip_google_meet_suffix("Meet - test"), "test");
-        assert_eq!(strip_google_meet_suffix("Meet - Weekly sync"), "Weekly sync");
-        assert!(!re.is_match("Meet - ")); // nothing after prefix — no match
-    }
-
-    // PWA format: "Google Meet - Meet — <Name>"
-    #[test]
-    fn title_parsing_pwa_format() {
-        let re = meet_title_regex();
-        assert!(re.is_match("Google Meet - Meet \u{2014} Test"));
-        assert!(re.is_match("Google Meet - Meet \u{2014} Weekly Sync"));
-        assert_eq!(strip_google_meet_suffix("Google Meet - Meet \u{2014} Test"), "Test");
-        assert_eq!(strip_google_meet_suffix("Google Meet - Meet \u{2014} Weekly Sync"), "Weekly Sync");
-    }
-
-    // Suffix format used by newer Chrome/Edge: "<Name> - Google Meet"
-    #[test]
-    fn title_parsing_suffix_format() {
-        let re = meet_title_regex();
-        assert!(re.is_match("Sprint planning - Google Meet"));
-        assert!(re.is_match("Q4 review - Google Meet"));
-        assert_eq!(strip_google_meet_suffix("Sprint planning - Google Meet"), "Sprint planning");
-        assert_eq!(strip_google_meet_suffix("Q4 review - Google Meet"), "Q4 review");
-        assert!(!re.is_match("Google Meet")); // lobby / no meeting name — must not trigger
-    }
-
-    // Edge tab-group collapsed format: "Meet – <code> and N more pages - <group> - Microsoft​ Edge"
-    // The en dash (U+2013) and tab-group suffix are Edge-specific window title synthesis.
-    #[test]
-    fn title_parsing_edge_tabgroup_format() {
-        let re = meet_title_regex();
-        assert!(re.is_match("Meet \u{2013} add-acfj-djw and 19 more pages - Work - Microsoft\u{200b} Edge"));
-        assert!(re.is_match("Meet \u{2013} abc-defg-hij and 3 more pages - Personal - Microsoft\u{200b} Edge"));
-        assert_eq!(
-            strip_google_meet_suffix("Meet \u{2013} add-acfj-djw and 19 more pages - Work - Microsoft\u{200b} Edge"),
-            "add-acfj-djw"
+    fn resolve_default_title_falls_back_to_timestamp_when_extractor_returns_none() {
+        let obs = DetectorObservation {
+            browser_windows: vec![BrowserWindow {
+                hwnd_id: 1,
+                pid: 100,
+                title: "Not a meeting".to_string(),
+            }],
+            candidate_titles: vec![],
+            has_meet_connection: false,
+            has_browser_capture_session: false,
+            connection_first_seen_at: None,
+            default_title: String::new(),
+            is_turn_exit: false,
+            stable_capture: false,
+        };
+        let title =
+            resolve_default_title(&obs, &empty_history(), &NoOpTitleExtractor, Instant::now());
+        assert!(
+            title.starts_with("Meeting "),
+            "timestamp fallback expected, got {title:?}"
         );
-        assert_eq!(
-            strip_google_meet_suffix("Meet \u{2013} abc-defg-hij and 3 more pages - Personal - Microsoft\u{200b} Edge"),
-            "abc-defg-hij"
-        );
-        // Single-tab edge case: no " and N more pages" suffix
-        assert_eq!(
-            strip_google_meet_suffix("Meet \u{2013} abc-defg-hij"),
-            "abc-defg-hij"
-        );
-    }
-
-    #[test]
-    fn title_parsing_non_meet_does_not_match() {
-        let re = meet_title_regex();
-        assert!(!re.is_match("Chat with team about Google Meet"));
-        assert!(!re.is_match("Sprint planning - YouTube"));
-        assert!(!re.is_match("Zoom Meeting"));
-    }
-
-    // Task 4.1
-    #[test]
-    fn adversarial_4_1_non_meet_titles_not_matched() {
-        let re = meet_title_regex();
-        assert!(!re.is_match("Chat with team about Google Meet"));
-        assert!(!re.is_match("Google Meet tips - YouTube"));
-        assert!(re.is_match("Meet - standup"));
-        assert!(re.is_match("Google Meet - Meet \u{2014} Standup"));
-    }
-
-    // Task 4.2: injection titles pass through as opaque text.
-    #[test]
-    fn adversarial_4_2_injection_titles_pass_through() {
-        let re = meet_title_regex();
-        let sql = "Meet - '; DROP TABLE meetings; --";
-        let path = "Meet - ../../etc/passwd";
-        assert!(re.is_match(sql));
-        assert!(re.is_match(path));
-        assert_eq!(strip_google_meet_suffix(sql), "'; DROP TABLE meetings; --");
-        assert_eq!(strip_google_meet_suffix(path), "../../etc/passwd");
-    }
-
-    // Task 4.3: unicode / emoji titles.
-    #[test]
-    fn adversarial_4_3_unicode_emoji_titles() {
-        let re = meet_title_regex();
-        assert!(re.is_match("Meet - 📊 Q4 review"));
-        assert_eq!(strip_google_meet_suffix("Meet - 📊 Q4 review"), "📊 Q4 review");
-        assert!(re.is_match("Meet - مراجعة Q4"));
-        assert!(re.is_match("Google Meet - Meet \u{2014} 📊 Q4"));
-        assert_eq!(strip_google_meet_suffix("Google Meet - Meet \u{2014} 📊 Q4"), "📊 Q4");
-    }
-
-    #[test]
-    fn resolve_default_title_fallback_is_non_empty() {
-        let obs = make_obs(&["Meet - Sprint planning"]);
-        let history = empty_history();
-        let title = resolve_default_title(&obs, &history, Instant::now());
-        assert!(!title.is_empty());
     }
 
     // ── Task 3.1 — has_browser_capture_session ─────────────────────────────
@@ -1029,9 +857,9 @@ mod tests {
 
     // ── Task 5.1 b/c — WindowsMeetingDetector adapter layer ───────────────
 
-    fn probe_windows(titles: &'static [&'static str]) -> Box<dyn Fn() -> Vec<MeetWindow> + Send + Sync> {
+    fn probe_windows(titles: &'static [&'static str]) -> Box<dyn Fn() -> Vec<BrowserWindow> + Send + Sync> {
         Box::new(move || {
-            titles.iter().map(|t| MeetWindow { hwnd_id: 1, pid: 100, title: t.to_string() }).collect()
+            titles.iter().map(|t| BrowserWindow { hwnd_id: 1, pid: 100, title: t.to_string() }).collect()
         })
     }
 
@@ -1041,7 +869,7 @@ mod tests {
     // code (the entry-suppression arm + the turn-only latch set).
 
     // Task 1.1 — Deadlock regression: a latched turn_established flag must NOT
-    // block detection of a subsequent real UDP call (mc && bc both true). The
+    // block detection of a subsequent real UDP call (signaling_active && bc both true). The
     // pre-fix else-if turn_established arm forces has_conn=false here.
     #[test]
     fn latched_turn_flag_does_not_block_subsequent_udp_call_entry() {
@@ -1049,7 +877,7 @@ mod tests {
             has_turn:    Box::new(|| false), // TURN gone (UDP call)
             has_conn:    Box::new(|| true),  // Meet TCP active
             has_capture: Box::new(|| true),  // browser mic capture active
-            meet_windows: probe_windows(&["Meet - standup"]),
+            browser_windows: probe_windows(&["Meet - standup"]),
         };
         let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
         // Simulate the poisoned state: a prior browser→GCP connection latched
@@ -1058,7 +886,7 @@ mod tests {
 
         let obs = det.current_state();
         assert!(obs.has_meet_connection,
-            "a latched turn_established flag must NOT suppress entry when a real UDP call (mc && bc) is active");
+            "a latched turn_established flag must NOT suppress entry when a real UDP call (signaling_active && bc) is active");
     }
 
     // Task 1.2 — Spurious-latch non-poison: TURN active but NO browser capture
@@ -1071,7 +899,7 @@ mod tests {
             has_turn:    Box::new(|| true),
             has_conn:    Box::new(|| false),
             has_capture: Box::new(|| false),
-            meet_windows: probe_windows(&[]),
+            browser_windows: probe_windows(&[]),
         };
         let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_gcp);
         // Poll several times to give the latch every chance to (wrongly) set.
@@ -1081,12 +909,12 @@ mod tests {
         assert!(!det.turn_established,
             "turn_established must NOT set on TURN-without-capture (background GCP traffic)");
 
-        // Phase 2: user joins a real UDP call (TURN=false, mc && bc true).
+        // Phase 2: user joins a real UDP call (TURN=false, signaling_active && bc true).
         det.probes = Some(DetectorProbes {
             has_turn:    Box::new(|| false),
             has_conn:    Box::new(|| true),
             has_capture: Box::new(|| true),
-            meet_windows: probe_windows(&["Meet - standup"]),
+            browser_windows: probe_windows(&["Meet - standup"]),
         });
         let obs = det.current_state();
         assert!(obs.has_meet_connection, "the UDP call must be detected");
@@ -1095,7 +923,7 @@ mod tests {
     }
 
     // Task 1.3 — Entry formula invariant: with turn_established latched, the
-    // entry signal has_meet_connection must equal `turn || (mc && bc)` across
+    // entry signal has_meet_connection must equal `turn || (signaling_active && bc)` across
     // the full probe matrix. The latch must never change the entry formula.
     #[test]
     fn entry_formula_invariant_holds_across_probe_matrix_when_latched() {
@@ -1106,17 +934,17 @@ mod tests {
                         has_turn:    Box::new(move || turn),
                         has_conn:    Box::new(move || mc),
                         has_capture: Box::new(move || bc),
-                        meet_windows: probe_windows(&["Meet - standup"]),
+                        browser_windows: probe_windows(&["Meet - standup"]),
                     };
                     let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
                     // Latch is set (simulating a prior TURN call). The entry
-                    // formula must still be `turn || (mc && bc)`.
+                    // formula must still be `turn || (signaling_active && bc)`.
                     det.turn_established = true;
                     let obs = det.current_state();
                     let expected = turn || (mc && bc);
                     assert_eq!(
                         obs.has_meet_connection, expected,
-                        "turn={turn} mc={mc} bc={bc}: has_meet_connection must equal turn || (mc && bc), got {}",
+                        "turn={turn} mc={mc} bc={bc}: has_meet_connection must equal turn || (signaling_active && bc), got {}",
                         obs.has_meet_connection
                     );
                 }
@@ -1126,7 +954,7 @@ mod tests {
 
     // (b) notify_exit resets turn_established so the next UDP call is detectable.
     //     Post-detector-turn-latch-deadlock: the suppression arm is gone, so
-    //     has_conn is true both before and after notify_exit when mc && bc are
+    //     has_conn is true both before and after notify_exit when signaling_active && bc are
     //     both true. The notify_exit → detectable-again assertion (the real
     //     purpose of this test) stays; only the stale "before = false" assertion
     //     (which encoded the deadlock) is corrected to true.
@@ -1136,15 +964,15 @@ mod tests {
             has_turn:    Box::new(|| false),
             has_conn:    Box::new(|| true),
             has_capture: Box::new(|| true),
-            meet_windows: probe_windows(&["Meet - standup"]),
+            browser_windows: probe_windows(&["Meet - standup"]),
         };
         let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
         det.turn_established = true;
 
-        // Before notify_exit: suppression arm gone, mc && bc both true → has_conn=true
+        // Before notify_exit: suppression arm gone, signaling_active && bc both true → has_conn=true
         let obs = det.current_state();
         assert!(obs.has_meet_connection,
-            "post-fix: turn_established=true no longer suppresses entry when mc && bc are true");
+            "post-fix: turn_established=true no longer suppresses entry when signaling_active && bc are true");
 
         det.notify_exit();
 
@@ -1165,7 +993,7 @@ mod tests {
             has_turn:    Box::new(|| true),
             has_conn:    Box::new(|| true),
             has_capture: Box::new(|| true),
-            meet_windows: probe_windows(&["Meet - standup"]),
+            browser_windows: probe_windows(&["Meet - standup"]),
         };
         let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_turn_active);
 
@@ -1179,7 +1007,7 @@ mod tests {
             has_turn:    Box::new(|| false),
             has_conn:    Box::new(|| true),
             has_capture: Box::new(|| true),
-            meet_windows: probe_windows(&["Meet - standup"]),
+            browser_windows: probe_windows(&["Meet - standup"]),
         });
         let obs2 = det.current_state();
         assert!(obs2.is_turn_exit,
@@ -1204,7 +1032,7 @@ mod tests {
             has_turn:    Box::new(|| true),
             has_conn:    Box::new(|| true),
             has_capture: Box::new(|| true),
-            meet_windows: probe_windows(&["Meet - standup"]),
+            browser_windows: probe_windows(&["Meet - standup"]),
         };
         let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_active);
 
@@ -1218,7 +1046,7 @@ mod tests {
             has_turn:    Box::new(|| false),
             has_conn:    Box::new(|| true),
             has_capture: Box::new(|| true),
-            meet_windows: probe_windows(&["Meet - standup"]),
+            browser_windows: probe_windows(&["Meet - standup"]),
         });
         let obs2 = det.current_state();
         assert!(obs2.is_turn_exit, "TURN drop must set is_turn_exit while bc lags");
@@ -1229,7 +1057,7 @@ mod tests {
             has_turn:    Box::new(|| false),
             has_conn:    Box::new(|| true),
             has_capture: Box::new(|| false),
-            meet_windows: probe_windows(&["Meet - standup"]),
+            browser_windows: probe_windows(&["Meet - standup"]),
         });
         let obs3 = det.current_state();
         assert!(det.turn_established,
@@ -1238,7 +1066,7 @@ mod tests {
             "is_turn_exit must stay true across the WASAPI bc-drop mid-exit");
     }
 
-    // (d) D15 / C-NEW-2: Meet window minimized at startup — first poll sees empty
+    // (d) D15 / C-NEW-2: browser window minimized at startup — first poll sees empty
     //     window list while a Google TCP connection already exists. The first-poll
     //     branch must stamp C_FSA = detector_start unconditionally (no window gate).
     //     Without the fix, C_FSA would stay None on poll 1, then be set to
@@ -1250,7 +1078,7 @@ mod tests {
             has_turn:    Box::new(|| false),
             has_conn:    Box::new(|| true),
             has_capture: Box::new(|| true),
-            meet_windows: Box::new(|| vec![]),  // minimized at startup — empty
+            browser_windows: Box::new(|| vec![]),  // minimized at startup — empty
         };
         let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_poll1);
 
@@ -1258,7 +1086,7 @@ mod tests {
         let obs1 = det.current_state();
         assert!(
             obs1.connection_first_seen_at.is_some(),
-            "first poll must stamp C_FSA even when Meet window is not visible",
+            "first poll must stamp C_FSA even when browser window is not visible",
         );
         let c_fsa_poll1 = obs1.connection_first_seen_at.unwrap();
 
@@ -1267,7 +1095,7 @@ mod tests {
             has_turn:    Box::new(|| false),
             has_conn:    Box::new(|| true),
             has_capture: Box::new(|| true),
-            meet_windows: probe_windows(&["Meet - standup"]),
+            browser_windows: probe_windows(&["Meet - standup"]),
         });
         let obs2 = det.current_state();
 
@@ -1305,7 +1133,7 @@ mod tests {
 
     // (c) Otter.ai scenario: persistent browser mic keeps WASAPI active across calls.
     //     Post-detector-turn-latch-deadlock: a latched turn_established flag no longer
-    //     blocks entry. With mc && bc both true, has_meet_connection is true (entry not
+    //     blocks entry. With signaling_active && bc both true, has_meet_connection is true (entry not
     //     suppressed); after notify_exit() it is still true. The pre-fix version of this
     //     test asserted the deadlock ("must block UDP detection"); that assertion encoded
     //     the bug as desired behaviour. The Otter.ai lobby false-positive (HTTPS + WASAPI
@@ -1318,17 +1146,17 @@ mod tests {
             has_turn:    Box::new(|| false),  // TURN gone after TCP exit
             has_conn:    Box::new(|| true),   // lobby HTTPS still active
             has_capture: Box::new(|| true),  // Otter.ai keeps WASAPI open
-            meet_windows: probe_windows(&["Meet - standup"]),
+            browser_windows: probe_windows(&["Meet - standup"]),
         };
         let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
         det.turn_established = true;
 
         // Post-fix invariant: a latched flag does NOT block entry when a real UDP
-        // call (mc && bc) is active. (mc=true, bc=true → has_conn=true.)
+        // call (signaling_active && bc) is active. (signaling_active=true, bc=true → has_conn=true.)
         for i in 0..3 {
             let obs = det.current_state();
             assert!(obs.has_meet_connection,
-                "poll {i}: a latched turn_established must not suppress entry for a real UDP call (mc && bc)");
+                "poll {i}: a latched turn_established must not suppress entry for a real UDP call (signaling_active && bc)");
         }
 
         det.notify_exit();
@@ -1368,7 +1196,7 @@ mod tests {
             has_turn: Box::new(move || turn),
             has_conn: Box::new(|| true),
             has_capture: Box::new(move || bc_for_probe.load(Ordering::SeqCst)),
-            meet_windows: probe_windows(&["Meet - standup"]),
+            browser_windows: probe_windows(&["Meet - standup"]),
         };
         let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
         det.clock = Some(Box::new(move || *clock_for_probe.lock().unwrap()));
@@ -1623,7 +1451,12 @@ mod tests {
         assert_eq!(prior.exit_stable_latch, Some(true));
         // `prior` is dropped here (simulated crash) — no notify_exit.
 
-        let fresh = WindowsMeetingDetector::new(empty_history());
+        let fresh = WindowsMeetingDetector::with_probes(empty_history(), DetectorProbes {
+            has_turn: Box::new(|| false),
+            has_conn: Box::new(|| false),
+            has_capture: Box::new(|| false),
+            browser_windows: Box::new(|| vec![]),
+        });
         assert!(fresh.exit_stable_latch.is_none(), "fresh detector has no inherited latch");
         assert!(fresh.bc_true_since.is_none(), "fresh detector has no inherited bc_true_since");
     }
@@ -1736,8 +1569,8 @@ mod tests {
             has_turn: Box::new(|| false),
             has_conn: Box::new(|| true),
             has_capture: Box::new(move || bc_for_probe.load(Ordering::SeqCst)),
-            meet_windows: Box::new(|| {
-                vec![MeetWindow { hwnd_id: 1, pid: 100, title: "Meet - Short".to_string() }]
+            browser_windows: Box::new(|| {
+                vec![BrowserWindow { hwnd_id: 1, pid: 100, title: "Meet - Short".to_string() }]
             }),
         };
         let history: FocusHistory = Arc::new(Mutex::new(VecDeque::new()));
@@ -1814,7 +1647,7 @@ mod tests {
             has_turn: Box::new(|| false),
             has_conn: Box::new(|| true),
             has_capture: Box::new(move || bc_for_probe.load(Ordering::SeqCst)),
-            meet_windows: probe_windows(&["Meet - real-clock"]),
+            browser_windows: probe_windows(&["Meet - real-clock"]),
         };
         let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
         det.clock = Some(Box::new(move || *clock_for_probe.lock().unwrap()));

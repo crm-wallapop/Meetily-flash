@@ -1,8 +1,11 @@
 use std::time::Instant;
 
-/// A single window that matches the Google Meet title pattern.
+/// A top-level browser-process window observed by `EnumWindows`. The title is
+/// vendor-neutral raw text — the `MeetingTitleExtractorPort` decides whether it
+/// matches a known conference vendor; this struct makes no claim about the title's
+/// semantics.
 #[derive(Clone, Debug, PartialEq)]
-pub struct MeetWindow {
+pub struct BrowserWindow {
     pub hwnd_id: usize,
     pub pid: u32,
     pub title: String,
@@ -11,8 +14,13 @@ pub struct MeetWindow {
 /// Observation snapshot returned by the detector on each poll.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DetectorObservation {
-    /// All top-level windows whose titles match the Meet regex owned by a browser process.
-    pub meet_windows: Vec<MeetWindow>,
+    /// All visible top-level windows owned by a browser process (no title
+    /// pre-filter — vendor matching happens in the wired `MeetingTitleExtractorPort`).
+    pub browser_windows: Vec<BrowserWindow>,
+    /// Titles the wired `MeetingTitleExtractorPort` recognised from
+    /// `browser_windows` (adapter-populated, per-window). Forwarded to the
+    /// frontend as candidate recording names. Empty when no vendor match.
+    pub candidate_titles: Vec<String>,
     /// Entry signal: browser has an established TCP connection to a Google media/signalling IP
     /// AND an active WASAPI capture session (conjunction, D2). Used by the Idle → InCall
     /// transition. Not used for exit detection — see `has_browser_capture_session`.
@@ -30,8 +38,9 @@ pub struct DetectorObservation {
     /// so the state machine can enforce conservative app-start behaviour (D15).
     pub connection_first_seen_at: Option<Instant>,
     /// D10: pre-resolved, stripped meeting title from the adapter (foreground window →
-    /// recent focus history → first enumerated window → timestamp fallback).
-    /// Empty string when `meet_windows` is empty.
+    /// recent focus history → first enumerated window → timestamp fallback). Always
+    /// populated — the timestamp fallback guarantees a non-empty string even when no
+    /// browser window is visible.
     pub default_title: String,
     /// Set to `true` when a TURN relay was established for this call and has just dropped
     /// (`turn_established = true && !turn`). Enables fast 4 s debounce for TCP TURN exit
@@ -60,7 +69,8 @@ pub struct DetectorObservation {
 impl Default for DetectorObservation {
     fn default() -> Self {
         Self {
-            meet_windows: vec![],
+            browser_windows: vec![],
+            candidate_titles: vec![],
             has_meet_connection: false,
             has_browser_capture_session: false,
             connection_first_seen_at: None,
@@ -88,11 +98,12 @@ mod tests {
     #[test]
     fn detector_observation_derives_clone_debug_partialeq() {
         let obs = DetectorObservation {
-            meet_windows: vec![MeetWindow {
+            browser_windows: vec![BrowserWindow {
                 hwnd_id: 1,
                 pid: 42,
                 title: "Meet - Weekly sync".to_string(),
             }],
+            candidate_titles: vec!["Weekly sync".to_string()],
             has_meet_connection: true,
             has_browser_capture_session: true,
             connection_first_seen_at: None,
