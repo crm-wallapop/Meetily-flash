@@ -38,6 +38,6 @@ Adversarial TDD: each task writes the failing (RED) test first, then the impleme
 
 ## 5. Spec sync + archive
 
-- [ ] 5.1 Before archive: re-read the canonical `openspec/specs/meeting-auto-detect/spec.md` and this change's `design.md` + delta `specs/meeting-auto-detect/spec.md`; if implementation diverged (e.g. final window value), amend the delta spec and design first. (Canonical is already in `# Capability Spec` / `## Purpose` / `## Requirements` format — low archive-corruption risk per shark review.)
-- [ ] 5.2 `CL=/FS cargo test --lib` green (unit + the new adversarial set); `pnpm test` + `pnpm test:smoke` green.
-- [ ] 5.3 `/opsx:archive meeting-udp-confidence-debounce` (syncs the delta into the canonical spec).
+- [x] 5.1 Before archive: re-read the canonical `openspec/specs/meeting-auto-detect/spec.md` and this change's `design.md` + delta `specs/meeting-auto-detect/spec.md`; if implementation diverged (e.g. final window value), amend the delta spec and design first. (Canonical is already in `# Capability Spec` / `## Purpose` / `## Requirements` format — low archive-corruption risk per shark review.)
+- [x] 5.2 `CL=/FS cargo test --lib` green — 434 passed / 0 failed / 13 ignored (was 433; +relocated C1); dev-detector fake suite 4 passed. `pnpm test` + `pnpm test:smoke` are pre-push-gated (`.githooks/pre-push`) for this Rust-only change (no TS/React/CSS touched); cargo is the relevant gate here.
+- [x] 5.3 `/opsx:archive meeting-udp-confidence-debounce` (delta synced into the canonical spec pre-archive; change dir moved to `archive/2026-06-25-meeting-udp-confidence-debounce/`).
