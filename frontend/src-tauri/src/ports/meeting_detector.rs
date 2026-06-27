@@ -21,12 +21,14 @@ pub struct DetectorObservation {
     /// `browser_windows` (adapter-populated, per-window). Forwarded to the
     /// frontend as candidate recording names. Empty when no vendor match.
     pub candidate_titles: Vec<String>,
-    /// Entry signal: browser has an established TCP connection to a Google media/signalling IP
-    /// AND an active WASAPI capture session (conjunction, D2). Used by the Idle → InCall
-    /// transition. Not used for exit detection — see `has_browser_capture_session`.
-    /// Note: for active TURN relay connections the adapter sets this `true` without
-    /// consulting WASAPI — `bc` is only required as part of the conjunction in the UDP/join
-    /// phase. The invariant "mc implies bc" does not hold on the TURN path.
+    /// Entry signal fed to the `Idle → InCall` transition. The VALUE is vendor-neutral —
+    /// `has_conn = turn || (signaling_active && has_browser_capture_session)`, where
+    /// `signaling_active` is the OR of wired `CallSignalingPort` adapters (v1: Meet's
+    /// Google-CIDR check). The field NAME is retained as `has_meet_connection` for
+    /// canonical-spec continuity; the rename is deferred to the second-vendor change.
+    /// Not used for exit detection — see `has_browser_capture_session`. For active TURN
+    /// relay connections the adapter sets this `true` without consulting WASAPI, so the
+    /// invariant "mc implies bc" does not hold on the TURN path.
     pub has_meet_connection: bool,
     /// Exit signal: a browser process holds an `AudioSessionStateActive` WASAPI capture
     /// session (D2 asymmetric). Stays true throughout a Meet call; drops within ~1-2 s of
