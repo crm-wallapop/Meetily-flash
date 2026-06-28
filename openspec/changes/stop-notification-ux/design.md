@@ -1,20 +1,20 @@
 ## Context
 
-Four independent defects in the recording-stop / notification surface, all confirmed in-session:
+Three independent defects in the recording-stop / notification surface, all confirmed in-session:
 
 | ID | Defect | Current code site |
 |---|---|---|
-| B1 | `emit_detected` fires `recording_started` at detection time, duplicating the real start toast ~1 s later | `lib.rs` `emit_detected` → `notifications/commands.rs` |
 | B2 | Dev-build AUMID registry key is empty → Windows drops toasts before display | `tauri.conf.json` identifier vs. `HKCU\Software\Classes\AppUserModelId\com.meetily.ai` |
 | B3 | `meetily://` reactivation flashes a console window in dev | `main.rs:1-4` `windows_subsystem` debug-gated |
 | C3 | "View Meeting" toast action renders unconditionally but its handler silently no-ops when `meetingId` is null | `hooks/useRecordingStop.ts:144,167-182` |
 
-B3 is dev-only (release builds already use the GUI subsystem). B1/B2/C3 affect any build where the code path is reached. None are data-layer, none touch ports/adapters, none require DB migration.
+B3 is dev-only (release builds already use the GUI subsystem). B2/C3 affect any build where the code path is reached. None are data-layer, none touch ports/adapters, none require DB migration.
+
+> **Scope history (2026-06-28):** A fourth defect, B1 (detection-time `recording_started` duplicate), was originally scoped in but verified already-fixed by commit `a08cc1d` (archived `notification-actions` change, 2026-06-23). `git blame` on `emit_detected` confirms the `recording_started` notification call was added in `ffc3bfa` and removed in `a08cc1d`; the current body emits only the in-app `meeting-detected` banner. No code change needed for B1.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- B1: exactly one `recording_started` notification per recording session (from the start path only).
 - B2: dev-build toasts display (AUMID branded at startup, idempotently, Windows-only).
 - B3: no console/secondary window on `meetily://` reactivation in **both** debug and release builds.
 - C3: the stop-completion toast's "View Meeting" action is conditional on a known `meetingId`; never a silent no-op.
@@ -27,13 +27,6 @@ B3 is dev-only (release builds already use the GUI subsystem). B1/B2/C3 affect a
 - Touching the OS-notification spec's consent model or the recording-lifecycle phase machine.
 
 ## Decisions
-
-### B1 — Suppress the detection-time `recording_started`
-
-The actual recording-start code path is the single source of truth for `recording_started`. `emit_detected` currently fires it as a side effect of detection; that call site is removed (or routed to a distinct `meeting_detected` notification that is NOT shown by default). The real start notification fires ~1 s later with identical content, so nothing the user needs is lost — only the duplicate.
-
-**Alternatives considered:**
-- Debounce two near-time `recording_started` emissions in the manager (drop the second within N ms). Rejected: the manager would need call-origin tagging to distinguish detection-time from start-time, and dedup windows are fragile. Suppressing at the source is simpler and unambiguous.
 
 ### B2 — Idempotent AUMID branding at startup
 
@@ -69,12 +62,11 @@ In `useRecordingStop.ts`, change the toast `action` to `meetingId ? { label: 'Vi
 - **[B3] Dropping the guard may suppress the dev console the user relies on for logs.** → Mitigation: the spike gates the change; if inherited stdio doesn't carry logs, fall back to `AttachConsole(ATTACH_PARENT_PROCESS)` which re-attaches the parent terminal without allocating a new console. Either way the dev terminal log experience is preserved.
 - **[B3] Double-clicking the dev exe from Explorer shows no console.** → Mitigation: not a supported dev workflow (`tauri dev` is always launched from a terminal); document in CLAUDE.md platform notes. No user impact in release.
 - **[B2] Registry write at startup may fail (permissions, AV).** → Mitigation: non-fatal; warn-log and continue. Installed builds are unaffected (installer brands the AUMID); dev builds fall back to the prior "toasts may drop" behavior, no worse than today.
-- **[B1] Suppressing `emit_detected`'s notification may hide a detection signal.** → Mitigation: the real `recording_started` fires ~1 s later with identical content; nothing is hidden, only dedup'd. If a future change wants a distinct "meeting detected" signal, it can add a separately-consented notification without conflict.
 - **[C3] Omitting the button when `meetingId` is null removes a navigation affordance.** → Mitigation: the sidebar refresh on `recording-saved-to-db` surfaces the meeting within seconds; the user is never blocked from navigating, just doesn't have a transient button for it.
 
 ## Migration Plan
 
-No data migration, no API changes, no DB schema changes. Deploy is four code edits across `main.rs`, `lib.rs`, a new Windows AUMID helper, and `useRecordingStop.ts`. Rollback is `git revert` of the change's commits; no cleanup required (the B2 registry values are benign if left in place after rollback, and are already the documented dev-toast recipe).
+No data migration, no API changes, no DB schema changes. Deploy is three code edits across `main.rs`, a new Windows AUMID helper, and `useRecordingStop.ts`. Rollback is `git revert` of the change's commits; no cleanup required (the B2 registry values are benign if left in place after rollback, and are already the documented dev-toast recipe).
 
 ## Open Questions
 

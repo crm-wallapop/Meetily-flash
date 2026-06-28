@@ -1,20 +1,5 @@
 ## ADDED Requirements
 
-### Requirement: Recording-started notification fires exactly once per recording
-
-The system SHALL emit the `recording_started` system notification at most once per recording session, and only from the actual recording-start code path. Detection-time signals (meeting detected, auto-record armed) SHALL NOT emit `recording_started`; the real recording-start notification that fires when capture begins is the single source of truth.
-
-#### Scenario: Auto-detected meeting does not produce a duplicate start toast
-- **GIVEN** auto-detect is enabled AND a meeting is detected
-- **WHEN** the detector fires `emit_detected` AND recording subsequently starts approximately one second later
-- **THEN** exactly ONE `recording_started` notification is shown (from the start path)
-- **AND** no `recording_started` notification is shown at detection time
-
-#### Scenario: Manual start produces exactly one start toast
-- **GIVEN** the user manually starts a recording
-- **WHEN** the start path completes
-- **THEN** exactly ONE `recording_started` notification is shown
-
 ### Requirement: Dev-build AUMID branding is populated at startup
 
 On Windows, when running an uninstalled dev build (`tauri dev`), the app SHALL ensure the AUMID registry key (`HKCU\Software\Classes\AppUserModelId\<identifier>`) has both `DisplayName` and `IconUri` values populated before any system toast is shown. The write SHALL be idempotent (a no-op when both values are already present) and non-fatal (registry failures are logged as warnings and do not block startup).
