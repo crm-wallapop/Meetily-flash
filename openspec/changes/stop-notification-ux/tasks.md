@@ -7,10 +7,10 @@
 
 ## 2. B2 — Dev-build AUMID branding at startup
 
-- [ ] 2.1 Extract a pure helper `fn ensure_aumid_branded(identifier: &str, current: AumidState) -> BrandingAction` that decides write/no-op from the current registry state (no I/O). Unit-test in isolation.
-- [ ] 2.2 Write failing Rust tests for the helper (adversarial categories: idempotency, permission-denied non-fatal, first-launch both-values-missing): (a) both missing → `Write { display_name, icon_uri }`; (b) both present → `NoOp`; (c) the caller treats a registry-write error as non-fatal (warn-log + continue).
-- [ ] 2.3 Make the tests pass by implementing the helper plus a thin Windows adapter that reads `HKCU\Software\Classes\AppUserModelId\<id>` and applies the action. The adapter is `#[cfg(target_os = "windows")]` and lives under an adapter module (not `domain/`).
-- [ ] 2.4 Wire the adapter into app startup (`lib.rs` setup or a startup hook), running before any toast may be shown. Confirm the existing canonical `notifications` scenarios (consent gate, click-to-foreground) still pass.
+- [x] 2.1 Extract a pure helper `fn ensure_aumid_branded(identifier: &str, current: AumidState) -> BrandingAction` that decides write/no-op from the current registry state (no I/O). Unit-test in isolation.
+- [x] 2.2 Write failing Rust tests for the helper (adversarial categories: idempotency, permission-denied non-fatal, first-launch both-values-missing): (a) both missing → `Write { display_name, icon_uri }`; (b) both present → `NoOp`; (c) the caller treats a registry-write error as non-fatal (warn-log + continue).
+- [x] 2.3 Make the tests pass by implementing the helper plus a thin Windows adapter that reads `HKCU\Software\Classes\AppUserModelId\<id>` and applies the action. The adapter is `#[cfg(target_os = "windows")]` and lives under an adapter module (not `domain/`).
+- [x] 2.4 Wire the adapter into app startup (`lib.rs` setup or a startup hook), running before any toast may be shown. Confirm the existing canonical `notifications` scenarios (consent gate, click-to-foreground) still pass.
 - [ ] 2.5 Run `cargo test`; manually verify a `tauri dev` toast now displays (per the memory `project_dev_toast_aumid.md` recipe — `DisplayName` = "Meetily", `IconUri` = `file:///` URI to a bundled `.ico`).
 
 ## 3. B3 — Make the dev `meetily://` reactivation windowless (depends on §1)

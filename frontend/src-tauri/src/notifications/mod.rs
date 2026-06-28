@@ -4,6 +4,7 @@ pub mod system;
 pub mod settings;
 pub mod commands;
 pub mod manager;
+pub mod aumid;
 
 // Re-export main types for easy access
 pub use types::{

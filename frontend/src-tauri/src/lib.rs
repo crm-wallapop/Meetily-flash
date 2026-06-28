@@ -633,6 +633,14 @@ pub fn run() {
         .setup(|_app| {
             log::info!("Application setup complete");
 
+            // Brand the AUMID registry key at startup so dev-build OS toasts are not
+            // silently dropped (B2). Must precede any toast; non-fatal on registry error.
+            #[cfg(target_os = "windows")]
+            {
+                let identifier = _app.config().identifier.clone();
+                crate::notifications::aumid::brand_aumid_at_startup(&identifier);
+            }
+
             // Register the meetily:// scheme with the OS so toast action buttons can
             // re-activate the running instance. Idempotent; a registry write failure is
             // non-fatal (toasts still render, just without working buttons). Cold-start
