@@ -30,10 +30,10 @@
 
 - [x] 5.1 Add `frontend/e2e/smoke/stop-notification-ux.spec.ts` covering the C3 wiring: emit a `recording-saved` flow with a known `meeting_id` and assert the "View Meeting" action appears and navigates; emit a flow with no `meeting_id` and assert no dead action renders. Use the event-bus mock seam (per memory `feedback_smoke_carveout.md`) — do not carve out as non-assertable without checking the wiring first.
 - [x] 5.2 Run `pnpm test:smoke` (kill any stale `pnpm dev` on :3118 first, per the local smoke gotcha). Confirm green.
-- [ ] 5.3 Run the full pre-merge gate in parallel: `cargo test`, `pytest backend/`, `pnpm test`, `pnpm lint`, `pnpm test:smoke`. All must be green before `/opsx:archive`.
+- [x] 5.3 Run the full pre-merge gate in parallel: `cargo test`, `pytest backend/`, `pnpm test`, `pnpm lint`, `pnpm test:smoke`. All must be green before `/opsx:archive`.
 
 ## 6. Archive readiness
 
-- [ ] 6.1 Re-read `specs/notifications/spec.md`, `specs/recording-lifecycle/spec.md`, and `design.md`. Amend any delta whose implementation evolved during apply before archiving (per CLAUDE.md §3 gate).
-- [ ] 6.2 Confirm branch is `fix/stop-notification-ux`, all commits reference the change name, and the pre-push hook passes (`SKIP_SMOKE=1` only if §5 is genuinely blocked — it should not be).
+- [x] 6.1 Re-read `specs/notifications/spec.md`, `specs/recording-lifecycle/spec.md`, and `design.md`. Amend any delta whose implementation evolved during apply before archiving (per CLAUDE.md §3 gate).
+- [x] 6.2 Confirm branch is `fix/stop-notification-ux`, all commits reference the change name, and the pre-push hook passes (`SKIP_SMOKE=1` only if §5 is genuinely blocked — it should not be).
 - [ ] 6.3 `/opsx:archive stop-notification-ux` after the §5.3 gate is green. Do NOT push or open a PR without explicit user authorization.
