@@ -470,4 +470,206 @@ mod tests {
         assert!(!injection.trim().is_empty());
         // The key protection is using .bind() not string formatting
     }
+
+    // --- Per-turn override repository guarantees (Task 4.1–4.3) ---
+    // These exercise the actual SQL, not the sanitizer: design D7 credits sqlx
+    // parameter binding as the injection defense, so the tests must prove binding
+    // holds even when sanitize_speaker_name passes a hostile string through.
+
+    async fn speaker_test_pool() -> SqlitePool {
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE transcripts (
+                id TEXT PRIMARY KEY,
+                meeting_id TEXT NOT NULL,
+                transcript TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                audio_start_time REAL NOT NULL,
+                audio_end_time REAL NOT NULL,
+                duration REAL NOT NULL,
+                speaker_label TEXT,
+                speaker_source TEXT,
+                previous_label TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    // 4.1 — a SQL-injection name is bound as a parameter value, never executed.
+    #[tokio::test]
+    async fn manual_override_binds_sql_injection_as_literal_value() {
+        let pool = speaker_test_pool().await;
+        let transcript_id = format!("inj-{}", uuid::Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker_label, speaker_source)
+             VALUES (?, 'm', 't', '00:00', 0.0, 1.0, 1.0, 'Speaker 0', 'auto')",
+        )
+        .bind(&transcript_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let injection = "'; DROP TABLE transcripts; --";
+        let updated = SpeakerRepository::update_transcript_speaker_manual(
+            &pool,
+            &transcript_id,
+            injection,
+        )
+        .await
+        .unwrap();
+        assert!(updated, "the row should be updated");
+
+        // The table still exists and the hostile string is stored verbatim —
+        // proof that the ? placeholder bound it as data, not SQL.
+        let row: (String,) =
+            sqlx::query_as("SELECT speaker_label FROM transcripts WHERE id = ?")
+                .bind(&transcript_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            row.0, injection,
+            "injection string must be stored verbatim, not executed"
+        );
+    }
+
+    // 4.2 — an unknown transcript_id is a no-op, not an error.
+    #[tokio::test]
+    async fn manual_override_nonexistent_transcript_id_is_no_op() {
+        let pool = speaker_test_pool().await;
+        let updated = SpeakerRepository::update_transcript_speaker_manual(
+            &pool,
+            "does-not-exist",
+            "Alice",
+        )
+        .await
+        .unwrap();
+        assert!(
+            !updated,
+            "non-existent id must report 0 rows affected, not error"
+        );
+    }
+
+    // 4.3 — a manual override on a row that was never labeled (speaker_label was
+    // NULL) leaves previous_label NULL, so revert_speaker_label cannot undo it.
+    // Documents the known limitation (design D3); fixing it needs previous_label
+    // surfaced to the UI to gate the undo affordance.
+    #[tokio::test]
+    async fn manual_override_on_never_labeled_row_is_not_revertible() {
+        let pool = speaker_test_pool().await;
+        let transcript_id = format!("never-{}", uuid::Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker_label, speaker_source)
+             VALUES (?, 'm', 't', '00:00', 0.0, 1.0, 1.0, NULL, NULL)",
+        )
+        .bind(&transcript_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let updated = SpeakerRepository::update_transcript_speaker_manual(
+            &pool,
+            &transcript_id,
+            "Alice",
+        )
+        .await
+        .unwrap();
+        assert!(updated);
+
+        // The CASE set previous_label to the OLD speaker_label, which was NULL.
+        let prev: (Option<String>,) =
+            sqlx::query_as("SELECT previous_label FROM transcripts WHERE id = ?")
+                .bind(&transcript_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            prev.0.is_none(),
+            "previous_label stays NULL when the row was never labeled"
+        );
+
+        // revert_speaker_label only touches rows with previous_label IS NOT NULL.
+        let reverted = SpeakerRepository::revert_speaker_label(&pool, "m", "Alice")
+            .await
+            .unwrap();
+        assert_eq!(
+            reverted, 0,
+            "revert cannot reach a never-labeled row's override"
+        );
+
+        let label: (String,) =
+            sqlx::query_as("SELECT speaker_label FROM transcripts WHERE id = ?")
+                .bind(&transcript_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            label.0, "Alice",
+            "the manual label is stuck — the documented limitation"
+        );
+    }
+
+    // 4.5 — set-once CASE invariant on the previously-labeled path (4.3 can't
+    // reach it): a second override must take the ELSE branch so revert restores
+    // the ORIGINAL cluster label, not an intermediate manual name.
+    #[tokio::test]
+    async fn manual_override_sets_previous_label_exactly_once_on_previously_labeled_row() {
+        let pool = speaker_test_pool().await;
+        let transcript_id = format!("once-{}", uuid::Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker_label, speaker_source)
+             VALUES (?, 'm', 't', '00:00', 0.0, 1.0, 1.0, 'Speaker 2', 'auto')",
+        )
+        .bind(&transcript_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let updated = SpeakerRepository::update_transcript_speaker_manual(
+            &pool,
+            &transcript_id,
+            "Carlos",
+        )
+        .await
+        .unwrap();
+        assert!(updated);
+
+        let (prev1, label1): (Option<String>, String) =
+            sqlx::query_as("SELECT previous_label, speaker_label FROM transcripts WHERE id = ?")
+                .bind(&transcript_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            prev1.as_deref(),
+            Some("Speaker 2"),
+            "first override captures the original cluster label"
+        );
+        assert_eq!(label1, "Carlos");
+
+        let updated2 = SpeakerRepository::update_transcript_speaker_manual(
+            &pool,
+            &transcript_id,
+            "Bob",
+        )
+        .await
+        .unwrap();
+        assert!(updated2);
+
+        let (prev2, label2): (Option<String>, String) =
+            sqlx::query_as("SELECT previous_label, speaker_label FROM transcripts WHERE id = ?")
+                .bind(&transcript_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            prev2.as_deref(),
+            Some("Speaker 2"),
+            "second override must NOT overwrite the captured original label"
+        );
+        assert_eq!(label2, "Bob");
+    }
 }

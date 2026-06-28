@@ -97,7 +97,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     showConfidence: boolean;
     isEditingSpeaker?: boolean;
     onSpeakerClick?: () => void;
-    onSpeakerSubmit?: (name: string) => void;
+    onSpeakerSubmit?: (name: string, scope: 'cluster' | 'segment') => void;
     onSpeakerCancel?: () => void;
     knownSpeakers?: string[];
     canRevertSpeaker?: boolean;
@@ -128,6 +128,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
                                     onSubmit={onSpeakerSubmit!}
                                     onCancel={onSpeakerCancel!}
                                     suggestions={knownSpeakers}
+                                    clusterLabel={speaker ?? 'Unknown'}
                                 />
                             ) : (
                                 <SpeakerBadge
@@ -361,7 +362,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         showConfidence={showConfidence}
                                         isEditingSpeaker={editingSegmentId === segment.id}
                                         onSpeakerClick={segment.speaker ? () => setEditingSegmentId(segment.id) : undefined}
-                                        onSpeakerSubmit={(name) => segment.speaker && handleSpeakerSubmit(segment.speaker, name)}
+                                        onSpeakerSubmit={(name, scope) => segment.speaker && handleSpeakerSubmit(segment.id, segment.speaker, name, scope)}
                                         onSpeakerCancel={() => setEditingSegmentId(null)}
                                         knownSpeakers={knownSpeakers}
                                         canRevertSpeaker={!!segment.speaker && !segment.speaker.startsWith("Speaker ") && !segment.speaker.startsWith("Unknown")}
@@ -426,7 +427,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         showConfidence={showConfidence}
                                         isEditingSpeaker={editingSegmentId === segment.id}
                                         onSpeakerClick={segment.speaker ? () => setEditingSegmentId(segment.id) : undefined}
-                                        onSpeakerSubmit={(name) => segment.speaker && handleSpeakerSubmit(segment.speaker, name)}
+                                        onSpeakerSubmit={(name, scope) => segment.speaker && handleSpeakerSubmit(segment.id, segment.speaker, name, scope)}
                                         onSpeakerCancel={() => setEditingSegmentId(null)}
                                         knownSpeakers={knownSpeakers}
                                         canRevertSpeaker={!!segment.speaker && !segment.speaker.startsWith("Speaker ") && !segment.speaker.startsWith("Unknown")}

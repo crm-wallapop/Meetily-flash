@@ -120,7 +120,10 @@ export const SMOKE_MEETING_DETAILS_INIT_SCRIPT = `
     window.__smokeSpeakerCalls.push({ cmd: 'reset_speaker_labels', meetingId: args.meetingId });
     return window.__smokeRediarizeResult.segments_labeled;
   });
-  d.register('set_segment_speaker', function () { return true; });
+  d.register('set_segment_speaker', function (args) {
+    window.__smokeSpeakerCalls.push({ cmd: 'set_segment_speaker', transcriptId: args.transcriptId, speakerLabel: args.speakerLabel });
+    return true;
+  });
   d.register('remove_speaker_cmd', function () { return true; });
 
   // Retranscription (Enhance) wiring. start_retranscription_command is what the

@@ -1,7 +1,7 @@
 'use client';
 
 import { Transcript } from '@/types';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ConfidenceIndicator } from './ConfidenceIndicator';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { RecordingStatusBar } from './RecordingStatusBar';
@@ -119,6 +119,17 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
   onSpeakersChanged,
 }) => {
   const { editingSegmentId, setEditingSegmentId, knownSpeakers, handleSpeakerSubmit, handleSpeakerRevert } = useSpeakerRename(meetingId, onSpeakersChanged);
+  // Named labels (e.g. "Alice") make parseInt("Speaker ".replace...) yield NaN; color by first-appearance order instead, matching VirtualizedTranscriptView.
+  const speakerIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    let idx = 0;
+    for (const t of transcripts) {
+      if (t.speaker && !map.has(t.speaker)) {
+        map.set(t.speaker, idx++);
+      }
+    }
+    return map;
+  }, [transcripts]);
   const [speechDetected, setSpeechDetected] = useState(false);
 
   // Debug: Log the props to understand what's happening
@@ -323,14 +334,15 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
                   <div className="mb-1">
                     {editingSegmentId === transcript.id ? (
                       <SpeakerLabelInput
-                        onSubmit={(name) => handleSpeakerSubmit(transcript.speaker!, name)}
+                        onSubmit={(name, scope) => handleSpeakerSubmit(transcript.id, transcript.speaker!, name, scope)}
                         onCancel={() => setEditingSegmentId(null)}
                         suggestions={knownSpeakers}
+                        clusterLabel={transcript.speaker ?? 'Unknown'}
                       />
                     ) : (
                       <SpeakerBadge
                         name={transcript.speaker}
-                        colorIndex={parseInt(transcript.speaker?.replace("Speaker ", "") || "0", 10)}
+                        colorIndex={speakerIndexMap.get(transcript.speaker) ?? 0}
                         onClick={() => setEditingSegmentId(transcript.id)}
                         canRevert={!!transcript.speaker && !transcript.speaker.startsWith("Speaker ") && !transcript.speaker.startsWith("Unknown")}
                         onRevert={() => handleSpeakerRevert(transcript.speaker!)}

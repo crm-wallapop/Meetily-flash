@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { labelSpeaker, listSpeakers, revertSpeakerLabel } from "@/services/speakerService";
+import { labelSpeaker, listSpeakers, revertSpeakerLabel, setSegmentSpeaker } from "@/services/speakerService";
 
 export function useSpeakerRename(
     meetingId: string | undefined,
@@ -14,10 +14,19 @@ export function useSpeakerRename(
         }).catch(() => {});
     }, []);
 
-    const handleSpeakerSubmit = useCallback(async (clusterLabel: string, name: string) => {
+    const handleSpeakerSubmit = useCallback(async (
+        transcriptId: string,
+        clusterLabel: string,
+        name: string,
+        scope: 'cluster' | 'segment',
+    ) => {
         if (!meetingId) return;
         try {
-            await labelSpeaker(meetingId, clusterLabel, name);
+            if (scope === 'segment') {
+                await setSegmentSpeaker(transcriptId, name);
+            } else {
+                await labelSpeaker(meetingId, clusterLabel, name);
+            }
             setEditingSegmentId(null);
             await onSpeakersChanged?.();
         } catch (err) {

@@ -88,34 +88,46 @@ export function SpeakerBadge({
 }
 
 interface SpeakerLabelInputProps {
-  onSubmit: (name: string) => void;
+  onSubmit: (name: string, scope: 'cluster' | 'segment') => void;
   onCancel: () => void;
   suggestions?: string[];
+  clusterLabel: string;
 }
 
 export function SpeakerLabelInput({
   onSubmit,
   onCancel,
   suggestions = [],
+  clusterLabel,
 }: SpeakerLabelInputProps) {
   const [value, setValue] = React.useState("");
+  const [scope, setScope] = React.useState<'cluster' | 'segment'>('cluster');
+  const containerRef = React.useRef<HTMLDivElement>(null);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter" && value.trim()) {
-      onSubmit(value.trim());
+      onSubmit(value.trim(), scope);
     } else if (e.key === "Escape") {
       onCancel();
     }
   };
 
+  // onCancel when focus leaves the whole popover — not when it moves to the
+  // scope checkbox or a suggestion chip inside it. The handler is on the
+  // container (not the input) so it re-fires on checkbox→outside; the checkbox
+  // is in the Tab sequence so keyboard users can toggle scope before submit.
+  const handleBlur = (e: React.FocusEvent<HTMLDivElement>) => {
+    if (containerRef.current?.contains(e.relatedTarget as Node | null)) return;
+    onCancel();
+  };
+
   return (
-    <div className="inline-flex flex-col gap-1">
+    <div className="inline-flex flex-col gap-1" ref={containerRef} onBlur={handleBlur}>
       <input
         type="text"
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={handleKeyDown}
-        onBlur={onCancel}
         placeholder="Enter speaker name..."
         className="px-2 py-0.5 text-xs border rounded w-40"
         autoFocus
@@ -124,6 +136,14 @@ export function SpeakerLabelInput({
       {value.trim() === "" && (
         <span className="text-xs text-gray-400">Name required</span>
       )}
+      <label className="flex items-center gap-1 text-xs text-gray-600 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={scope === 'cluster'}
+          onChange={(e) => setScope(e.target.checked ? 'cluster' : 'segment')}
+        />
+        Also rename all '{clusterLabel}' segments
+      </label>
       {suggestions.length > 0 && (
         <div className="flex flex-wrap gap-1 mt-1">
           {suggestions
@@ -137,8 +157,8 @@ export function SpeakerLabelInput({
                 type="button"
                 className="text-xs px-1.5 py-0.5 rounded bg-gray-100 hover:bg-gray-200"
                 onMouseDown={(e) => e.preventDefault()}
-                // Keep focus on the input so onBlur cancel doesn't unmount the chip before its click fires.
-                onClick={() => onSubmit(s)}
+                // Keep focus on the input so the blur handler doesn't cancel before the chip click submits.
+                onClick={() => onSubmit(s, scope)}
               >
                 {s}
               </button>

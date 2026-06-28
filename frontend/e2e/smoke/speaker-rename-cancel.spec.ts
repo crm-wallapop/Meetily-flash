@@ -31,11 +31,14 @@ test.describe('speaker-rename-cancel smoke', () => {
     await page.getByText('Key Decisions').click();
     await expect(input).toBeHidden({ timeout: 5_000 });
 
-    // Tab also cancels (same blur mechanism; design D5 documented trade-off).
+    // Tab moves focus to the scope checkbox (inside the container, so the input
+    // stays open); a second Tab leaves the container and the blur cancels.
     await badge.click();
     const inputTab = page.getByPlaceholder('Enter speaker name...');
     await expect(inputTab).toBeVisible({ timeout: 5_000 });
     await inputTab.press('Tab');
+    await expect(inputTab).toBeVisible({ timeout: 5_000 });
+    await page.getByRole('checkbox', { name: /Also rename all/ }).press('Tab');
     await expect(inputTab).toBeHidden({ timeout: 5_000 });
 
     const calls = await speakerCalls(page);
