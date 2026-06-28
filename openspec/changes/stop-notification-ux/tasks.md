@@ -1,9 +1,9 @@
 ## 1. B3 Spike — GUI-subsystem log inheritance (gates §3)
 
-- [ ] 1.1 On a `fix/stop-notification-ux` branch, temporarily drop the `not(debug_assertions)` conjunct in `frontend/src-tauri/src/main.rs:1-4` so `windows_subsystem = "windows"` applies in debug too.
-- [ ] 1.2 Run `tauri dev` with `RUST_LOG=debug` and confirm (a) Rust logs still stream into the launching terminal via inherited stdio, and (b) no fresh console window is allocated for the primary dev process. Record the outcome in `design.md` Open Questions.
-- [ ] 1.3 Trigger a `meetily://` activation while the dev app is running (via the `__dev_inject_deep_link` seam at `lib.rs:256`, or by clicking a notification action button) and confirm no console window flashes for the single-instance secondary.
-- [ ] 1.4 If inherited stdio does NOT carry logs, spike the fallback (`AttachConsole(ATTACH_PARENT_PROCESS)` early in `main()`) and confirm it restores the dev terminal log experience without re-introducing the secondary console flash. Record the chosen path in `design.md` Decisions before §3.
+- [x] 1.1 On a `fix/stop-notification-ux` branch, temporarily drop the `not(debug_assertions)` conjunct in `frontend/src-tauri/src/main.rs:1-4` so `windows_subsystem = "windows"` applies in debug too.
+- [x] 1.2 Run `tauri dev` with `RUST_LOG=debug` and confirm (a) Rust logs still stream into the launching terminal via inherited stdio, and (b) no fresh console window is allocated for the primary dev process. Record the outcome in `design.md` Open Questions.
+- [x] 1.3 Trigger a `meetily://` activation while the dev app is running (via the `__dev_inject_deep_link` seam at `lib.rs:256`, or by clicking a notification action button) and confirm no console window flashes for the single-instance secondary.
+- [x] 1.4 If inherited stdio does NOT carry logs, spike the fallback (`AttachConsole(ATTACH_PARENT_PROCESS)` early in `main()`) and confirm it restores the dev terminal log experience without re-introducing the secondary console flash. Record the chosen path in `design.md` Decisions before §3.
 
 ## 2. B2 — Dev-build AUMID branding at startup
 
@@ -11,13 +11,13 @@
 - [x] 2.2 Write failing Rust tests for the helper (adversarial categories: idempotency, permission-denied non-fatal, first-launch both-values-missing): (a) both missing → `Write { display_name, icon_uri }`; (b) both present → `NoOp`; (c) the caller treats a registry-write error as non-fatal (warn-log + continue).
 - [x] 2.3 Make the tests pass by implementing the helper plus a thin Windows adapter that reads `HKCU\Software\Classes\AppUserModelId\<id>` and applies the action. The adapter is `#[cfg(target_os = "windows")]` and lives under an adapter module (not `domain/`).
 - [x] 2.4 Wire the adapter into app startup (`lib.rs` setup or a startup hook), running before any toast may be shown. Confirm the existing canonical `notifications` scenarios (consent gate, click-to-foreground) still pass.
-- [ ] 2.5 Run `cargo test`; manually verify a `tauri dev` toast now displays (per the memory `project_dev_toast_aumid.md` recipe — `DisplayName` = "Meetily", `IconUri` = `file:///` URI to a bundled `.ico`).
+- [x] 2.5 Run `cargo test`; manually verify a `tauri dev` toast now displays (per the memory `project_dev_toast_aumid.md` recipe — `DisplayName` = "Meetily", `IconUri` = `file:///` URI to a bundled `.ico`).
 
 ## 3. B3 — Make the dev `meetily://` reactivation windowless (depends on §1)
 
-- [ ] 3.1 Apply the §1 spike outcome: drop the `not(debug_assertions)` guard in `frontend/src-tauri/src/main.rs:1-4` (preferred), OR add the `AttachConsole(ATTACH_PARENT_PROCESS)` fallback, per the recorded decision.
-- [ ] 3.2 Add a Rust doc/test note (or `#[cfg]` assertion) codifying that the binary is GUI-subsystem in both debug and release, so a future edit that re-introduces `not(debug_assertions)` is caught in review.
-- [ ] 3.3 Re-run the §1.3 activation check on the final build; confirm no console flash in dev and no regression in release.
+- [x] 3.1 Apply the §1 spike outcome: drop the `not(debug_assertions)` guard in `frontend/src-tauri/src/main.rs:1-4` (preferred), OR add the `AttachConsole(ATTACH_PARENT_PROCESS)` fallback, per the recorded decision.
+- [x] 3.2 Add a Rust doc/test note (or `#[cfg]` assertion) codifying that the binary is GUI-subsystem in both debug and release, so a future edit that re-introduces `not(debug_assertions)` is caught in review.
+- [x] 3.3 Re-run the §1.3 activation check on the final build; confirm no console flash in dev and no regression in release.
 
 ## 4. C3 — Conditional "View Meeting" action in the stop-completion toast
 
