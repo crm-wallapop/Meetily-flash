@@ -36,4 +36,4 @@
 
 - [x] 6.1 Re-read `specs/notifications/spec.md`, `specs/recording-lifecycle/spec.md`, and `design.md`. Amend any delta whose implementation evolved during apply before archiving (per CLAUDE.md §3 gate).
 - [x] 6.2 Confirm branch is `fix/stop-notification-ux`, all commits reference the change name, and the pre-push hook passes (`SKIP_SMOKE=1` only if §5 is genuinely blocked — it should not be).
-- [ ] 6.3 `/opsx:archive stop-notification-ux` after the §5.3 gate is green. Do NOT push or open a PR without explicit user authorization.
+- [x] 6.3 `/opsx:archive stop-notification-ux` after the §5.3 gate is green. Do NOT push or open a PR without explicit user authorization.
