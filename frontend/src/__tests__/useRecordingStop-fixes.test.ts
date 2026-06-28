@@ -8,10 +8,12 @@
  * 3. setIsRecordingDisabled coverage: every exit path still calls it after
  *    removing the redundant call.
  *
- * These mirror the inline logic in useRecordingStop.ts. Pure contracts,
- * no Tauri/React mocks needed.
+ * Sections 1-4 mirror the inline logic (pure contracts, no Tauri/React mocks).
+ * Section 5 (C3) imports the REAL exported helper per the extract-pure-helper
+ * convention — no hand-mirror.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { viewMeetingAction } from '@/hooks/useRecordingStop';
 
 // ── 1. Stale event guard ────────────────────────────────────────────────
 
@@ -197,5 +199,64 @@ describe('handleRecordingStop dependency array has no ghost deps', () => {
 
   it('all expected dependencies are present', () => {
     expect(DEPENDENCY_ARRAY).toHaveLength(8);
+  });
+});
+
+// ── 5. C3: conditional "View Meeting" toast action ──────────────────────
+//
+// The stop-completion toast must NOT render a "View Meeting" button whose
+// handler silently no-ops when meetingId is unknown. viewMeetingAction returns
+// undefined for falsy ids so sonner omits the action entirely.
+
+describe('viewMeetingAction — conditional toast action (C3)', () => {
+  const baseDeps = {
+    navigate: () => {},
+    clearTranscripts: () => {},
+    trackClick: () => {},
+  };
+
+  it('returns undefined when meetingId is null', () => {
+    expect(viewMeetingAction(null, baseDeps)).toBeUndefined();
+  });
+
+  it('returns undefined when meetingId is undefined', () => {
+    expect(viewMeetingAction(undefined, baseDeps)).toBeUndefined();
+  });
+
+  it('returns undefined when meetingId is empty string', () => {
+    expect(viewMeetingAction('', baseDeps)).toBeUndefined();
+  });
+
+  it('returns an action labelled "View Meeting" for a valid id', () => {
+    const action = viewMeetingAction('meeting-123', baseDeps);
+    expect(action).toBeDefined();
+    expect(action?.label).toBe('View Meeting');
+  });
+
+  it('onClick navigates with the meeting id', () => {
+    const navigate = vi.fn();
+    const action = viewMeetingAction('meeting-456', { ...baseDeps, navigate });
+    action?.onClick();
+    expect(navigate).toHaveBeenCalledWith('meeting-456');
+  });
+
+  it('onClick clears transcripts and tracks the click', () => {
+    const clearTranscripts = vi.fn();
+    const trackClick = vi.fn();
+    const action = viewMeetingAction('meeting-789', { ...baseDeps, clearTranscripts, trackClick });
+    action?.onClick();
+    expect(clearTranscripts).toHaveBeenCalledTimes(1);
+    expect(trackClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('never invokes any dep when meetingId is falsy (no onClick exists to fire)', () => {
+    const navigate = vi.fn();
+    const clearTranscripts = vi.fn();
+    const trackClick = vi.fn();
+    const action = viewMeetingAction(null, { navigate, clearTranscripts, trackClick });
+    expect(action).toBeUndefined();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(clearTranscripts).not.toHaveBeenCalled();
+    expect(trackClick).not.toHaveBeenCalled();
   });
 });

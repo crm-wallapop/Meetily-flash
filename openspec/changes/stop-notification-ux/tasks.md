@@ -21,10 +21,10 @@
 
 ## 4. C3 — Conditional "View Meeting" action in the stop-completion toast
 
-- [ ] 4.1 Extract a pure helper `viewMeetingAction(meetingId: string | null): ToastAction | undefined` (returns the action object when `meetingId` is truthy, `undefined` otherwise). Per memory `feedback_hook_testing_extract_pure_helpers.md`, test the pure helper in Vitest without `renderHook` (no `@testing-library/react`).
-- [ ] 4.2 Write failing Vitest tests (adversarial categories: null, undefined, empty-string, valid-id) asserting: `null`/`undefined`/`''` → `undefined`; valid id → action with `label: 'View Meeting'` and an `onClick` that calls `router.push` with the id.
-- [ ] 4.3 Make the tests pass by implementing the helper, then wire `useRecordingStop.ts:167-182` to use it: `action: viewMeetingAction(meetingId)`.
-- [ ] 4.4 Remove the now-redundant `if (meetingId)` guard inside the `onClick` (the helper guarantees truthiness). Run `pnpm test` and `pnpm lint`.
+- [x] 4.1 Extract a pure helper `viewMeetingAction(meetingId: string | null): ToastAction | undefined` (returns the action object when `meetingId` is truthy, `undefined` otherwise). Per memory `feedback_hook_testing_extract_pure_helpers.md`, test the pure helper in Vitest without `renderHook` (no `@testing-library/react`).
+- [x] 4.2 Write failing Vitest tests (adversarial categories: null, undefined, empty-string, valid-id) asserting: `null`/`undefined`/`''` → `undefined`; valid id → action with `label: 'View Meeting'` and an `onClick` that calls `router.push` with the id.
+- [x] 4.3 Make the tests pass by implementing the helper, then wire `useRecordingStop.ts:167-182` to use it: `action: viewMeetingAction(meetingId)`.
+- [x] 4.4 Remove the now-redundant `if (meetingId)` guard inside the `onClick` (the helper guarantees truthiness). Run `pnpm test` and `pnpm lint`.
 
 ## 5. Smoke spec (UI-affecting deliverable per CLAUDE.md §3)
 

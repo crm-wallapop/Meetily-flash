@@ -8,6 +8,33 @@ import { recordingService, type StopRecordingResult } from '@/services/recording
 import { enqueueTranscriptionJob } from '@/services/queueService';
 import Analytics from '@/lib/analytics';
 
+// Guards against the dead-button case where meetingId is null at stop time (C3):
+// the toast omits the action entirely rather than rendering a clickable no-op.
+export interface ViewMeetingActionDeps {
+  navigate: (meetingId: string) => void;
+  clearTranscripts: () => void;
+  trackClick: () => void;
+}
+
+export type MeetingToastAction = { label: string; onClick: () => void };
+
+export function viewMeetingAction(
+  meetingId: string | null | undefined,
+  deps: ViewMeetingActionDeps,
+): MeetingToastAction | undefined {
+  if (!meetingId) {
+    return undefined;
+  }
+  return {
+    label: 'View Meeting',
+    onClick: () => {
+      deps.navigate(meetingId);
+      deps.clearTranscripts();
+      deps.trackClick();
+    },
+  };
+}
+
 type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
 
 interface UseRecordingStopReturn {
@@ -168,16 +195,11 @@ export function useRecordingStop(
           description: transcriptsRef.current.length > 0
             ? `${transcriptsRef.current.length} transcript segments.`
             : 'Transcription queued — processing in background.',
-          action: {
-            label: 'View Meeting',
-            onClick: () => {
-              if (meetingId) {
-                router.push(`/meeting-details?id=${meetingId}`);
-                clearTranscripts();
-                Analytics.trackButtonClick('view_meeting_from_toast', 'recording_complete');
-              }
-            }
-          },
+          action: viewMeetingAction(meetingId, {
+            navigate: (id) => router.push(`/meeting-details?id=${id}`),
+            clearTranscripts,
+            trackClick: () => Analytics.trackButtonClick('view_meeting_from_toast', 'recording_complete'),
+          }),
           duration: 10000,
         });
 
