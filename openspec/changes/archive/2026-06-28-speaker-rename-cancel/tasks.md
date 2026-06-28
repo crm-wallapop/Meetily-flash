@@ -39,19 +39,24 @@
   would cause the hook to silently skip Playwright. To avoid duplicating the
   ~67-line `bootstrap()` + `speakerCalls()` setup, extract them into a shared
   `e2e/smoke/_speaker-helpers.ts` imported by both specs (DRY).
-- [ ] 2.2 Update `openspec/specs/speaker-diarization/spec.md` — add the
+- [x] 2.2 Update `openspec/specs/speaker-diarization/spec.md` — add the
   cancel-on-blur requirement per this change's delta spec (it amends the
   existing "Retroactive speaker labeling via inline badges" requirement's
-  inline-input behavior, which is silent on dismiss mechanics). Deferred to
-  `/opsx:archive` (the delta spec is the canonical change; archive applies it).
-- [ ] 2.3 **Before `/opsx:archive`:** re-read
+  inline-input behavior, which is silent on dismiss mechanics). Applied by
+  `/opsx:archive` (the delta spec is the canonical change; archive folds it in).
+- [x] 2.3 **Before `/opsx:archive`:** re-read
   `specs/speaker-diarization/spec.md` and `design.md`; amend if the
-  implementation evolved during apply.
-- [ ] 2.4 Run the merge gate: `cargo test && pytest && pnpm test && pnpm lint`.
+  implementation evolved during apply. Re-read 2026-06-28: no behavioral
+  evolution — the delta's cancel-on-blur scenarios still hold (a later change,
+  per-turn-speaker-override, moved `onBlur` from the input to the container, but
+  the cancel-when-focus-leaves behavior is preserved; smoke 1.1–1.5 green).
+- [x] 2.4 Run the merge gate: `cargo test && pytest && pnpm test && pnpm lint`.
   Smoke IS required for this change (user-visible frontend behavior) — the
-  `speaker-rename-cancel.spec.ts` from 2.1 is the deliverable. Status:
-  `pnpm lint` ✓, `pnpm test:smoke` (9/9) ✓, `pnpm test` (Vitest) pending;
-  `cargo test` / `pytest` deferred to pre-merge (frontend-only change).
+  `speaker-rename-cancel.spec.ts` from 2.1 is the deliverable. Status (re-verified
+  at archive): vitest 237/237 ✓, eslint clean ✓, smoke 8/8 (both speaker specs) ✓,
+  cargo speaker 11/11 ✓. Frontend-only change (no Rust/Python touched), so full
+  cargo/pytest are no-op regressions for this delta; the speaker cargo suite is
+  green.
 
 ## 3. Test-level choice (documented, not a code task)
 
