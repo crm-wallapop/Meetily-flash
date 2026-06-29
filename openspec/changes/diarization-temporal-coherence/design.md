@@ -114,6 +114,25 @@ guards (`commands.rs` cosine helper) apply unchanged.
 
 ### D2 — Neighborhood-voted re-assignment (formula corrected)
 
+> **AMENDMENT (2026-06-29 apply):** the original D2 was internally contradictory
+> (the formula summed over `j ≠ i` but the prose said "the chunk's own embedding
+> still contributes via the j=i term with full weight"). Both literal readings
+> are wrong: **j ≠ i only** (exclude self) recovers absorption but ERASES genuine
+> short interjections between two different speakers — the surrounding speakers
+> outvote the interjection's excluded voice, reintroducing the user's "merged
+> turns" complaint. **Full self** (j=i at weight 1.0) preserves interjections but,
+> when a contamination seed's embedding is genuinely tilted toward the contaminant
+> centroid, the full self-vote anchors the wrong label and blocks recovery.
+> Resolution, confirmed by tests (`smooth_sustained_absorption_recovered` +
+> `smooth_short_interjection_between_different_speakers_preserved` both pass):
+> **include self at a DAMPED weight (default 0.5) below the neighbor peak (1.0).**
+> A contaminated chunk's self-fit to its wrong centroid is low, so unanimous
+> neighbors still outvote it (absorption recovered); a genuine interjection's
+> self-fit to its own distinct centroid is high, so split neighbor votes cannot
+> beat it by the confidence margin (interjection preserved). This is what ships.
+> The "using only e_i is a no-op" warning below stands (self-only, no neighbors,
+> is still a no-op); damped self + neighbors is not.
+
 For each chunk i with embedding e_i and current label L_i:
 
 1. Gather the ±W temporal neighbors (W default 3 → ±~24 s at 7.86 s granularity ≈ one
@@ -151,6 +170,19 @@ cannot corrupt the outcome. NaN/Inf in any timestamp SHALL be treated as "unknow
 and exclude that neighbor from the window rather than corrupting the temporal sort.
 
 ### D3 — Minimum-duration floor with acoustic guard
+
+> **AMENDMENT (2026-06-29 apply):** the "OR the short run's embedding is closer to
+> one neighbor by a clear acoustic margin" merge branch was DROPPED. With the
+> damped-self vote (D2 amendment), a short run that is acoustically part of a
+> neighbor (a mis-split) is already absorbed by the VOTE before the floor runs
+> (its chunks flip to the neighbor's label because the self-fit to its own
+> mis-split centroid is low); so the floor's acoustic-margin branch is redundant.
+> The floor now has ONE merge rule: a short run whose two adjacent runs share one
+> (different) label is a flicker island and is absorbed. A short run sandwiched
+> between two different speakers is preserved (by the vote's margin gate; the
+> floor must not merge it). This keeps the floor simple and the over-merge risk
+> bounded. Test: `smooth_flicker_islands_collapse` + the interjection-preservation
+> tests confirm both behaviors.
 
 After D2, enforce that any same-label run shorter than `MIN_SMOOTH_SEGMENT_SECS`
 (default ~10 s) is merged into a neighbor — **but only when it is a flicker island**:

@@ -206,6 +206,31 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
             threshold,
         );
 
+        // Temporal-coherence smoothing (change: diarization-temporal-coherence):
+        // de-contaminate per-chunk labels via a neighbourhood vote before
+        // coalescing, so a contamination seed cannot drift and absorb a real
+        // speaker mid-meeting. Runs inside process() so enforce_max_speakers_cap
+        // (in commands.rs) judges isolation on these de-contaminated centroids.
+        let (labels, cluster_centroids) = {
+            let embeddings: Vec<Vec<f32>> = chunks.iter().map(|c| c.embedding.clone()).collect();
+            let timestamps: Vec<f64> =
+                chunks.iter().map(|c| c.start_sample as f64 / sr_f).collect();
+            let durations: Vec<f64> = chunks.iter().map(|c| c.duration_secs).collect();
+            smooth_to_fixed_point(
+                &labels,
+                &embeddings,
+                &timestamps,
+                &durations,
+                &cluster_centroids,
+                &SmoothParams::default(),
+            )
+        };
+        let n_clusters: std::collections::HashSet<u32> = labels.iter().copied().collect();
+        log::info!(
+            "DIARIZATION: temporal smoothing produced {} speakers",
+            n_clusters.len(),
+        );
+
         // Step 3: Build speaker segments from clustered chunks.
         // Sort chunks by start_sample to get temporal order.
         let mut indexed: Vec<(usize, u32)> = labels.into_iter().enumerate().collect();
@@ -561,6 +586,241 @@ pub(crate) fn cluster_by_centroids(chunks: &[Chunk], threshold: f32) -> (Vec<u32
     }
 
     (labels, final_centroids)
+}
+
+// ── Temporal-coherence smoothing (change: diarization-temporal-coherence) ──
+//
+// Global AHC labels each chunk against its cosine-nearest centroid with no
+// memory of what its temporal neighbours received, so a contamination seed (a
+// spurious cluster born before its speaker can be present) drifts and absorbs a
+// real speaker mid-meeting. The pass below re-assigns each chunk by a ±W
+// neighbourhood vote, gated so a clean meeting is a near-no-op, then collapses
+// flicker islands. Centroids are recomputed from the cleaned labels so the
+// embeddings stored for cross-meeting matching are not contaminated.
+
+const SMOOTH_WINDOW: usize = 3;
+const MIN_SMOOTH_SEGMENT_SECS: f64 = 10.0;
+const SMOOTH_CONFIDENCE_MARGIN: f32 = 0.05;
+const SMOOTH_MAX_ITERS: usize = 2;
+// Self-vote is damped below the neighbour weight so a contaminated chunk's own
+// (mis-assigned) embedding cannot anchor its wrong label, while a genuine short
+// interjection's self-vote still anchors it enough that split neighbour votes
+// cannot beat it by the confidence margin (so it is preserved, not merged).
+const SMOOTH_SELF_WEIGHT: f32 = 0.5;
+
+pub(crate) struct SmoothParams {
+    pub(crate) window: usize,
+    pub(crate) min_segment_secs: f64,
+    pub(crate) confidence_margin: f32,
+    pub(crate) self_weight: f32,
+    pub(crate) max_iters: usize,
+}
+
+impl Default for SmoothParams {
+    fn default() -> Self {
+        SmoothParams {
+            window: SMOOTH_WINDOW,
+            min_segment_secs: MIN_SMOOTH_SEGMENT_SECS,
+            confidence_margin: SMOOTH_CONFIDENCE_MARGIN,
+            self_weight: SMOOTH_SELF_WEIGHT,
+            max_iters: SMOOTH_MAX_ITERS,
+        }
+    }
+}
+
+// Re-assign each chunk by a ±W neighbourhood vote (design D2). The chunk's own
+// embedding votes too, but DAMPED below the neighbour weight: a contaminated
+// chunk's self-fit to its (wrong) centroid is low, so unanimous neighbours still
+// outvote it and pull it back (absorption recovery); a genuine short interjection
+// votes strongly for its own distinct centroid, so the split neighbour votes on
+// either side cannot beat it by the confidence margin and it is preserved rather
+// than merged away. A flip happens only when the winner's normalised score beats
+// the current label's by `confidence_margin` (design D2.3), so a clean meeting is
+// a near-no-op. A minimum-duration floor then collapses flicker islands (design D3).
+pub(crate) fn smooth_labels_temporal(
+    labels: &[u32],
+    embeddings: &[Vec<f32>],
+    timestamps: &[f64],
+    durations: &[f64],
+    centroids: &HashMap<u32, Vec<f32>>,
+    params: &SmoothParams,
+) -> Vec<u32> {
+    if labels.is_empty() {
+        return Vec::new();
+    }
+    let order = temporal_order(timestamps);
+    let mut out = labels.to_vec();
+    let w = params.window;
+
+    for pos in 0..order.len() {
+        let i = order[pos];
+        let lo = pos.saturating_sub(w);
+        let hi = (pos + w + 1).min(order.len());
+        let mut total_w: f32 = 0.0;
+        let mut score_sum: HashMap<u32, f32> = HashMap::new();
+        for q in lo..hi {
+            let j = order[q];
+            if !embeddings[j].iter().all(|x| x.is_finite()) {
+                continue; // degenerate embedding contributes 0 (design D2 clamp)
+            }
+            let dist = (q as i32 - pos as i32).unsigned_abs() as f32;
+            let dec = if q == pos { params.self_weight } else { (-dist).exp() };
+            total_w += dec;
+            for (&k, cent) in centroids {
+                let c = cosine_similarity(&embeddings[j], cent);
+                *score_sum.entry(k).or_insert(0.0) += if c.is_finite() { c * dec } else { 0.0 };
+            }
+        }
+        if total_w <= 0.0 {
+            continue; // no finite-neighbour signal; keep current label
+        }
+        let cur = labels[i];
+        let cur_score = score_sum.get(&cur).copied().unwrap_or(0.0) / total_w;
+        // Deterministic winner: highest score, ties broken by smallest label, so
+        // output is independent of HashMap iteration order (required by the spec).
+        let mut winner: Option<(u32, f32)> = None;
+        for (&k, &s) in &score_sum {
+            match winner {
+                None => winner = Some((k, s)),
+                Some((bk, bs)) => {
+                    let better = s > bs || (s == bs && k < bk);
+                    if better {
+                        winner = Some((k, s));
+                    }
+                }
+            }
+        }
+        if let Some((wk, ws)) = winner {
+            let win_score = ws / total_w;
+            if wk != cur && win_score > cur_score + params.confidence_margin {
+                out[i] = wk;
+            }
+        }
+    }
+
+    enforce_min_segment_floor(&mut out, &order, durations, params);
+    out
+}
+
+// Duration-weighted centroid per label from cleaned labels (design D4). A cluster
+// with no surviving chunks has zero duration and is dropped, not preserved as a
+// phantom centroid that would pollute the cross-meeting registry.
+pub(crate) fn recompute_centroids_from_labels(
+    labels: &[u32],
+    embeddings: &[Vec<f32>],
+    durations: &[f64],
+) -> HashMap<u32, Vec<f32>> {
+    let dim = embeddings.first().map(|v| v.len()).unwrap_or(0);
+    let mut sum: HashMap<u32, Vec<f64>> = HashMap::new();
+    let mut total: HashMap<u32, f64> = HashMap::new();
+    for i in 0..labels.len() {
+        let l = labels[i];
+        let acc = sum.entry(l).or_insert(vec![0.0f64; dim]);
+        for (k, &v) in embeddings[i].iter().enumerate() {
+            if v.is_finite() {
+                acc[k] += v as f64 * durations[i];
+            }
+        }
+        *total.entry(l).or_insert(0.0) += durations[i];
+    }
+    sum.into_iter()
+        .filter_map(|(l, acc)| {
+            let td = total.get(&l).copied().filter(|&d| d > 0.0)?;
+            Some((l, acc.iter().map(|&x| (x / td) as f32).collect()))
+        })
+        .collect()
+}
+
+// Iterate vote → recompute centroids to a fixed point, capped at max_iters
+// (design D7: 2 by default). The first pass de-contaminates the clearest chunks
+// using the (still-drifted) clustering centroids; the recomputed centroids are
+// cleaner, so the second pass recovers the rest. Always returns centroids that
+// match the returned labels.
+pub(crate) fn smooth_to_fixed_point(
+    labels: &[u32],
+    embeddings: &[Vec<f32>],
+    timestamps: &[f64],
+    durations: &[f64],
+    centroids: &HashMap<u32, Vec<f32>>,
+    params: &SmoothParams,
+) -> (Vec<u32>, HashMap<u32, Vec<f32>>) {
+    let mut labels = labels.to_vec();
+    let mut centroids = centroids.clone();
+    for _ in 0..params.max_iters {
+        let next =
+            smooth_labels_temporal(&labels, embeddings, timestamps, durations, &centroids, params);
+        if next == labels {
+            break;
+        }
+        labels = next;
+        centroids = recompute_centroids_from_labels(&labels, embeddings, durations);
+    }
+    (labels, centroids)
+}
+
+fn temporal_order(timestamps: &[f64]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..timestamps.len())
+        .filter(|&i| timestamps[i].is_finite())
+        .collect();
+    order.sort_by(|&a, &b| {
+        timestamps[a].partial_cmp(&timestamps[b]).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    order
+}
+
+// Collapse flicker islands: a same-label run shorter than min_segment_secs whose
+// two adjacent runs share one (different) label is a noise spike inside that
+// speaker's region and is absorbed. A short run sandwiched between two DIFFERENT
+// speakers is a genuine interjection and is preserved — over-merging destroys
+// real turns, while a leftover sub-2% segment is reclaimed harmlessly downstream
+// by merge_short_speakers.
+fn enforce_min_segment_floor(
+    labels: &mut [u32],
+    order: &[usize],
+    durations: &[f64],
+    params: &SmoothParams,
+) {
+    if order.is_empty() {
+        return;
+    }
+    loop {
+        let runs = runs_along_order(labels, order);
+        let mut merged = false;
+        for ri in 0..runs.len() {
+            let (rs, re, rl) = runs[ri];
+            let dur: f64 = (rs..=re).map(|p| durations[order[p]]).sum();
+            if dur >= params.min_segment_secs {
+                continue;
+            }
+            let left = ri.checked_sub(1).map(|k| runs[k].2);
+            let right = runs.get(ri + 1).map(|t| t.2);
+            if let (Some(l), Some(r)) = (left, right) {
+                if l == r && l != rl {
+                    for p in rs..=re {
+                        labels[order[p]] = l;
+                    }
+                    merged = true;
+                    break;
+                }
+            }
+        }
+        if !merged {
+            break;
+        }
+    }
+}
+
+fn runs_along_order(labels: &[u32], order: &[usize]) -> Vec<(usize, usize, u32)> {
+    let mut runs: Vec<(usize, usize, u32)> = Vec::new();
+    let mut start = 0usize;
+    for pos in 1..=order.len() {
+        let boundary = pos == order.len() || labels[order[pos]] != labels[order[start]];
+        if boundary {
+            runs.push((start, pos - 1, labels[order[start]]));
+            start = pos;
+        }
+    }
+    runs
 }
 
 #[cfg(test)]
@@ -1385,6 +1645,394 @@ mod tests {
             "cached-matrix centroids must match naive oracle within 1e-4 on realistic structure \
              (cluster count = {})",
             unique.len(),
+        );
+    }
+
+    // ── diarization-temporal-coherence — adversarial tests (change tasks §1–§5) ──
+
+    fn emb(axis: usize, dim: usize) -> Vec<f32> {
+        let mut e = vec![0.0f32; dim];
+        if axis < dim {
+            e[axis] = 1.0;
+        }
+        e
+    }
+
+    fn normalize(v: &mut [f32]) {
+        let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
+        for x in v.iter_mut() {
+            *x /= n;
+        }
+    }
+
+    fn ts_seq(n: usize, step: f64) -> Vec<f64> {
+        (0..n).map(|i| i as f64 * step).collect()
+    }
+
+    fn centroids_from(map: &[(u32, Vec<f32>)]) -> HashMap<u32, Vec<f32>> {
+        map.iter().cloned().collect()
+    }
+
+    fn unique_count(labels: &[u32]) -> usize {
+        let s: std::collections::HashSet<u32> = labels.iter().copied().collect();
+        s.len()
+    }
+
+    // Task 1.1 — flicker: [0,1,0,1,…] singleton runs collapse via the D3 floor.
+    #[test]
+    fn smooth_flicker_islands_collapse() {
+        let dim = 4;
+        let voice = emb(0, dim);
+        let labels = vec![0u32, 1, 0, 1, 0, 1, 0, 1, 0];
+        let embeddings = vec![voice.clone(); 9];
+        let timestamps = ts_seq(9, 3.0);
+        let durations = vec![3.0f64; 9];
+        let centroids = centroids_from(&[(0, voice.clone()), (1, voice.clone())]);
+        let out = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        assert_eq!(unique_count(&out), 1, "flicker must collapse to one label: {:?}", out);
+    }
+
+    // Task 1.2 — contamination seed: a t=0 chunk mis-assigned to a spurious cluster
+    // (1) is absorbed into its neighbours' cluster (0) by the neighbourhood vote.
+    #[test]
+    fn smooth_contamination_seed_absorbed_by_neighbours() {
+        let dim = 4;
+        let c0 = emb(0, dim);
+        let c1 = emb(1, dim);
+        let labels = vec![1u32, 0, 0, 0, 0, 0, 0];
+        // chunk 0's embedding is genuinely the cluster-0 voice; global AHC mis-split it.
+        let embeddings = vec![c0.clone(); 7];
+        let timestamps = ts_seq(7, 3.0);
+        let durations = vec![3.0f64; 7];
+        let centroids = centroids_from(&[(0, c0), (1, c1)]);
+        let out = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        assert_eq!(out[0], 0, "contamination seed must be absorbed: {:?}", out);
+    }
+
+    // Task 1.3 — sustained absorption: a 20-chunk run mis-assigned to a drifted
+    // cluster is recovered (≥80%) because its neighbours' voice votes the true cluster.
+    #[test]
+    fn smooth_sustained_absorption_recovered() {
+        let dim = 4;
+        let c = emb(0, dim);
+        let d = emb(1, dim);
+        let mut labels = vec![1u32; 3];
+        labels.extend(vec![2u32; 20]);
+        labels.extend(vec![1u32; 2]);
+        let n = labels.len();
+        let embeddings: Vec<Vec<f32>> = (0..n).map(|_| c.clone()).collect();
+        let timestamps = ts_seq(n, 3.0);
+        let durations = vec![3.0f64; n];
+        let centroids = centroids_from(&[(1, c), (2, d)]);
+        let out = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        let recovered = (3..23).filter(|&i| out[i] == 1).count();
+        assert!(
+            recovered >= 16,
+            "absorption recovery must be ≥80% (16/20), got {}/20: {:?}",
+            recovered,
+            out
+        );
+    }
+
+    // Task 1.4 — real turn preserved: a substantial turn (≥ MIN_SMOOTH_SEGMENT_SECS)
+    // between two DIFFERENT speakers is not smoothed away. Interior chunks have
+    // unanimous same-label neighbours; boundary chunks see balanced support from
+    // both sides so the confidence gate blocks the flip.
+    #[test]
+    fn smooth_real_turn_between_different_speakers_preserved() {
+        let dim = 4;
+        // 5 chunks (15s ≥ 10s floor) of speaker 1, flanked by speakers 0 and 2.
+        let labels = vec![0u32, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2];
+        let n = labels.len();
+        let embeddings: Vec<Vec<f32>> =
+            (0..n).map(|i| emb(labels[i] as usize, dim)).collect();
+        let timestamps = ts_seq(n, 3.0);
+        let durations = vec![3.0f64; n];
+        let centroids = centroids_from(&[(0, emb(0, dim)), (1, emb(1, dim)), (2, emb(2, dim))]);
+        let out = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        let turn_preserved = (5..10).all(|i| out[i] == 1);
+        assert!(turn_preserved, "substantial turn must be preserved: {:?}", out);
+    }
+
+    // Task 1.4b — short interjection preserved: a sub-floor run sandwiched between
+    // two DIFFERENT speakers must NOT be merged away (would reintroduce the
+    // "merged turns" failure). The damped self-vote anchors it; the split neighbour
+    // votes on either side cannot beat it by the confidence margin.
+    #[test]
+    fn smooth_short_interjection_between_different_speakers_preserved() {
+        let dim = 4;
+        // chunk 5 (label 2, 3s < 10s floor) sits between a label-0 run and a label-1 run.
+        let labels = vec![0u32, 0, 0, 0, 0, 2, 1, 1, 1, 1, 1];
+        let n = labels.len();
+        let embeddings: Vec<Vec<f32>> =
+            (0..n).map(|i| emb(labels[i] as usize, dim)).collect();
+        let timestamps = ts_seq(n, 3.0);
+        let durations = vec![3.0f64; n];
+        let centroids = centroids_from(&[(0, emb(0, dim)), (1, emb(1, dim)), (2, emb(2, dim))]);
+        let out = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        assert_eq!(out[5], 2, "short interjection between two different speakers must be preserved: {:?}", out);
+    }
+
+    // Task 1.5 — degenerate embedding: a NaN/Inf neighbour is skipped (contributes
+    // 0) and must not corrupt the vote or panic.
+    #[test]
+    fn smooth_nan_embedding_neighbour_skipped() {
+        let dim = 4;
+        let c0 = emb(0, dim);
+        let c1 = emb(1, dim);
+        let nan = vec![f32::NAN; dim];
+        // chunk 1 (NaN embedding, label 1) sits between chunk 0 (mis-labelled 1)
+        // and chunks 2..4 (label 0). The NaN must be skipped so chunk 0 still flips.
+        let labels = vec![1u32, 1, 0, 0, 0];
+        let embeddings = vec![c0.clone(), nan, c0.clone(), c0.clone(), c0.clone()];
+        let timestamps = ts_seq(5, 3.0);
+        let durations = vec![3.0f64; 5];
+        let centroids = centroids_from(&[(0, c0), (1, c1)]);
+        let out = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        assert_eq!(out[0], 0, "NaN neighbour must be skipped, not corrupt the vote: {:?}", out);
+    }
+
+    // Task 1.6 — degenerate timestamp: a NaN/Inf timestamp excludes that chunk from
+    // every window (unknowable order) and preserves its label; no panic.
+    #[test]
+    fn smooth_nan_timestamp_chunk_excluded_from_windows() {
+        let dim = 4;
+        let voice = emb(0, dim);
+        let labels = vec![0u32, 0, 7, 0, 0]; // chunk 2 carries a sentinel label
+        let embeddings = vec![voice.clone(); 5];
+        let timestamps = vec![0.0, 3.0, f64::NAN, 9.0, 12.0];
+        let durations = vec![3.0f64; 5];
+        let centroids = centroids_from(&[(0, voice.clone()), (7, voice)]);
+        let out = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        assert_eq!(out.len(), 5);
+        assert_eq!(out[2], 7, "non-finite-timestamp chunk must keep its label: {:?}", out);
+    }
+
+    // Task 1.7 — no-regression: a clean, well-separated meeting is a near-no-op
+    // (the confidence gate blocks every flip; output == input).
+    #[test]
+    fn smooth_clean_meeting_is_noop() {
+        let dim = 3;
+        let labels = vec![0u32, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2];
+        let n = labels.len();
+        let embeddings: Vec<Vec<f32>> =
+            (0..n).map(|i| emb(labels[i] as usize, dim)).collect();
+        let timestamps = ts_seq(n, 3.0);
+        let durations = vec![3.0f64; n];
+        let centroids = centroids_from(&[
+            (0, emb(0, dim)),
+            (1, emb(1, dim)),
+            (2, emb(2, dim)),
+        ]);
+        let out = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        assert_eq!(out, labels, "clean meeting must be a no-op (confidence gate)");
+    }
+
+    // Task 1.8 — property: smoothing never increases cluster count, never invents
+    // new labels, and preserves output length.
+    proptest::proptest! {
+        #[test]
+        fn proptest_smoothing_invariants(
+            labels in proptest::collection::vec(0u32..6u32, 1..60)
+        ) {
+            let n = labels.len();
+            let k = (labels.iter().copied().max().unwrap_or(0) + 1) as usize;
+            let dim = k.max(1);
+            let embeddings: Vec<Vec<f32>> = (0..n).map(|i| emb(labels[i] as usize, dim)).collect();
+            let centroids: HashMap<u32, Vec<f32>> = (0..k as u32)
+                .map(|kk| (kk, emb(kk as usize, dim))).collect();
+            let timestamps = ts_seq(n, 1.0);
+            let durations = vec![1.0f64; n];
+            let out = smooth_labels_temporal(
+                &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+            );
+            proptest::prop_assert_eq!(out.len(), n, "output length must equal input length");
+            let in_unique: std::collections::HashSet<u32> = labels.iter().copied().collect();
+            let out_unique: std::collections::HashSet<u32> = out.iter().copied().collect();
+            proptest::prop_assert!(
+                out_unique.len() <= in_unique.len(),
+                "smoothing must not increase cluster count: {} > {}",
+                out_unique.len(),
+                in_unique.len()
+            );
+            for l in &out {
+                proptest::prop_assert!(in_unique.contains(l), "smoothing invented new label {}", l);
+            }
+        }
+    }
+
+    // Task 2.1 — centroid recomputation: de-contaminated labels yield a centroid
+    // different from the pre-smoothing (contaminated) one.
+    #[test]
+    fn recompute_centroids_reflects_cleaned_labels() {
+        let dim = 2;
+        let v0 = emb(0, dim);
+        let v1 = emb(1, dim);
+        // Contaminated: cluster 1 owns one v0 chunk + one v1 chunk → blended centroid.
+        let contaminated_labels = vec![0u32, 0, 1, 1];
+        let embeddings = vec![v0.clone(), v0.clone(), v0.clone(), v1.clone()];
+        let contam = recompute_centroids_from_labels(&contaminated_labels, &embeddings, &[1.0; 4]);
+        // Cleaned: the v0 chunk moves to cluster 0 → cluster 1 is purely v1.
+        let cleaned_labels = vec![0u32, 0, 0, 1];
+        let cleaned = recompute_centroids_from_labels(&cleaned_labels, &embeddings, &[1.0; 4]);
+        assert_ne!(
+            contam.get(&1), cleaned.get(&1),
+            "cleaned centroid must differ from contaminated"
+        );
+        assert!(
+            centroids_equal(
+                &HashMap::from([(1u32, v1.clone())]),
+                &HashMap::from([(1u32, cleaned.get(&1).unwrap().clone())]),
+                1e-4,
+            ),
+            "cleaned cluster-1 centroid must equal the pure v1 voice"
+        );
+    }
+
+    // Task 2.2 — phantom drop: a cluster whose chunks have zero total duration is
+    // dropped, not preserved as a phantom centroid.
+    #[test]
+    fn recompute_centroids_drops_zero_duration_cluster() {
+        let dim = 2;
+        let v0 = emb(0, dim);
+        let v1 = emb(1, dim);
+        // cluster 1 chunk has duration 0 → no surviving duration.
+        let labels = vec![0u32, 1];
+        let embeddings = vec![v0, v1];
+        let centroids = recompute_centroids_from_labels(&labels, &embeddings, &[1.0, 0.0]);
+        assert!(centroids.contains_key(&0), "cluster 0 (duration > 0) must survive");
+        assert!(!centroids.contains_key(&1), "zero-duration cluster must be dropped");
+    }
+
+    // Task 3.1 — fixed-point iteration: smooth_to_fixed_point recovers ≥80% of the
+    // absorbed run (exercising vote → recompute → vote), and never recovers fewer
+    // chunks than a single pass.
+    #[test]
+    fn smooth_fixed_point_recovers_absorption() {
+        let dim = 4;
+        let c = emb(0, dim);
+        let d = emb(1, dim);
+        let mut labels = vec![1u32; 3];
+        labels.extend(vec![2u32; 20]);
+        labels.extend(vec![1u32; 2]);
+        let n = labels.len();
+        let embeddings: Vec<Vec<f32>> = (0..n).map(|_| c.clone()).collect();
+        let timestamps = ts_seq(n, 3.0);
+        let durations = vec![3.0f64; n];
+        let centroids = centroids_from(&[(1, c.clone()), (2, d.clone())]);
+        let (out, _) = smooth_to_fixed_point(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        let recovered = (3..23).filter(|&i| out[i] == 1).count();
+        assert!(recovered >= 16, "fixed-point must recover ≥80%: {}/20", recovered);
+
+        // single-pass recovery (for the non-inferior comparison)
+        let single = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        let single_recovered = (3..23).filter(|&i| single[i] == 1).count();
+        assert!(
+            recovered >= single_recovered,
+            "fixed-point ({} recovered) must not under-perform a single pass ({})",
+            recovered,
+            single_recovered
+        );
+    }
+
+    // Task 3.2 — termination: the fixed-point loop always returns (max_iters cap),
+    // and never increases cluster count.
+    #[test]
+    fn smooth_fixed_point_terminates_and_never_grows_clusters() {
+        let dim = 3;
+        // adversarial flicker that could loop if the floor re-created islands.
+        let labels: Vec<u32> = (0..30).map(|i| (i % 3) as u32).collect();
+        let n = labels.len();
+        let embeddings: Vec<Vec<f32>> = (0..n).map(|i| emb((i % 3) as usize, dim)).collect();
+        let timestamps = ts_seq(n, 3.0);
+        let durations = vec![3.0f64; n];
+        let centroids = centroids_from(&[(0, emb(0, dim)), (1, emb(1, dim)), (2, emb(2, dim))]);
+        let (out, recomputed) = smooth_to_fixed_point(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        assert_eq!(out.len(), n, "output length preserved");
+        assert!(
+            unique_count(&out) <= unique_count(&labels),
+            "cluster count must not grow"
+        );
+        // returned centroids must match the returned labels' label set
+        for seg_label in out.iter().copied() {
+            assert!(recomputed.contains_key(&seg_label), "centroid missing for label {}", seg_label);
+        }
+    }
+
+    // Task 5.1 — scale: a 600-chunk meeting (~the production case) smooths in <1s.
+    #[test]
+    fn smooth_scales_sub_second_on_600_chunks() {
+        let n = 600;
+        let dim = 192;
+        // 4 speakers with deterministic per-chunk voices cycling in long runs.
+        let labels: Vec<u32> = (0..n).map(|i| ((i / 150) % 4) as u32).collect();
+        let embeddings: Vec<Vec<f32>> =
+            (0..n).map(|i| emb((i / 150) % 4, dim)).collect();
+        let timestamps = ts_seq(n, 7.86);
+        let durations = vec![7.86f64; n];
+        let centroids = centroids_from(&[
+            (0, emb(0, dim)),
+            (1, emb(1, dim)),
+            (2, emb(2, dim)),
+            (3, emb(3, dim)),
+        ]);
+        let t = std::time::Instant::now();
+        let (out, _) = smooth_to_fixed_point(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        let elapsed = t.elapsed().as_secs_f64();
+        assert_eq!(out.len(), n);
+        assert!(elapsed < 1.0, "600-chunk smoothing must complete <1s, took {:.3}s", elapsed);
+    }
+
+    // Task 5.3 — verify against the production meeting that motivated this change
+    // (meeting-00000000-0000-4000-8000-000000000001, 3 speakers: Carlos/Bob/
+    // Carol). #[ignore] because it needs the on-device nemo_titanet model + the
+    // meeting's audio file, which a hermetic unit test cannot load. Manual recipe:
+    //   1. prod SQLite is READ-ONLY (C:\Users\user\AppData\Roaming\
+    //      com.meetily.ai\meeting_minutes.sqlite, ?mode=ro); never write to it.
+    //   2. Export the meeting's audio.mp4 to a temp wav (16 kHz mono).
+    //   3. Re-diarize via a throwaway binary that calls
+    //      SherpaDiarizationAdapter::process() on that wav + the meeting's
+    //      transcript segments, then inspect the resulting per-chunk labels.
+    //   4. PASS criteria (the failures this change targets):
+    //        - Carol labels present in min 30–70 (was 0 rows);
+    //        - singleton-run flicker < 10 % in the min 30+ region (was 44–53 %);
+    //        - no 5 s transcript-row fragments in the min 30–50 zone (median was
+    //          5 s; expect it back near the clean 22 s median).
+    // The unit-level guarantees (absorption recovery ≥ 80 %, interjection
+    // preservation, clean-meeting no-op, < 1 s at 600 chunks) are covered by the
+    // non-ignored tests above.
+    #[ignore = "requires on-device sherpa model + prod audio; see recipe above"]
+    #[test]
+    fn smooth_verifies_prod_meeting_95db() {
+        // Verify stub: the recipe above is the manual gate. Running it needs the
+        // production audio asset on disk, which is not checked into the repo.
+        eprintln!(
+            "manual verify gate — see the ignore-reason recipe. \
+             Prod DB: meeting-00000001-... (READ-ONLY)."
         );
     }
 }
