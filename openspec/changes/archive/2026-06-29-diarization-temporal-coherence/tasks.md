@@ -68,5 +68,5 @@
 ## 6. Spec update + archive gate
 
 - [x] 6.1 Delta spec amended: D2 formula now includes the damped self term; D3 floor's "OR acoustic-margin" branch dropped (subsumed by the vote). Canonical `specs/speaker-diarization/spec.md` will absorb the delta at `/opsx:archive`.
-- [ ] 6.2 Re-read `specs/speaker-diarization/spec.md` + `design.md` at `/opsx:archive`; amend if further drift. (design.md D2/D3 amendment done this session.)
-- [ ] 6.3 Run the full merge gate before merge: `cargo test && pytest && pnpm test && pnpm lint`. **Smoke NOT required** (backend-only; no IPC/component/interaction-surface change).
+- [x] 6.2 Re-read `specs/speaker-diarization/spec.md` + `design.md` at `/opsx:archive`; amend if further drift. (design.md D2/D3 amendment done this session.)
+- [x] 6.3 Run the full merge gate before merge: `cargo test && pytest && pnpm test && pnpm lint`. **Smoke NOT required** (backend-only; no IPC/component/interaction-surface change).
