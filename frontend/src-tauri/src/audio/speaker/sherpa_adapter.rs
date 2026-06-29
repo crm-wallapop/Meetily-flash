@@ -600,13 +600,19 @@ pub(crate) fn cluster_by_centroids(chunks: &[Chunk], threshold: f32) -> (Vec<u32
 
 const SMOOTH_WINDOW: usize = 3;
 const MIN_SMOOTH_SEGMENT_SECS: f64 = 10.0;
-const SMOOTH_CONFIDENCE_MARGIN: f32 = 0.05;
+// Self (0.6) anchors a genuine interjection outright: it exceeds a single-side
+// neighbour weight ~0.553 = exp(-1)+exp(-2)+exp(-3), so split neighbour votes
+// cannot erase a real short turn — including an edge-of-array interjection that
+// has neighbours on only one side. Yet 0.6 is low enough that a contaminated
+// chunk's self-fit to its wrong centroid still loses to unanimous neighbours
+// (absorption recovered). Margin 0.03 recovers drift up to cos~0.97, while a
+// clean meeting's self-differential (~0.24 at between-speaker cos 0.6) is far
+// above it, so clean input does not flip. neighbour decay is exp(-dist), peak
+// exp(-1)≈0.368 at the nearest neighbour; self 0.6 is the strongest single vote
+// but neighbours collectively (up to ~1.106 across both sides) outweigh it.
+const SMOOTH_CONFIDENCE_MARGIN: f32 = 0.03;
 const SMOOTH_MAX_ITERS: usize = 2;
-// Self-vote is damped below the neighbour weight so a contaminated chunk's own
-// (mis-assigned) embedding cannot anchor its wrong label, while a genuine short
-// interjection's self-vote still anchors it enough that split neighbour votes
-// cannot beat it by the confidence margin (so it is preserved, not merged).
-const SMOOTH_SELF_WEIGHT: f32 = 0.5;
+const SMOOTH_SELF_WEIGHT: f32 = 0.6;
 
 pub(crate) struct SmoothParams {
     pub(crate) window: usize,
@@ -1678,6 +1684,22 @@ mod tests {
         s.len()
     }
 
+    // Unit vector at cosine `cos` from the `voice_axis` direction, lying in the
+    // (voice_axis, perp_axis) plane. Voice = emb(voice_axis) is also unit, so
+    // cos(voice, this) = `cos` exactly — used to build drifted/realistic centroids
+    // that stress the margin at a known cosine rather than the trivial cos 0.
+    fn centroid_at_cos(voice_axis: usize, perp_axis: usize, cos: f32, dim: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; dim];
+        let s = (1.0_f32 - cos * cos).max(0.0).sqrt();
+        if voice_axis < dim {
+            v[voice_axis] = cos;
+        }
+        if perp_axis < dim {
+            v[perp_axis] = s;
+        }
+        v
+    }
+
     // Task 1.1 — flicker: [0,1,0,1,…] singleton runs collapse via the D3 floor.
     #[test]
     fn smooth_flicker_islands_collapse() {
@@ -1844,8 +1866,12 @@ mod tests {
         assert_eq!(out, labels, "clean meeting must be a no-op (confidence gate)");
     }
 
-    // Task 1.8 — property: smoothing never increases cluster count, never invents
-    // new labels, and preserves output length.
+    // Task 1.8 — SAFETY invariants (not behavioral claims): for ANY label input,
+    // smoothing never increases cluster count, never invents a new label, and
+    // preserves length. A no-op would pass these too — by design. The behavioral
+    // claims (absorption recovery, interjection preservation, clean-meeting
+    // no-op, realistic-cosine variants) are pinned by the targeted tests above,
+    // which is where the margin boundary actually gets exercised.
     proptest::proptest! {
         #[test]
         fn proptest_smoothing_invariants(
@@ -2005,6 +2031,133 @@ mod tests {
         let elapsed = t.elapsed().as_secs_f64();
         assert_eq!(out.len(), n);
         assert!(elapsed < 1.0, "600-chunk smoothing must complete <1s, took {:.3}s", elapsed);
+    }
+
+    // ── realistic-cosine variants (adversarial-review 2026-06-29: the orthogonal
+    //    embeddings above make the margin trivially large, so they don't exercise
+    //    the boundary. These use cos 0.6–0.95 to validate the mechanism where
+    //    drift/overlap is realistic, and to lock the absorption boundary.) ──
+
+    // The absorbed speaker's voice (unit, = centroid 1) is mis-assigned to a
+    // drifted cluster whose centroid sits at cos 0.90 to the true voice — the
+    // realistic moderate-drift case. Margin gap 0.10 > μ=0.03 → recovers ≥80%.
+    #[test]
+    fn smooth_realistic_drift_absorption_recovered() {
+        let dim = 4;
+        let voice = emb(0, dim);
+        let drifted = centroid_at_cos(0, 1, 0.90, dim);
+        let mut labels = vec![1u32; 3];
+        labels.extend(vec![0u32; 20]);
+        labels.extend(vec![1u32; 2]);
+        let n = labels.len();
+        let embeddings: Vec<Vec<f32>> = (0..n).map(|_| voice.clone()).collect();
+        let timestamps = ts_seq(n, 3.0);
+        let durations = vec![3.0f64; n];
+        let centroids = centroids_from(&[(0, drifted), (1, voice.clone())]);
+        let out = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        let recovered = (3..23).filter(|&i| out[i] == 1).count();
+        assert!(
+            recovered >= 16,
+            "realistic-drift (cos 0.90) absorption must recover ≥80% (16/20), got {}/20: {:?}",
+            recovered,
+            out
+        );
+    }
+
+    // At cos 0.95 to the true voice the score gap is exactly 0.05 — the OLD
+    // μ=0.05 boundary where recovery failed (finding #1). With μ=0.03 the gap
+    // 0.05 > 0.03 fires, so the severe volume-absorption case now recovers.
+    #[test]
+    fn smooth_absorption_recovers_near_drift_boundary() {
+        let dim = 4;
+        let voice = emb(0, dim);
+        let drifted = centroid_at_cos(0, 1, 0.95, dim);
+        let mut labels = vec![1u32; 3];
+        labels.extend(vec![0u32; 20]);
+        labels.extend(vec![1u32; 2]);
+        let n = labels.len();
+        let embeddings: Vec<Vec<f32>> = (0..n).map(|_| voice.clone()).collect();
+        let timestamps = ts_seq(n, 3.0);
+        let durations = vec![3.0f64; n];
+        let centroids = centroids_from(&[(0, drifted), (1, voice.clone())]);
+        let out = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        let recovered = (3..23).filter(|&i| out[i] == 1).count();
+        assert!(
+            recovered >= 16,
+            "cos-0.95 drift (old μ=0.05 boundary) must now recover ≥80% under μ=0.03, got {}/20: {:?}",
+            recovered,
+            out
+        );
+    }
+
+    // Two speakers at a realistic between-speaker cosine of 0.6 (not orthogonal).
+    // The self-differential 0.6·(1−0.6)=0.24 ≫ μ=0.03 keeps every chunk on its
+    // own label, so a clean realistic meeting is a no-op (finding #2: the
+    // orthogonal clean-meeting test gave a trivially huge margin).
+    #[test]
+    fn smooth_realistic_cosine_clean_meeting_is_noop() {
+        let dim = 2;
+        let voice_a = emb(0, dim);
+        let voice_b = centroid_at_cos(0, 1, 0.60, dim);
+        let labels = {
+            let mut l = vec![0u32; 8];
+            l.extend(vec![1u32; 8]);
+            l
+        };
+        let n = labels.len();
+        let embeddings: Vec<Vec<f32>> = (0..n)
+            .map(|i| if labels[i] == 0 { voice_a.clone() } else { voice_b.clone() })
+            .collect();
+        let timestamps = ts_seq(n, 3.0);
+        let durations = vec![3.0f64; n];
+        let centroids = centroids_from(&[(0, voice_a), (1, voice_b)]);
+        let out = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        assert_eq!(
+            out, labels,
+            "clean realistic meeting (between-speaker cos 0.6) must be a no-op: {:?}",
+            out
+        );
+    }
+
+    // A short interjection whose voice is at cos 0.6 to BOTH flanking speakers
+    // (realistic overlap, not orthogonal). Self (0.6) anchors it: it votes 1.0
+    // for its own centroid vs 0.6 for each flank, so its own label wins outright
+    // and the split neighbour votes cannot erase it (finding #2/#5).
+    #[test]
+    fn smooth_realistic_cosine_interjection_preserved() {
+        let dim = 3;
+        let vx = emb(0, dim); // (1,0,0)
+        let va = centroid_at_cos(0, 1, 0.60, dim); // (0.6,0.8,0)
+        let mut vb = vec![0.0f32; dim];
+        vb[0] = 0.6;
+        vb[1] = 0.3; // cos(vb,va)=0.36+0.24=0.6
+        vb[2] = (1.0_f32 - 0.6 * 0.6 - 0.3 * 0.3).max(0.0).sqrt();
+        let labels = vec![0u32, 0, 0, 0, 0, 2, 1, 1, 1, 1, 1];
+        let n = labels.len();
+        let embeddings: Vec<Vec<f32>> = (0..n)
+            .map(|i| match labels[i] {
+                0 => va.clone(),
+                1 => vb.clone(),
+                _ => vx.clone(),
+            })
+            .collect();
+        let timestamps = ts_seq(n, 3.0);
+        let durations = vec![3.0f64; n];
+        let centroids = centroids_from(&[(0, va), (1, vb), (2, vx)]);
+        let out = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        assert_eq!(
+            out[5], 2,
+            "realistic-cosine (0.6) interjection between two speakers must be preserved: {:?}",
+            out
+        );
     }
 
     // Task 5.3 — verify against the production meeting that motivated this change

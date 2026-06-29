@@ -1,18 +1,29 @@
 # Tasks
 
-> **Apply notes (2026-06-29):** all tasks green. `cargo test --lib` = 459 passed /
-> 0 failed / 13 ignored (445 baseline + 14 new). Two implementation deviations
-> from the original design, both recorded below: **(A) damped self-vote** (D2) —
-> the design's "exclude self (j≠i)" was changed to "include self at weight 0.5";
-> excluding self erased genuine short interjections between two different speakers
-> (the surrounding speakers outvoted the interjection's excluded voice), which
-> would have reintroduced the user's "merged turns" complaint. Damped self keeps
-> absorption recovery (a contaminated chunk's self-fit to its WRONG centroid is
-> low, so unanimous neighbours still win) while anchoring genuine interjections
-> (split neighbour votes can't beat the self-vote by the margin). **(B) D3 floor
+> **Apply notes (2026-06-29, updated post-review):** all tasks green.
+> `cargo test --lib` = **463 passed / 0 failed / 14 ignored** (445 baseline +
+> 14 + 4 realistic-cosine review tests). Three implementation deviations from
+> the original design, all recorded below: **(A) damped self-vote** (D2) — the
+> design's "exclude self (j≠i)" was changed to "include self"; excluding self
+> erased genuine short interjections between two different speakers (the
+> surrounding speakers outvoted the interjection's excluded voice), which would
+> have reintroduced the user's "merged turns" complaint. **(B) D3 floor
 > simplified** — the "OR acoustic-margin merge" branch was dropped because the
-> damped-self vote's margin gate subsumes it (a mis-split short run between two
-> speakers is absorbed by the vote before the floor runs). See design.md amendment.
+> damped-self vote's margin gate subsumes it. **(C) self_weight / μ retune
+> (adversarial-review-driven):** the first cut shipped self_weight=0.5, μ=0.05.
+> Review found (1) at drift cos≥0.95 the score gap is exactly 0.05, so μ=0.05
+> (`>`, not `≥`) never fired — the severe volume-absorption case (the exact
+> production bug) would not recover; (2) the orthogonal-embedding tests made
+> the margin trivially large and didn't exercise the boundary; (3) the
+> spec/design prose "neighbor peak 1.0" was factually wrong (the real peak is
+> exp(-1)≈0.368). Retune: **self_weight 0.5→0.6** (self now anchors an
+> interjection OUTRIGHT — 0.6 > single-side neighbour weight ~0.553 — so split
+> neighbour votes can't erase it regardless of μ, covering edge-of-array
+> interjections too), **μ 0.05→0.03** (recovers drift up to cos~0.97; clean
+> meetings stay stable via the self-differential ~0.24 ≫ μ). Four realistic-
+> cosine tests (§1.9) lock this: cos-0.90 and cos-0.95 absorption recover ≥80 %,
+> cos-0.6 clean meeting is a no-op, cos-0.6 interjection preserved. Spec/design
+> amended to state the true magnitudes. See design.md TUNING block.
 
 ## 1. Temporal-coherence smoothing function (pure, testable)
 
@@ -24,7 +35,12 @@
 - [x] 1.5 **(red→green)** `smooth_nan_embedding_neighbour_skipped` — NaN/Inf neighbour skipped.
 - [x] 1.6 **(red→green)** `smooth_nan_timestamp_chunk_excluded_from_windows` — NaN/Inf timestamp excluded, no panic.
 - [x] 1.7 **(green)** `smooth_labels_temporal` implemented: damped-self neighbourhood vote (D2, amended), confidence-margin gate, flicker-island floor (D3, simplified), NaN/Inf clamps, deterministic winner (ties → smallest label).
-- [x] 1.8 **(green, property)** `proptest_smoothing_invariants` — (a) cluster count ≤ input, (c) output length == input, no new labels invented. (b)/(d) covered by `smooth_clean_meeting_is_noop` + `smooth_real_turn…_preserved`.
+- [x] 1.8 **(green, property)** `proptest_smoothing_invariants` — (a) cluster count ≤ input, (c) output length == input, no new labels invented. (b)/(d) covered by `smooth_clean_meeting_is_noop` + `smooth_real_turn…_preserved`. Scope is SAFETY invariants for any input; behavioral claims live in the targeted tests (a no-op would pass these too, by design).
+- [x] 1.9 **(added, review-driven realistic-cosine variants)** the orthogonal embeddings in §1.1–1.7 make the confidence margin trivially large, so they don't exercise the boundary. These use cos 0.6–0.95:
+  - [x] `smooth_realistic_drift_absorption_recovered` — cos-0.90 drifted centroid, ≥80 % recovered (production-realistic moderate drift).
+  - [x] `smooth_absorption_recovers_near_drift_boundary` — cos-0.95 (the OLD μ=0.05 failure boundary); gap 0.05 > μ=0.03 now fires → ≥80 % recovered. Closes review finding #1.
+  - [x] `smooth_realistic_cosine_clean_meeting_is_noop` — two speakers at between-speaker cos 0.6; self-differential 0.24 ≫ μ → output == input. Closes review finding #2 (clean-meeting half).
+  - [x] `smooth_realistic_cosine_interjection_preserved` — interjection at pairwise cos 0.6 to both flanks; self (0.6) anchors it, own label wins outright. Closes review findings #2 (interjection half) + #5 (edge/array coverage by the self>single-side invariant).
 
 ## 2. Centroid recomputation
 

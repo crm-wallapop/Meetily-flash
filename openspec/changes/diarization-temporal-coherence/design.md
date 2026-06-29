@@ -123,15 +123,27 @@ guards (`commands.rs` cosine helper) apply unchanged.
 > turns" complaint. **Full self** (j=i at weight 1.0) preserves interjections but,
 > when a contamination seed's embedding is genuinely tilted toward the contaminant
 > centroid, the full self-vote anchors the wrong label and blocks recovery.
-> Resolution, confirmed by tests (`smooth_sustained_absorption_recovered` +
-> `smooth_short_interjection_between_different_speakers_preserved` both pass):
-> **include self at a DAMPED weight (default 0.5) below the neighbor peak (1.0).**
-> A contaminated chunk's self-fit to its wrong centroid is low, so unanimous
-> neighbors still outvote it (absorption recovered); a genuine interjection's
-> self-fit to its own distinct centroid is high, so split neighbor votes cannot
-> beat it by the confidence margin (interjection preserved). This is what ships.
-> The "using only e_i is a no-op" warning below stands (self-only, no neighbors,
-> is still a no-op); damped self + neighbors is not.
+>
+> **TUNING (2026-06-29 adversarial review):** the first shipped cut used
+> `self_weight = 0.5` and `μ = 0.05`. Two findings forced a retune. (a) At
+> drift `cos(chunk, wrong_centroid) ≥ 0.95`, the score gap to the true centroid
+> is exactly 0.05, so `μ = 0.05` (`>`, not `≥`) never fires — the severe
+> volume-absorption case (a real speaker's chunks fully absorbed so the wrong
+> centroid drifts to sound like them) is precisely where recovery matters most.
+> (b) Lowering μ to recover that case would erase orthogonal-embedding
+> interjections (their neighbor gap is ~0.033). Resolution: **raise
+> `self_weight` to 0.6 so self anchors an interjection OUTRIGHT** (0.6 exceeds
+> the single-side neighbor weight ~0.553 = exp(-1)+exp(-2)+exp(-3), so split
+> neighbors cannot outvote self regardless of μ — this also covers edge-of-array
+> interjections with neighbors on one side only), **then lower `μ` to 0.03** to
+> recover drift up to cos~0.97. Clean meetings stay stable: the self-differential
+> `0.6·(1 − cos(A,B)) ≈ 0.24` at between-speaker cos 0.6 is far above μ. Note
+> the neighbor peak is `exp(-1) ≈ 0.368`, NOT 1.0 — self (0.6) is the strongest
+> single vote, but neighbors collectively (up to ~1.106) outweigh it, which is
+> what lets absorption recover while interjections survive. Confirmed by tests
+> (`smooth_sustained_absorption_recovered`,
+> `smooth_short_interjection_between_different_speakers_preserved`, and the
+> new realistic-cosine variants). This is what ships.
 
 For each chunk i with embedding e_i and current label L_i:
 
@@ -139,19 +151,18 @@ For each chunk i with embedding e_i and current label L_i:
    observed flicker cycle of 15–25 s). A window of one cycle captures the local consensus
    without straddling multiple full oscillation periods (which would average both labels
    equally and dilute the vote).
-2. For each candidate label k, compute the vote using the **neighbors' embeddings**, not
-   the chunk's own:
-   `score(k) = Σ_{j ∈ window, j≠i} cos(e_j, centroid_k) · decay(|i−j|)`
-   where `decay` is an exponential weight peaked at j=i (the chunk's own embedding still
-   contributes via the j=i term with full weight). Triangular decay is also acceptable.
-   **Critical:** the summand MUST be `cos(e_j, centroid_k)` (neighbor j's acoustic fit to
-   centroid k), NOT `cos(e_i, centroid_k)`. The latter is constant over j and reduces the
-   vote to `argmax_k cos(e_i, centroid_k)` — i.e. nearest-centroid, identical to what AHC
-   already does, which fixes nothing.
+2. For each candidate label k, compute the vote:
+   `score(k) = Σ_{j ∈ window(i)} cos(e_j, centroid_k) · w(i,j)`
+   where the window includes j=i (self) and its ±W neighbors, and
+   `w(i,j) = self_weight` (default 0.6) when j=i, else `exp(-|i−j|)` (peak `exp(-1)≈0.368`
+   at the nearest neighbor). **Critical:** the summand MUST be `cos(e_j, centroid_k)`
+   (voter j's acoustic fit to centroid k), NOT `cos(e_i, centroid_k)`. The latter is
+   constant over j and reduces the vote to `argmax_k cos(e_i, centroid_k)` — i.e.
+   nearest-centroid, identical to what AHC already does, which fixes nothing.
 3. **Confidence gate (no-regression guard):** reassign `L_i` only if the winning label's
-   score exceeds the current label's score by a positive margin `μ` (default small, tuned
-   empirically). On a clean meeting where existing assignments are high-confidence, no
-   chunk's winner beats its current label by `μ`, so nothing flips — guaranteeing the
+   normalized score exceeds the current label's normalized score by a positive margin `μ`
+   (default 0.03). On a clean meeting where existing assignments are high-confidence, the
+   self-differential dominates (see TUNING above), so nothing flips — guaranteeing the
    "clean meeting is a near-no-op" property without relying on a post-hoc revert.
 4. After all eligible chunks are reassigned, recompute centroids from the new labels
    (`recompute_centroids_from_labels`, duration-weighted).
