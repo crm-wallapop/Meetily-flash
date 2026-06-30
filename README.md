@@ -42,20 +42,22 @@ A privacy-first AI meeting assistant that captures, transcribes, and summarizes 
 
 </div>
 
-## This fork
+## What makes Meetily-flash (fork) different from Meetily?
 
-A personal fork where I'm rebuilding Meetily around one product call: **there's little value in watching a live transcript while you're in the meeting**, and the real-time pipeline to produce one is heavy. So I turned off live transcription and reworked the flow into **batch post-meeting processing** instead.
+Meetily-flash focuses on improvements to on-device performance and transcription accuracy that weren't feasible on lower-end devices and/or live transcription. To solve this, Meetily-flash is opinionated: there's little value in watching a live transcript while you're in the meeting, and the real-time pipeline to produce one is heavy. The real value is in high-quality notes that users will likely review days after the meeting. So, Meetily-flash does batched, orchestrated, post-meeting processing so it doesn't get in the way of your productivity.
 
 What's different from upstream:
 
-- **Batch pipeline instead of live.** Once a meeting ends, the recording runs through transcription, speaker diarization, and voice fingerprinting. Drops the real-time constraint that wasn't earning its keep.
-- **Speaker diarization with temporal-coherence smoothing.** Speaker labels are stabilized across the recording (absorption-scope correction, per-turn speaker override), so they don't flicker turn to turn.
+- **Batch pipeline instead of live.** Once a meeting ends, the recording runs through transcription, speaker diarization, and voice fingerprinting. Drops taxing real-time processing in favor of a pipeline you can pause/resume.
+- **Speaker diarization with temporal-coherence smoothing.** Speaker labels are stabilized across the recording, so they don't flicker turn to turn.
 - **Voice fingerprinting** to identify speakers across meetings.
-- **Faster transcription engine** (Parakeet/Whisper, roughly 4x), so the batch pass finishes quickly enough that you're not waiting on it.
+- **Faster transcription engine** (enabled Vulkan support for Parakeet/Whisper, roughly 4x). The original pipeline was CPU-bound and didn't use integrated GPU for faster performance.
+- **Cross-platform automated smoke tests** (Vitest + Playwright E2E). The suite runs on Windows, macOS, and Linux with no cloud dependencies, and a checked-in pre-push hook runs the unit suite plus a branch-scoped smoke spec before a push reaches the remote. See [`openspec/specs/automated-smoke-tests`](openspec/specs/automated-smoke-tests).
+- **Hexagonal (ports & adapters) architecture** for testability. The frontend is structured around explicit module seams, and side-effectful paths like audio capture are being pulled behind swappable port traits so the core logic can be exercised without live hardware. See [`openspec/changes/hexagonal-port-traits`](openspec/changes/hexagonal-port-traits).
 
-The work is spec-driven. Each change goes through a short proposal (problem, design, review notes) before it lands, with characterization tests where the behavior is subtle. The change history lives in [`openspec/`](openspec/).
+The work is spec-driven (OpenSpec). Each change goes through a short proposal (problem, design, review notes) before it lands, with characterization tests where the behavior is subtle. The change history lives in [`openspec/`](openspec/).
 
-This is a personal project and a work in progress. Upstream Meetily is by [Zackriya-Solutions](https://github.com/Zackriya-Solutions/meetily); this fork wouldn't exist without it.
+This is a personal project and a work in progress. Kudos to Zackriya-Solutions for creating the original Meetily. This fork wouldn't exist without it.
 
 ---
 
