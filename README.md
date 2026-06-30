@@ -42,6 +42,21 @@ A privacy-first AI meeting assistant that captures, transcribes, and summarizes 
 
 </div>
 
+## This fork
+
+A personal fork where I'm rebuilding Meetily around one product call: **there's little value in watching a live transcript while you're in the meeting**, and the real-time pipeline to produce one is heavy. So I turned off live transcription and reworked the flow into **batch post-meeting processing** instead.
+
+What's different from upstream:
+
+- **Batch pipeline instead of live.** Once a meeting ends, the recording runs through transcription, speaker diarization, and voice fingerprinting. Drops the real-time constraint that wasn't earning its keep.
+- **Speaker diarization with temporal-coherence smoothing.** Speaker labels are stabilized across the recording (absorption-scope correction, per-turn speaker override), so they don't flicker turn to turn.
+- **Voice fingerprinting** to identify speakers across meetings.
+- **Faster transcription engine** (Parakeet/Whisper, roughly 4x), so the batch pass finishes quickly enough that you're not waiting on it.
+
+The work is spec-driven. Each change goes through a short proposal (problem, design, review notes) before it lands, with characterization tests where the behavior is subtle. The change history lives in [`openspec/`](openspec/).
+
+This is a personal project and a work in progress. Upstream Meetily is by [Zackriya-Solutions](https://github.com/Zackriya-Solutions/meetily); this fork wouldn't exist without it.
+
 ---
 
 > **🎉 New: Meetily PRO Available** - Looking for enhanced accuracy and advanced features? Check out our professional-grade solution with custom summary templates, advanced exports (PDF, DOCX), auto-meeting detection, built-in GDPR compliance, and many more. **This Community Edition remains forever free & open source**. [Learn more about PRO →](https://meetily.ai/pro/)
