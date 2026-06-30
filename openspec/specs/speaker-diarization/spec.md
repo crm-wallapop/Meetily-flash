@@ -518,7 +518,7 @@ The submitted name SHALL be persisted via `sqlx` parameterized binding (`?` plac
 
 After global agglomerative clustering assigns per-chunk speaker labels, the system SHALL apply a temporal-coherence smoothing pass to the per-chunk labels INSIDE `sherpa_adapter.rs::process()` immediately after `cluster_by_centroids` and BEFORE per-chunk labels are coalesced into `SpeakerSegment` objects. The smoothing SHALL be a pure function of the chunk labels, chunk embeddings, chunk timestamps, and cluster centroids, with no I/O. The smoothing SHALL NOT increase the cluster count, and SHALL preserve genuine speaker turns whose acoustic shift is strong and whose duration meets the minimum-segment floor. The output SHALL be deterministic.
 
-The smoothing pass SHALL perform neighborhood-voted re-assignment: for each chunk i with current label L_i, the system SHALL compute, for each candidate label k, a vote `score(k) = Σ_{j ∈ window(i)} cos(e_j, centroid_k) · w(i,j)` where the window spans the chunk itself (j = i) and its ±W temporal neighbors (default W = 3), `e_j` is chunk j's embedding, and the weight `w(i,j)` is `self_weight` when j = i (default 0.6) and `exp(-|i−j|)` for neighbors (peak `exp(-1) ≈ 0.368` at the nearest neighbor). The self weight (0.6) is the single strongest vote, but it is low enough that a contaminated chunk's self-fit to its (wrong) centroid is still outvoted by unanimous neighbors (whose combined weight across both sides is up to ~1.106), recovering the chunk (absorption recovery); and it is high enough that it exceeds the neighbor weight on one side alone (~0.553), so a genuine short interjection's self-vote for its own distinct centroid anchors it against split neighbor votes on either side, and an edge-of-array interjection (neighbors on only one side) is likewise preserved. Using ONLY the chunk's own embedding (no neighbors) would reduce the vote to nearest-centroid and fix nothing; using ONLY neighbors (no self) would erase genuine short interjections between two different speakers, reintroducing the over-merging the pass exists to prevent. The system SHALL reassign the chunk's label only when the winning label's normalized score exceeds the current label's normalized score by a positive confidence margin (default 0.03), so that on a clean, high-confidence input no chunk flips (the pass is a near-no-op); the margin is set low enough to recover centroid drift up to cosine ~0.97 against the true centroid, while a clean meeting's self-differential (~0.24 at a between-speaker cosine of 0.6) is well above it, so clean input stays stable. The winner SHALL be chosen deterministically (highest score, ties broken by smallest label) so the output is independent of HashMap iteration order. The system SHALL then recompute duration-weighted centroids from the cleaned labels and iterate the re-assign/recompute cycle up to a fixed cap (default 2 iterations) so that recovered chunks refine the centroids used in the next pass.
+The smoothing pass SHALL perform neighborhood-voted re-assignment: for each chunk i with current label L_i, the system SHALL compute, for each candidate label k, a vote `score(k) = Σ_{j ∈ window(i)} cos(e_j, centroid_k) · w(i,j)` where the window spans the chunk itself (j = i) and its ±W temporal neighbors (default W = 3), `e_j` is chunk j's embedding, and the weight `w(i,j)` is `self_weight` when j = i (default 0.6) and `exp(-|i−j|)` for neighbors (peak `exp(-1) ≈ 0.368` at the nearest neighbor). The self weight (0.6) is the single strongest vote, but it is low enough that a contaminated chunk's self-fit to its (wrong) centroid is still outvoted by unanimous neighbors (whose combined weight across both sides is up to ~1.106), recovering the chunk (local contamination recovery); and it is high enough that it exceeds the neighbor weight on one side alone (~0.553), so a genuine short interjection's self-vote for its own distinct centroid anchors it against split neighbor votes on either side, and an edge-of-array interjection (neighbors on only one side) is likewise preserved. Using ONLY the chunk's own embedding (no neighbors) would reduce the vote to nearest-centroid and fix nothing; using ONLY neighbors (no self) would erase genuine short interjections between two different speakers, reintroducing the over-merging the pass exists to prevent. The system SHALL reassign the chunk's label only when the winning label's normalized score exceeds the current label's normalized score by a positive confidence margin (default 0.03), so that on a clean, high-confidence input no chunk flips (the pass is a near-no-op); the margin is set low enough to recover centroid drift up to cosine ~0.97 against the true centroid, while a clean meeting's self-differential (~0.24 at a between-speaker cosine of 0.6) is well above it, so clean input stays stable. The winner SHALL be chosen deterministically (highest score, ties broken by smallest label) so the output is independent of HashMap iteration order. The system SHALL then recompute duration-weighted centroids from the cleaned labels and iterate the re-assign/recompute cycle up to a fixed cap (default 2 iterations) so that recovered chunks refine the centroids used in the next pass.
 
 After the iteration, the system SHALL merge a same-label run shorter than `MIN_SMOOTH_SEGMENT_SECS` (default ~10 s) into a neighbor ONLY when both adjacent runs share the same label as each other (a flicker island). The system SHALL NOT merge a short run sandwiched between two different speakers (a genuine interjection); such a run is preserved by the damped-self vote's margin gate, so the floor need not (and must not) merge it.
 
@@ -531,12 +531,27 @@ Non-finite (NaN or Inf) embedding values in the smoothing window SHALL contribut
 - **THEN** the t=0 chunk is reassigned to cluster 0
 - **AND** no spurious cluster persists from the contamination seed
 
-#### Scenario: Absorbed speaker is recovered mid-meeting
+#### Scenario: Local mis-assignment is recovered when neighbors are clean
 
-- **GIVEN** a 3-speaker meeting where speaker C has a clean early run defining C's centroid, and C's chunks from minute 30 onward are consistently mis-assigned to cluster B due to B's centroid drift
+- **GIVEN** a chunk mis-assigned to cluster B whose ±W temporal neighbors are consistently cluster C (the chunk's own voice)
 - **WHEN** temporal-coherence smoothing runs
-- **THEN** at least 80 % of C's mis-assigned chunks are recovered to C's cluster
-- **AND** C's cluster does not vanish in the minute 30+ region
+- **THEN** the chunk is recovered to cluster C
+- **AND** recovery requires clean neighbors — a SUSTAINED regional mis-assignment (every neighbor also mis-assigned) is NOT recovered, because the neighborhood vote reinforces the local consensus
+
+> **Out of scope — sustained speaker absorption over a long meeting.** The neighborhood-voted
+> smoothing provably cannot recover a SUSTAINED regional mis-assignment: when every temporal
+> neighbor of a chunk carries the same (wrong) label, the neighborhood vote reinforces that
+> consensus rather than overturning it, so the pass leaves the region unchanged by design. This
+> is a structural property of any local smoothing pass, independent of why the region was
+> mis-assigned. On `meeting-00000001-…` one of three speakers is absorbed from minute ~30 onward
+> under both the production global AHC and a sequential online-centroid-tracking prototype. A
+> read-only diagnostic (`test_00000001_embedding_drift_diagnostic`) **ruled out** the
+> embedding-drift hypothesis originally suspected — the absorbed speaker's OWN late chunks are
+> cos ≈ 0.85 to her early centroid (same-speaker range), NOT the ≈ 0.22 figure cited earlier
+> (which was the mean cosine of ALL late chunks to her centroid, low only because most late
+> chunks belong to other speakers). The root cause is not yet determined and is filed as a
+> separate change; do NOT re-attempt a label-level fix for sustained absorption without first
+> establishing the cause.
 
 #### Scenario: Per-chunk flicker is eliminated
 
