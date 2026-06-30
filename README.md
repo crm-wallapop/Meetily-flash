@@ -53,7 +53,7 @@ What's different from upstream:
 - **Voice fingerprinting** to identify speakers across meetings.
 - **Faster transcription engine** (enabled Vulkan support for Parakeet/Whisper, roughly 4x). The original pipeline was CPU-bound and didn't use integrated GPU for faster performance.
 - **Cross-platform automated smoke tests** (Vitest + Playwright E2E). The suite runs on Windows, macOS, and Linux with no cloud dependencies, and a checked-in pre-push hook runs the unit suite plus a branch-scoped smoke spec before a push reaches the remote. See [`openspec/specs/automated-smoke-tests`](openspec/specs/automated-smoke-tests).
-- **Hexagonal (ports & adapters) architecture** for testability. The frontend is structured around explicit module seams, and side-effectful paths like audio capture are being pulled behind swappable port traits so the core logic can be exercised without live hardware. See [`openspec/changes/hexagonal-port-traits`](openspec/changes/hexagonal-port-traits).
+- **Hexagonal (ports & adapters) architecture** for testability. The frontend is split into small modules with clear boundaries, and anything that touches the outside world, like audio capture, is being moved behind an interface you can swap out, so the core logic can be tested without a real microphone. See [`openspec/changes/hexagonal-port-traits`](openspec/changes/hexagonal-port-traits).
 
 The work is spec-driven (OpenSpec). Each change goes through a short proposal (problem, design, review notes) before it lands, with characterization tests where the behavior is subtle. The change history lives in [`openspec/`](openspec/).
 
