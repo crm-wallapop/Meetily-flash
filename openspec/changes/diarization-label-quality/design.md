@@ -76,7 +76,7 @@ Distinct from `enforce_min_segment_floor`: the floor collapses only sub-10s runs
 
 ## Risks / Trade-offs
 
-- **Pass 2 compute cost (~4× embeddings)** → Task 1 measures wall-clock on a 70-min meeting with an `#[ignore]` real-audio test; if > 60s, scope an 8kHz-downsampled Pass 2 before proceeding (mirrors the segmentation-windows risk treatment). Runs on the existing blocking thread, never the audio callback.
+- **Pass 2 compute cost (~4× embeddings)** → Task 1 measures wall-clock on a 70-min meeting with an `#[ignore]` real-audio test; if > 60s, scope an 8kHz-downsampled Pass 2 before proceeding (mirrors the segmentation-windows risk treatment). Runs on the existing blocking thread, never the audio callback. **RESOLVED (§1.1):** rayon-parallelised `build_fine_chunks` (chunks are independent; the ONNX embedding session is `&self`/`Sync`) brought Pass 2 from 148s (sequential, `num_threads:2`) to **~29s** on the 83-min cde5c264 meeting (~2487 fine chunks). The 8kHz-downsample path (§1.2) is **not needed** — well under the 60s budget.
 - **Two-pass doesn't resolve sub-2s overlaps (e.g. `[47:32]`)** → accepted limitation. Token-level alignment (D4) does NOT recover these — it distributes words within a diarization segment and cannot invent a boundary. `[46:58]` (the primary case) IS resolved.
 - **Nearest-centroid mislabels an ambiguous chunk** → D3 tie-break by temporal predecessor + smoothing residual cleanup.
 - **Pass 2 fragments a clean single-speaker meeting** → if Pass 1 yields a single centroid, every fine chunk snaps to it by construction; if Pass 1 over-clusters (AHC false positive), smoothing + coalescing clean up the residual. Task 3.6 guards the single-speaker case.
@@ -90,7 +90,7 @@ Distinct from `enforce_min_segment_floor`: the floor collapses only sub-10s runs
 - Equidistant centroid → D3 tie-break by predecessor.
 - 1-speaker meeting → single centroid, no fragmentation.
 - Oversized meeting (4h) → Pass 2 chunk count bounded; no OOM.
-- `[46:58]` real-audio oracle (`#[ignore]`): Ricardo interjection isolated (the spike's REF result, as a regression guard).
+- `[46:58]` real-audio oracle (`#[ignore]`): Ricardo interjection isolated — ≥10s of his label in `[46:42–47:02]`, and no Ricardo label before his 17:37 join. **Ricardo's label is identified by temporal ground truth** (the centroid with minimal pre-17:37 presence — he is the only late-joiner), not a voice-cosine check: a voice reference averaged over `[17:37,19:00]` blends all 3 speakers (the diagnostic dump showed chunks nearest to each of centroids 0, 1, and 2 in that span) and misidentifies the label. A post-join presence sanity check (>300s) guards against a phantom/dead label. The pipeline resolves `[2802s–2820s]` as an 18s segment of his centroid; the prior oracle failure was a test-only reference bug, not a pipeline defect.
 
 **Token wiring (lever 1):**
 - Empty `token_timestamps` (Whisper returns none) → falls back to proportional, no crash.

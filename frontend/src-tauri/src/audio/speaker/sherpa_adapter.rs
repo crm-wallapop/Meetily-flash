@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use rayon::prelude::*;
 use sherpa_onnx::{
     SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig,
     SpeakerEmbeddingManager,
@@ -400,7 +401,10 @@ impl SherpaOnnxDiarizationAdapter {
     // Pass-2 fine re-chunking (design D2): uniform non-overlapping windows at
     // `fine_split_secs` across the FULL recording, ignoring MAX_CHUNK_SECS so a
     // ≤10s segment is sub-divided rather than left as one mixed-speaker chunk.
-    // Silent windows yield no embedding and are skipped.
+    // Silent windows yield no embedding and are skipped. Embedding extraction is
+    // parallelized with rayon — chunks are independent and the ONNX session is
+    // thread-safe; collect() preserves temporal order so downstream assignment
+    // and smoothing see the same sequence as the sequential path.
     pub(crate) fn build_fine_chunks(
         &self,
         samples: &[f32],
@@ -409,19 +413,18 @@ impl SherpaOnnxDiarizationAdapter {
     ) -> Vec<Chunk> {
         let sr_f = sample_rate as f64;
         let ranges = fine_chunk_ranges(samples.len(), sample_rate, fine_split_secs);
-        let mut chunks: Vec<Chunk> = Vec::with_capacity(ranges.len());
-        for (start, end) in ranges {
-            let audio = &samples[start..end];
-            if let Some(emb) = self.extract_embedding(audio, sample_rate) {
-                chunks.push(Chunk {
+        ranges
+            .par_iter()
+            .filter_map(|&(start, end)| {
+                let audio = &samples[start..end];
+                self.extract_embedding(audio, sample_rate).map(|emb| Chunk {
                     start_sample: start,
                     end_sample: end,
                     duration_secs: (end - start) as f64 / sr_f,
                     embedding: emb,
-                });
-            }
-        }
-        chunks
+                })
+            })
+            .collect()
     }
 
     // Pass 2 (design D1): re-chunk the full recording at FINE_SPLIT_SECS and
@@ -499,9 +502,11 @@ pub(crate) fn fine_chunk_ranges(
     ranges
 }
 
-// Top-2 cosine margin below which a fine chunk is considered equidistant
+// Top-2 cosine margin below which a fine chunk is considered near-equidistant
 // between two centroids and falls back to its temporal predecessor (design D3).
-const CENTROID_TIE_MARGIN: f32 = 1e-4;
+// Tuned to the same scale as SMOOTH_CONFIDENCE_MARGIN (0.03): a value near 1e-4
+// would only fire on exact floating-point ties, leaving D3 effectively dead.
+const CENTROID_TIE_MARGIN: f32 = 0.02;
 
 // Pass-2 nearest-centroid assignment (design D1). No second AHC: each fine
 // chunk takes the label of its cosine-nearest Pass-1 post-cap centroid, so the
@@ -1183,7 +1188,7 @@ pub(crate) fn cluster_by_centroids_naive(chunks: &[Chunk], threshold: f32) -> (V
     (labels, final_centroids)
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -1700,6 +1705,44 @@ mod tests {
         assert_eq!(labels[1], 10, "equidistant chunk takes predecessor, not arbitrary");
     }
 
+    // ── diarization-label-quality — §4 adversarial: degenerate Pass-2 inputs
+
+    #[test]
+    fn assign_nan_embedding_falls_back_to_default_label() {
+        // A NaN embedding makes cosine undefined against every centroid; the
+        // finite-filter drops all candidates and the chunk takes the default
+        // label (smallest centroid key) rather than panicking.
+        let dim = 4;
+        let a = emb(0, dim);
+        let b = emb(1, dim);
+        let nan = vec![f32::NAN; dim];
+        let embeddings = vec![a.clone(), nan, b.clone()];
+        let timestamps = vec![0.0, 2.0, 4.0];
+        let centroids: HashMap<u32, Vec<f32>> = [(10u32, a), (20u32, b)].into_iter().collect();
+        let labels = assign_to_nearest_centroids(&embeddings, &timestamps, &centroids);
+        assert_eq!(labels.len(), 3);
+        assert_eq!(labels[0], 10);
+        assert_eq!(labels[1], 10, "NaN embedding takes default label, no panic");
+        assert_eq!(labels[2], 20);
+    }
+
+    #[test]
+    fn assign_and_coalesce_empty_input_produces_no_phantom_speakers() {
+        // All-silent audio yields zero fine chunks; Pass-2's tail helpers must
+        // return empty (not invent a speaker) and never panic on empty input.
+        let centroids: HashMap<u32, Vec<f32>> =
+            [(10u32, emb(0, 4)), (20u32, emb(1, 4))].into_iter().collect();
+        let labels = assign_to_nearest_centroids(&[], &[], &centroids);
+        assert!(labels.is_empty());
+
+        let empty_centroids: HashMap<u32, Vec<f32>> = HashMap::new();
+        let labels2 = assign_to_nearest_centroids(&[emb(0, 4)], &[0.0], &empty_centroids);
+        assert_eq!(labels2, vec![0], "no centroids → default label 0, no panic");
+
+        let segs = chunks_to_segments(&[], &[], 16000);
+        assert!(segs.is_empty(), "empty chunks → no phantom segments");
+    }
+
     // ── diarization-label-quality — facet-2 temporal-presence tests (§4.1/4.3/4.4)
 
     fn seg(start: f64, end: f64, speaker: u32) -> SpeakerSegment {
@@ -2144,13 +2187,6 @@ mod tests {
             e[axis] = 1.0;
         }
         e
-    }
-
-    fn normalize(v: &mut [f32]) {
-        let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
-        for x in v.iter_mut() {
-            *x /= n;
-        }
     }
 
     fn ts_seq(n: usize, step: f64) -> Vec<f64> {

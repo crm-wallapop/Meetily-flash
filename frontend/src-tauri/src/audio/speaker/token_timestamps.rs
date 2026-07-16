@@ -31,7 +31,7 @@ pub fn extract_token_timestamps(
                 continue;
             }
 
-            // Skip special timestamp tokens (they start with _)
+            // Skip special/sentinel tokens (whisper-rs assigns them negative token_ids)
             let id = token.token_id();
             if id < 0 {
                 continue;

@@ -564,7 +564,7 @@ async fn run_import<R: Runtime>(
     info!("Processing {} segments (after splitting)", processable_count);
 
     // Process each speech segment
-    let mut all_transcripts: Vec<(String, f64, f64)> = Vec::new();
+    let mut all_transcripts: Vec<(String, f64, f64, Option<String>)> = Vec::new();
     let mut total_confidence = 0.0f32;
 
     // Engines are None when total_segments == 0; skip transcription entirely
@@ -603,7 +603,7 @@ async fn run_import<R: Runtime>(
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
             let trimmed = text.trim();
             if !trimmed.is_empty() {
-                all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms));
+                all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms, None));
                 total_confidence += 0.9f32;
             }
         }
@@ -619,7 +619,7 @@ async fn run_import<R: Runtime>(
 
         let engine = whisper_engine.as_ref().ok_or_else(|| anyhow!("Whisper engine not initialised"))?.clone();
         // Allocate result slots indexed by segment position to preserve ordering.
-        let mut segment_results: Vec<Option<(String, f64, f64, f32)>> =
+        let mut segment_results: Vec<Option<(String, f64, f64, f32, Option<String>)>> =
             vec![None; processable_count];
         let mut completed = 0usize;
 
@@ -643,17 +643,17 @@ async fn run_import<R: Runtime>(
                         return Err(anyhow!("Import cancelled"));
                     }
                     if samples.len() < 1600 {
-                        return Ok::<(usize, Option<(String, f64, f64, f32)>), anyhow::Error>(
+                        return Ok::<(usize, Option<(String, f64, f64, f32, Option<String>)>), anyhow::Error>(
                             (i, None),
                         );
                     }
-                    let (text, conf, _) = engine
+                    let (text, conf, _, token_ts) = engine
                         .transcribe_audio_with_confidence(samples, language)
                         .await
                         .map_err(|e| {
                             anyhow!("Whisper transcription failed on segment {}: {}", i, e)
                         })?;
-                    Ok((i, Some((text, start_ms, end_ms, conf))))
+                    Ok((i, Some((text, start_ms, end_ms, conf, token_ts))))
                 }
             })
             .buffer_unordered(concurrency);
@@ -680,11 +680,11 @@ async fn run_import<R: Runtime>(
         }
 
         for entry in segment_results {
-            if let Some((text, start_ms, end_ms, conf)) = entry {
+            if let Some((text, start_ms, end_ms, conf, token_ts)) = entry {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
                     debug!("Segment transcribed: {:.1}s, conf={:.2}", (end_ms - start_ms) / 1000.0, conf);
-                    all_transcripts.push((text, start_ms, end_ms));
+                    all_transcripts.push((text, start_ms, end_ms, token_ts));
                     total_confidence += conf;
                 }
             }
@@ -836,8 +836,8 @@ async fn create_meeting_with_transcripts(
     // Insert transcripts
     for segment in segments {
         sqlx::query(
-            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, token_timestamps)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&segment.id)
         .bind(&meeting_id)
@@ -846,6 +846,7 @@ async fn create_meeting_with_transcripts(
         .bind(segment.audio_start_time)
         .bind(segment.audio_end_time)
         .bind(segment.duration)
+        .bind(&segment.token_timestamps)
         .execute(&mut *tx)
         .await
         .map_err(|e| anyhow!("Failed to insert transcript: {}", e))?;
@@ -1139,20 +1140,60 @@ mod tests {
 
     #[test]
     fn test_create_transcript_segments_empty() {
-        let transcripts: Vec<(String, f64, f64)> = vec![];
+        let transcripts: Vec<(String, f64, f64, Option<String>)> = vec![];
         let segments = create_transcript_segments(&transcripts);
         assert!(segments.is_empty());
     }
 
     #[test]
     fn test_create_transcript_segments_single() {
-        let transcripts = vec![("Hello world".to_string(), 0.0, 1500.0)];
+        let transcripts = vec![("Hello world".to_string(), 0.0, 1500.0, None)];
         let segments = create_transcript_segments(&transcripts);
 
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].text, "Hello world");
         assert_eq!(segments[0].audio_start_time, Some(0.0));
         assert_eq!(segments[0].audio_end_time, Some(1.5));
+    }
+
+    // ── §2.1: token_timestamps wiring round-trip ────────────────────────
+    // extract_token_timestamps needs a live WhisperState (un-mockable), so the
+    // round-trip is pinned at the wiring boundary: when the extractor yields
+    // Some(json), create_transcript_segments must carry it onto the field that
+    // the INSERT binds — proving the §2.2 wiring is not silently dropping it.
+
+    #[test]
+    fn test_create_transcript_segments_carries_token_timestamps() {
+        let token_json = r#"[{"word":"Hello","start_ms":0,"end_ms":500}]"#;
+        let transcripts = vec![("Hello".to_string(), 0.0, 500.0, Some(token_json.to_string()))];
+        let segments = create_transcript_segments(&transcripts);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            segments[0].token_timestamps,
+            Some(token_json.to_string()),
+            "non-NULL token_timestamps must survive into the segment that gets INSERT-bound"
+        );
+    }
+
+    #[test]
+    fn test_create_transcript_segments_missing_tokens_fall_back_gracefully() {
+        // Adversarial: Whisper returned no valid tokens (silence/garble) →
+        // extractor yields None. The segment must carry None (→ proportional
+        // alignment downstream), never panic.
+        let transcripts = vec![("Hello".to_string(), 0.0, 500.0, None)];
+        let segments = create_transcript_segments(&transcripts);
+
+        assert_eq!(segments.len(), 1);
+        assert!(segments[0].token_timestamps.is_none());
+        // Mixed: one segment with tokens, one without — each carries its own.
+        let mixed = vec![
+            ("first".to_string(), 0.0, 500.0, None),
+            ("second".to_string(), 500.0, 1000.0, Some(r#"[{"word":"second","start_ms":0,"end_ms":200}]"#.to_string())),
+        ];
+        let segs = create_transcript_segments(&mixed);
+        assert!(segs[0].token_timestamps.is_none());
+        assert!(segs[1].token_timestamps.is_some());
     }
 
     #[test]
@@ -1344,6 +1385,7 @@ mod tests {
                 audio_start_time: Some(0.0),
                 audio_end_time: Some(1.5),
                 duration: Some(1.5),
+                token_timestamps: None,
             },
             TranscriptSegment {
                 id: "t-2".to_string(),
@@ -1352,6 +1394,7 @@ mod tests {
                 audio_start_time: Some(2.0),
                 audio_end_time: Some(3.5),
                 duration: Some(1.5),
+                token_timestamps: None,
             },
         ];
 

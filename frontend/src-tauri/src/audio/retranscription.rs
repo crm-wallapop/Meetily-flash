@@ -210,10 +210,10 @@ pub(crate) async fn transcribe_segments_checkpointed<F, Fut>(
     pool: &sqlx::SqlitePool,
     mut transcribe: F,
     mut on_progress: impl FnMut(usize, usize),
-) -> Result<(Vec<(String, f64, f64)>, f32)>
+) -> Result<(Vec<(String, f64, f64, Option<String>)>, f32)>
 where
     F: FnMut(usize, &crate::audio::vad::SpeechSegment) -> Fut,
-    Fut: std::future::Future<Output = Result<(String, f32)>>,
+    Fut: std::future::Future<Output = Result<(String, f32, Option<String>)>>,
 {
     let total = processable_segments.len();
     let checkpoints = match load_checkpoints(pool, meeting_id).await {
@@ -234,7 +234,7 @@ where
         on_progress(completed, total);
     }
 
-    let mut all_transcripts: Vec<(String, f64, f64)> = Vec::new();
+    let mut all_transcripts: Vec<(String, f64, f64, Option<String>)> = Vec::new();
     let mut total_confidence: f32 = 0.0;
 
     for (i, segment) in processable_segments.iter().enumerate() {
@@ -248,7 +248,7 @@ where
 
         // Skip checkpointed segments: push the loaded transcript and continue.
         if let Some(cp) = matched.iter().find(|c| c.segment_index == i) {
-            all_transcripts.push((cp.text.clone(), cp.start_ms, cp.end_ms));
+            all_transcripts.push((cp.text.clone(), cp.start_ms, cp.end_ms, None));
             total_confidence += cp.confidence;
             continue;
         }
@@ -262,10 +262,10 @@ where
             continue;
         }
 
-        let (text, conf) = transcribe(i, segment).await?;
+        let (text, conf, token_ts) = transcribe(i, segment).await?;
         let trimmed = text.trim();
         if !trimmed.is_empty() {
-            all_transcripts.push((text.clone(), segment.start_timestamp_ms, segment.end_timestamp_ms));
+            all_transcripts.push((text.clone(), segment.start_timestamp_ms, segment.end_timestamp_ms, token_ts));
             total_confidence += conf;
             // Best-effort checkpoint write; never abort the job on failure.
             if let Err(e) = save_checkpoint(
@@ -608,14 +608,14 @@ async fn run_retranscription<R: Runtime>(
                         .transcribe_audio(samples)
                         .await
                         .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-                    Ok((text, 0.9f32))
+                    Ok((text, 0.9f32, None))
                 } else {
                     let engine = whisper_engine.as_ref().unwrap();
-                    let (text, conf, _) = engine
+                    let (text, conf, _, token_ts) = engine
                         .transcribe_audio_with_confidence(samples, language)
                         .await
                         .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-                    Ok((text, conf))
+                    Ok((text, conf, token_ts))
                 }
             }
         },
@@ -674,8 +674,8 @@ async fn run_retranscription<R: Runtime>(
 
     for segment in &segments {
         sqlx::query(
-            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration)
-             VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, token_timestamps)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&segment.id)
         .bind(&meeting_id)
@@ -684,6 +684,7 @@ async fn run_retranscription<R: Runtime>(
         .bind(segment.audio_start_time)
         .bind(segment.audio_end_time)
         .bind(segment.duration)
+        .bind(&segment.token_timestamps)
         .execute(&mut *tx)
         .await
         .map_err(|e| anyhow!("Failed to insert transcript: {}", e))?;
@@ -1125,7 +1126,7 @@ mod tests {
 
     #[test]
     fn test_create_transcript_segments_empty() {
-        let transcripts: Vec<(String, f64, f64)> = vec![];
+        let transcripts: Vec<(String, f64, f64, Option<String>)> = vec![];
         let segments = create_transcript_segments(&transcripts);
         assert!(segments.is_empty());
     }
@@ -1133,7 +1134,7 @@ mod tests {
     #[test]
     fn test_create_transcript_segments_single() {
         let transcripts = vec![
-            ("Hello world".to_string(), 0.0, 1500.0), // 0-1.5 seconds
+            ("Hello world".to_string(), 0.0, 1500.0, None), // 0-1.5 seconds
         ];
         let segments = create_transcript_segments(&transcripts);
 
@@ -1147,9 +1148,9 @@ mod tests {
     #[test]
     fn test_create_transcript_segments_multiple() {
         let transcripts = vec![
-            ("First segment".to_string(), 0.0, 2000.0),      // 0-2 seconds
-            ("Second segment".to_string(), 3000.0, 5000.0),  // 3-5 seconds
-            ("Third segment".to_string(), 6500.0, 8000.0),   // 6.5-8 seconds
+            ("First segment".to_string(), 0.0, 2000.0, None),      // 0-2 seconds
+            ("Second segment".to_string(), 3000.0, 5000.0, None),  // 3-5 seconds
+            ("Third segment".to_string(), 6500.0, 8000.0, None),   // 6.5-8 seconds
         ];
         let segments = create_transcript_segments(&transcripts);
 
@@ -1177,7 +1178,7 @@ mod tests {
     #[test]
     fn test_create_transcript_segments_trims_whitespace() {
         let transcripts = vec![
-            ("  Hello with spaces  ".to_string(), 0.0, 1000.0),
+            ("  Hello with spaces  ".to_string(), 0.0, 1000.0, None),
         ];
         let segments = create_transcript_segments(&transcripts);
 
@@ -1188,8 +1189,8 @@ mod tests {
     #[test]
     fn test_create_transcript_segments_generates_unique_ids() {
         let transcripts = vec![
-            ("Segment one".to_string(), 0.0, 1000.0),
-            ("Segment two".to_string(), 1000.0, 2000.0),
+            ("Segment one".to_string(), 0.0, 1000.0, None),
+            ("Segment two".to_string(), 1000.0, 2000.0, None),
         ];
         let segments = create_transcript_segments(&transcripts);
 
@@ -1374,7 +1375,7 @@ mod tests {
                 let ti = Arc::clone(&ti);
                 async move {
                     ti.lock().unwrap().push(i);
-                    Ok((format!("new-{}", i), 0.5f32))
+                    Ok((format!("new-{}", i), 0.5f32, None))
                 }
             },
             |_, _| {},
@@ -1412,7 +1413,7 @@ mod tests {
             meeting_id,
             &segments,
             &pool,
-            |i, _seg| async move { Ok((format!("post-crash-{}", i), 0.5f32)) },
+            |i, _seg| async move { Ok((format!("post-crash-{}", i), 0.5f32, None)) },
             |_, _| {},
         )
         .await
@@ -1481,7 +1482,7 @@ mod tests {
                 let t = Arc::clone(&t);
                 async move {
                     t.lock().unwrap().push(i);
-                    Ok(("fresh".to_string(), 0.5f32))
+                    Ok(("fresh".to_string(), 0.5f32, None))
                 }
             },
             |_, _| {},
@@ -1529,7 +1530,7 @@ mod tests {
             meeting_id,
             &segments,
             &pool,
-            |_i, _seg| async { Ok(("text".to_string(), 0.5f32)) },
+            |_i, _seg| async { Ok(("text".to_string(), 0.5f32, None)) },
             |_, _| {},
         )
         .await
@@ -1558,7 +1559,7 @@ mod tests {
             meeting_id,
             &segments,
             &pool,
-            |_i, _seg| async { Ok(("new".to_string(), 0.5f32)) },
+            |_i, _seg| async { Ok(("new".to_string(), 0.5f32, None)) },
             move |loaded, total| {
                 let mut g = fp.lock().unwrap();
                 if g.is_none() {
@@ -1626,7 +1627,7 @@ mod tests {
                 let ti = Arc::clone(&ti);
                 async move {
                     ti.lock().unwrap().push(i);
-                    Ok((format!("new-{}", i), 0.5f32))
+                    Ok((format!("new-{}", i), 0.5f32, None))
                 }
             },
             |_, _| {},
@@ -1664,7 +1665,7 @@ mod tests {
             meeting_id,
             &segments,
             &pool,
-            |_i, _seg| async { Ok(("new".to_string(), 0.5f32)) },
+            |_i, _seg| async { Ok(("new".to_string(), 0.5f32, None)) },
             move |loaded, total| {
                 let mut g = fp.lock().unwrap();
                 if g.is_none() {
@@ -1704,7 +1705,7 @@ mod tests {
             meeting_id,
             &segments,
             &pool,
-            |_i, _seg| async { Ok(("new".to_string(), 0.5f32)) },
+            |_i, _seg| async { Ok(("new".to_string(), 0.5f32, None)) },
             move |done, _total| { c.lock().unwrap().push(done); },
         )
         .await
@@ -1772,7 +1773,7 @@ mod tests {
             meeting_id,
             &segments,
             &pool,
-            |_i, _seg| async { Ok(("".to_string(), 0.5f32)) },
+            |_i, _seg| async { Ok(("".to_string(), 0.5f32, None)) },
             move |done, _total| { c.lock().unwrap().push(done); },
         )
         .await
@@ -1832,7 +1833,7 @@ mod tests {
                         crate::use_cases::transcription_queue::SHOULD_YIELD
                             .store(true, Ordering::SeqCst);
                     }
-                    Ok((format!("initial-{}", i), 0.5f32))
+                    Ok((format!("initial-{}", i), 0.5f32, None))
                 }
             },
             |_, _| {},
@@ -1863,7 +1864,7 @@ mod tests {
                 let ti = Arc::clone(&ti2);
                 async move {
                     ti.lock().unwrap().push(i);
-                    Ok((format!("resumed-{}", i), 0.7f32))
+                    Ok((format!("resumed-{}", i), 0.7f32, None))
                 }
             },
             |_, _| {},
@@ -1987,7 +1988,7 @@ mod tests {
                         crate::use_cases::transcription_queue::SHOULD_YIELD
                             .store(true, Ordering::SeqCst);
                     }
-                    Ok((format!("initial-{}", i), 0.5f32))
+                    Ok((format!("initial-{}", i), 0.5f32, None))
                 }
             },
             |_, _| {},
@@ -2043,7 +2044,7 @@ mod tests {
                 let r2 = Arc::clone(&r2);
                 async move {
                     r2.lock().unwrap().push(i);
-                    Ok((format!("resumed-{}", i), 0.7f32))
+                    Ok((format!("resumed-{}", i), 0.7f32, None))
                 }
             },
             |_, _| {},
@@ -2089,7 +2090,7 @@ mod tests {
             !all.is_empty(),
             "accumulator must carry transcripts from checkpointed + fresh segments"
         );
-        for (i, (text, start, end)) in all.iter().enumerate() {
+        for (i, (text, start, end, _token_ts)) in all.iter().enumerate() {
             assert!(
                 !text.trim().is_empty(),
                 "accumulator[{}] text is empty; checkpoint or decode lost it",

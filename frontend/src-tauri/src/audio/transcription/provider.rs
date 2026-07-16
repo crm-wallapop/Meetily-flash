@@ -43,6 +43,7 @@ pub struct TranscriptResult {
     pub text: String,
     pub confidence: Option<f32>, // None if provider doesn't support confidence scores
     pub is_partial: bool,
+    pub token_timestamps: Option<String>,
 }
 
 /// Trait for transcription providers (Whisper, Parakeet, future providers)

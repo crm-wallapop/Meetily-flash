@@ -11,6 +11,7 @@ use reqwest::Client;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use crate::config::WHISPER_MODEL_CATALOG;
+use crate::audio::speaker::token_timestamps::extract_token_timestamps;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ModelStatus {
@@ -520,7 +521,7 @@ impl WhisperEngine {
     }
     
     /// Transcribe audio with streaming support for partial results and adaptive quality
-    pub async fn transcribe_audio_with_confidence(&self, audio_data: Vec<f32>, language: Option<String>) -> Result<(String, f32, bool)> {
+    pub async fn transcribe_audio_with_confidence(&self, audio_data: Vec<f32>, language: Option<String>) -> Result<(String, f32, bool, Option<String>)> {
         let ctx_lock = self.current_context.read().await;
         let ctx = ctx_lock.as_ref()
             .ok_or_else(|| anyhow!("No model loaded. Please load a model first."))?;
@@ -640,7 +641,9 @@ impl WhisperEngine {
             0.0
         };
 
-        Ok((cleaned_result, avg_confidence, is_partial))
+        let token_timestamps = extract_token_timestamps(&state, num_segments);
+
+        Ok((cleaned_result, avg_confidence, is_partial, token_timestamps))
     }
 
     pub async fn transcribe_audio(&self, audio_data: Vec<f32>, language: Option<String>) -> Result<String> {
