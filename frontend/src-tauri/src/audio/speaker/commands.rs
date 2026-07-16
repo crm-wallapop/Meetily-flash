@@ -374,37 +374,53 @@ pub async fn run_diarization_for_meeting(
     .map_err(|e| format!("Failed to create diarization adapter: {}", e))?;
     log::warn!("DIARIZATION: adapter creation: {:.2}s", t1.elapsed().as_secs_f64());
 
-    // Step 4: Run diarization with transcript-driven segments.
-    // Clustering + embedding extraction are CPU-bound (seconds even after the
-    // D1/D2 perf fix); offload to a blocking thread so the async runtime
-    // (detection polls, IPC) stays responsive regardless of meeting length.
-    let t2 = std::time::Instant::now();
-    let diarization = tokio::task::spawn_blocking(move || {
-        adapter.process(&samples, DIARIZATION_SAMPLE_RATE, &transcript_segments)
-    })
-    .await
-    .map_err(|e| format!("Diarization blocking task failed: {}", e))?
-    .map_err(|e| format!("Diarization failed: {}", e))?;
-    let mut segments = diarization.segments;
-    let mut centroids = diarization.centroids;
-    log::warn!("DIARIZATION: full pipeline: {:.2}s → {} segments", t2.elapsed().as_secs_f64(), segments.len());
-
-    if segments.is_empty() {
-        log::info!("run_diarization_for_meeting: 0 speakers detected for meeting {}", meeting_id);
-        return Ok(DiarizationResult { segments_labeled: cleared, speaker_count: 0 });
-    }
-
-    // Enforce max_speakers cap: merge the MOST ISOLATED cluster (lowest
-    // nearest-neighbour similarity) into its nearest neighbour. Merging the
-    // highest-similarity pair collapses two similar real speakers; merging
-    // the outlier absorbs noise/fragment clusters without touching
-    // well-separated speakers that happen to sound alike.
+    // Resolve the cap before the blocking pipeline: it is an async DB read
+    // independent of process() output, and process()+cap()+refine_pass2() must
+    // share one blocking thread (the adapter is moved into the closure).
     let effective_cap = resolve_effective_cap_for_meeting(pool, meeting_id).await;
     log::info!(
         "DIARIZATION: effective max_speakers cap for meeting {} = {}",
         meeting_id, effective_cap
     );
-    enforce_max_speakers_cap(&mut centroids, &mut segments, effective_cap);
+
+    // Step 4: Run the full diarization pipeline off the async runtime. Pass 1
+    // (coarse process()) → enforce_max_speakers_cap → Pass 2 (refine_pass2:
+    // 2 s re-chunk assigned to the post-cap centroids, design D1). All three
+    // are CPU-bound; offloading keeps detection polls / IPC responsive.
+    let t2 = std::time::Instant::now();
+    let (segments, centroids) = tokio::task::spawn_blocking(move || {
+        let coarse = adapter.process(&samples, DIARIZATION_SAMPLE_RATE, &transcript_segments)?;
+        let mut segments = coarse.segments;
+        let mut centroids = coarse.centroids;
+        if !segments.is_empty() {
+            // Cap: merge the MOST ISOLATED cluster (lowest nearest-neighbour
+            // similarity), not the highest-similarity pair, so two similar real
+            // speakers survive while noise/fragment clusters are absorbed.
+            enforce_max_speakers_cap(&mut centroids, &mut segments, effective_cap);
+            if !centroids.is_empty() {
+                segments = adapter.refine_pass2(&samples, DIARIZATION_SAMPLE_RATE, &centroids)?;
+                // Pass 2 only draws labels from the post-cap centroid set, so
+                // prune any centroid a speaker no longer uses (clean fingerprinting).
+                let used: std::collections::HashSet<u32> =
+                    segments.iter().map(|s| s.speaker_id).collect();
+                centroids.retain(|k, _| used.contains(k));
+            }
+        }
+        Ok::<_, anyhow::Error>((segments, centroids))
+    })
+    .await
+    .map_err(|e| format!("Diarization blocking task failed: {}", e))?
+    .map_err(|e| format!("Diarization failed: {}", e))?;
+    log::warn!(
+        "DIARIZATION: full pipeline (Pass 1 + cap + Pass 2): {:.2}s → {} segments",
+        t2.elapsed().as_secs_f64(),
+        segments.len()
+    );
+
+    if segments.is_empty() {
+        log::info!("run_diarization_for_meeting: 0 speakers detected for meeting {}", meeting_id);
+        return Ok(DiarizationResult { segments_labeled: cleared, speaker_count: 0 });
+    }
 
     let num_speakers: std::collections::HashSet<u32> =
         segments.iter().map(|s| s.speaker_id).collect();

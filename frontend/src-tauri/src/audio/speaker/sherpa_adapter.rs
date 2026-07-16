@@ -135,6 +135,12 @@ const SPLIT_TARGET_SECS: f64 = 3.0;
 const MAX_DIARIZATION_CHUNKS: usize = 600;
 const MIN_CLUSTER_FRAC: f64 = 0.02;
 
+// Pass-2 fine re-chunking granularity (design D2). Uniform across the full
+// recording, independent of Whisper segment boundaries — unlike build_chunks,
+// which respects MAX_CHUNK_SECS and leaves ≤10s segments as a single chunk.
+// Sub-turn interjections (≥2s) only resolve if every region is sub-divided.
+pub(crate) const FINE_SPLIT_SECS: f64 = 2.0;
+
 fn to_fp(v: f32) -> u32 {
     (v * 65536.0) as u32
 }
@@ -390,6 +396,205 @@ impl SherpaOnnxDiarizationAdapter {
 
         chunks
     }
+
+    // Pass-2 fine re-chunking (design D2): uniform non-overlapping windows at
+    // `fine_split_secs` across the FULL recording, ignoring MAX_CHUNK_SECS so a
+    // ≤10s segment is sub-divided rather than left as one mixed-speaker chunk.
+    // Silent windows yield no embedding and are skipped.
+    pub(crate) fn build_fine_chunks(
+        &self,
+        samples: &[f32],
+        sample_rate: u32,
+        fine_split_secs: f64,
+    ) -> Vec<Chunk> {
+        let sr_f = sample_rate as f64;
+        let ranges = fine_chunk_ranges(samples.len(), sample_rate, fine_split_secs);
+        let mut chunks: Vec<Chunk> = Vec::with_capacity(ranges.len());
+        for (start, end) in ranges {
+            let audio = &samples[start..end];
+            if let Some(emb) = self.extract_embedding(audio, sample_rate) {
+                chunks.push(Chunk {
+                    start_sample: start,
+                    end_sample: end,
+                    duration_secs: (end - start) as f64 / sr_f,
+                    embedding: emb,
+                });
+            }
+        }
+        chunks
+    }
+
+    // Pass 2 (design D1): re-chunk the full recording at FINE_SPLIT_SECS and
+    // assign each fine chunk to its nearest Pass-1 post-cap centroid, then
+    // smooth, coalesce, and relabel temporal orphans (design D5). No second
+    // AHC — every label is drawn from `final_centroids`, so the speaker cap
+    // stays satisfied. Returns fine segments; the post-cap centroids stay
+    // valid (commands.rs prunes any a speaker no longer uses).
+    pub(crate) fn refine_pass2(
+        &self,
+        samples: &[f32],
+        sample_rate: u32,
+        final_centroids: &HashMap<u32, Vec<f32>>,
+    ) -> Result<Vec<SpeakerSegment>> {
+        if samples.is_empty() || final_centroids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let t = std::time::Instant::now();
+        let chunks = self.build_fine_chunks(samples, sample_rate, FINE_SPLIT_SECS);
+        let n_fine = chunks.len();
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let embeddings: Vec<Vec<f32>> = chunks.iter().map(|c| c.embedding.clone()).collect();
+        let timestamps: Vec<f64> = chunks
+            .iter()
+            .map(|c| c.start_sample as f64 / sample_rate as f64)
+            .collect();
+        let durations: Vec<f64> = chunks.iter().map(|c| c.duration_secs).collect();
+
+        let labels = assign_to_nearest_centroids(&embeddings, &timestamps, final_centroids);
+        let (labels, _) = smooth_to_fixed_point(
+            &labels,
+            &embeddings,
+            &timestamps,
+            &durations,
+            final_centroids,
+            &SmoothParams::default(),
+        );
+        let mut segments = chunks_to_segments(&chunks, &labels, sample_rate);
+        relabel_temporal_orphans(&mut segments, MIN_PRESENCE_SECS, PRESENCE_WINDOW_SECS);
+        let segments = merge_adjacent(segments);
+
+        log::warn!(
+            "DIARIZATION: Pass 2 refined {} fine chunks → {} segments in {:.2}s",
+            n_fine,
+            segments.len(),
+            t.elapsed().as_secs_f64(),
+        );
+        Ok(segments)
+    }
+}
+
+// Pure sample-range grid for fine re-chunking, separated from the
+// model-dependent embedding step so the boundary logic is unit-testable.
+// The final window is clipped to the buffer end: a tail shorter than
+// `fine_split_secs` is emitted as-is (deterministic, no audio lost).
+pub(crate) fn fine_chunk_ranges(
+    total_samples: usize,
+    sample_rate: u32,
+    fine_split_secs: f64,
+) -> Vec<(usize, usize)> {
+    if total_samples == 0 {
+        return Vec::new();
+    }
+    let sr_f = sample_rate as f64;
+    let step = ((fine_split_secs * sr_f) as usize).max(1);
+    let mut ranges = Vec::new();
+    let mut pos = 0usize;
+    while pos < total_samples {
+        let end = (pos + step).min(total_samples);
+        ranges.push((pos, end));
+        pos = end;
+    }
+    ranges
+}
+
+// Top-2 cosine margin below which a fine chunk is considered equidistant
+// between two centroids and falls back to its temporal predecessor (design D3).
+const CENTROID_TIE_MARGIN: f32 = 1e-4;
+
+// Pass-2 nearest-centroid assignment (design D1). No second AHC: each fine
+// chunk takes the label of its cosine-nearest Pass-1 post-cap centroid, so the
+// output label set is a subset of the centroid keys by construction (cap
+// invariant, task 3.4). A near-tie (top-2 within CENTROID_TIE_MARGIN) takes the
+// temporal predecessor's label to avoid flicker at ambiguous boundaries (D3).
+pub(crate) fn assign_to_nearest_centroids(
+    embeddings: &[Vec<f32>],
+    timestamps: &[f64],
+    centroids: &HashMap<u32, Vec<f32>>,
+) -> Vec<u32> {
+    let n = embeddings.len();
+    let default_label = *centroids.keys().min().unwrap_or(&0);
+    let mut labels = vec![default_label; n];
+    if n == 0 || centroids.is_empty() {
+        return labels;
+    }
+    let order = temporal_order(timestamps);
+    let mut prev_label: Option<u32> = None;
+    for &i in &order {
+        let emb = &embeddings[i];
+        let mut scored: Vec<(u32, f32)> = centroids
+            .iter()
+            .filter(|(_, c)| {
+                emb.iter().all(|x| x.is_finite()) && c.iter().all(|x| x.is_finite())
+            })
+            .map(|(&k, c)| (k, cosine_similarity(emb, c)))
+            .collect();
+        // Highest cosine, ties broken by smallest label (deterministic).
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+        let label = match scored.first() {
+            None => default_label,
+            Some(&(best, best_s)) => {
+                let second_s = scored.get(1).map(|t| t.1).unwrap_or(best_s);
+                if best_s - second_s < CENTROID_TIE_MARGIN {
+                    prev_label.unwrap_or(best)
+                } else {
+                    best
+                }
+            }
+        };
+        labels[i] = label;
+        prev_label = Some(label);
+    }
+    labels
+}
+
+// Coalesce per-chunk labels into maximal same-label runs (pre-refactor twin of
+// the inline step in process()). Used by refine_pass2 and its unit tests; the
+// segments are pre-renumber and pre-merge_short_speakers, matching process()'s
+// intermediate shape.
+pub(crate) fn chunks_to_segments(
+    chunks: &[Chunk],
+    labels: &[u32],
+    sample_rate: u32,
+) -> Vec<SpeakerSegment> {
+    let sr_f = sample_rate as f64;
+    let mut indexed: Vec<(usize, u32)> = labels.iter().copied().enumerate().collect();
+    indexed.sort_by_key(|(i, _)| chunks[*i].start_sample);
+    let mut result: Vec<SpeakerSegment> = Vec::new();
+    if indexed.is_empty() {
+        return result;
+    }
+    let mut cur_speaker = indexed[0].1;
+    let mut seg_start = chunks[indexed[0].0].start_sample as f64 / sr_f;
+    let mut seg_end = chunks[indexed[0].0].end_sample as f64 / sr_f;
+    for &(chunk_idx, label) in &indexed[1..] {
+        let chunk = &chunks[chunk_idx];
+        let chunk_start = chunk.start_sample as f64 / sr_f;
+        let chunk_end = chunk.end_sample as f64 / sr_f;
+        if label == cur_speaker {
+            seg_end = chunk_end;
+        } else {
+            result.push(SpeakerSegment {
+                start_seconds: seg_start,
+                end_seconds: seg_end,
+                speaker_id: cur_speaker,
+            });
+            cur_speaker = label;
+            seg_start = chunk_start;
+            seg_end = chunk_end;
+        }
+    }
+    result.push(SpeakerSegment {
+        start_seconds: seg_start,
+        end_seconds: seg_end,
+        speaker_id: cur_speaker,
+    });
+    result
 }
 
 /// Merge speakers whose total duration is below threshold into nearest neighbour.
@@ -493,6 +698,84 @@ fn merge_adjacent(mut segments: Vec<SpeakerSegment>) -> Vec<SpeakerSegment> {
         }
     }
     merged
+}
+
+// Facet-2 temporal-presence floor (design D5). A fine segment at most one
+// window long (≤ MIN_PRESENCE_SECS) whose speaker has NO other same-label
+// segment within ±PRESENCE_WINDOW_SECS is an orphan — typically a
+// vowel-dominated embedding globally nearest to a speaker who has not appeared
+// (the [0:01] "Hello" → Ricardo case). It is relabeled to the dominant local
+// speaker. A short segment that DOES have same-label support (a genuine
+// interjection) is preserved. The window is symmetric and edge-clipped, so a
+// first-turn chunk with only FUTURE support is kept (task 4.4). Fine segments
+// are coalesced from FINE_SPLIT_SECS chunks, so the shortest is one window;
+// ≤ MIN_PRESENCE_SECS therefore targets exactly the single-window segments.
+pub(crate) const MIN_PRESENCE_SECS: f64 = FINE_SPLIT_SECS;
+pub(crate) const PRESENCE_WINDOW_SECS: f64 = 30.0;
+
+pub(crate) fn relabel_temporal_orphans(
+    segments: &mut [SpeakerSegment],
+    min_presence_secs: f64,
+    window_secs: f64,
+) {
+    if segments.len() < 2 {
+        return;
+    }
+    loop {
+        let mut changed = false;
+        for i in 0..segments.len() {
+            let dur = segments[i].end_seconds - segments[i].start_seconds;
+            if !(dur <= min_presence_secs) {
+                continue;
+            }
+            let label = segments[i].speaker_id;
+            let (lo, hi) = presence_window(&segments[i], window_secs);
+
+            let has_support = segments.iter().enumerate().any(|(j, s)| {
+                j != i && s.speaker_id == label && s.end_seconds > lo && s.start_seconds < hi
+            });
+            if has_support {
+                continue;
+            }
+
+            // Orphan: relabel to the dominant OTHER speaker by overlap duration.
+            let mut dur_by_label: std::collections::HashMap<u32, f64> =
+                std::collections::HashMap::new();
+            for (j, s) in segments.iter().enumerate() {
+                if j == i || s.speaker_id == label {
+                    continue;
+                }
+                let ov = (s.end_seconds.min(hi) - s.start_seconds.max(lo)).max(0.0);
+                if ov > 0.0 {
+                    *dur_by_label.entry(s.speaker_id).or_insert(0.0) += ov;
+                }
+            }
+            // Max overlap duration; ties broken by smallest label (deterministic).
+            let dominant = dur_by_label
+                .iter()
+                .max_by(|a, b| {
+                    a.1.partial_cmp(b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(b.0.cmp(a.0))
+                })
+                .map(|(&k, _)| k);
+            if let Some(new_label) = dominant {
+                if new_label != label {
+                    segments[i].speaker_id = new_label;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn presence_window(seg: &SpeakerSegment, window_secs: f64) -> (f64, f64) {
+    let lo = (seg.start_seconds - window_secs).max(0.0);
+    let hi = seg.end_seconds + window_secs;
+    (lo, hi)
 }
 
 pub(crate) fn cluster_by_centroids(chunks: &[Chunk], threshold: f32) -> (Vec<u32>, HashMap<u32, Vec<f32>>) {
@@ -1269,6 +1552,205 @@ mod tests {
     fn fp_roundtrip() {
         let v = 0.65f32;
         assert!((from_fp(to_fp(v)) - v).abs() < 0.001);
+    }
+
+    // ── diarization-label-quality — fine re-chunk boundary tests (§3.2/3.5/3.7)
+
+    #[test]
+    fn fine_chunk_ranges_empty() {
+        assert!(fine_chunk_ranges(0, 16000, FINE_SPLIT_SECS).is_empty());
+    }
+
+    #[test]
+    fn fine_chunk_ranges_exact_multiple() {
+        // 4s at 16kHz, 2s split → two full 2s windows, no tail.
+        let r = fine_chunk_ranges(4 * 16000, 16000, FINE_SPLIT_SECS);
+        assert_eq!(r, vec![(0, 32000), (32000, 64000)]);
+        let total: usize = r.iter().map(|(s, e)| e - s).sum();
+        assert_eq!(total, 4 * 16000);
+    }
+
+    #[test]
+    fn fine_chunk_ranges_tail_is_kept_and_clipped() {
+        // 5s at 16kHz, 2s split → two full + one 1s tail (kept, not dropped).
+        let r = fine_chunk_ranges(5 * 16000, 16000, FINE_SPLIT_SECS);
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[2], (64000, 80000));
+        assert_eq!(r[2].1 - r[2].0, 16000); // 1s tail
+        let total: usize = r.iter().map(|(s, e)| e - s).sum();
+        assert_eq!(total, 5 * 16000);
+    }
+
+    #[test]
+    fn fine_chunk_ranges_non_overlapping_contiguous() {
+        let r = fine_chunk_ranges(7 * 16000, 16000, FINE_SPLIT_SECS);
+        for w in r.windows(2) {
+            assert_eq!(w[0].1, w[1].0, "windows must be contiguous, not overlapping");
+        }
+        assert_eq!(r[0].0, 0);
+        assert_eq!(r.last().unwrap().1, 7 * 16000);
+    }
+
+    #[test]
+    fn fine_chunk_ranges_step_floor_prevents_infinite_loop() {
+        // split×sr truncates to 0 (0.5s @ 1 Hz): step clamps to ≥1, no infinite loop.
+        let r = fine_chunk_ranges(5, 1, 0.5);
+        assert_eq!(r, vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]);
+    }
+
+    #[test]
+    fn fine_chunk_ranges_oversized_is_bounded() {
+        // 4h @ 16kHz ≈ 230M samples; grid must build without OOM/panic.
+        let total = (4 * 3600) * 16000;
+        let r = fine_chunk_ranges(total, 16000, FINE_SPLIT_SECS);
+        let expected = total.div_ceil(2 * 16000);
+        assert_eq!(r.len(), expected);
+        assert_eq!(r.last().unwrap().1, total);
+    }
+
+    // ── diarization-label-quality — Pass-2 assignment tests (§3.1/3.4/3.6)
+
+    fn fine_chunk_at(t_secs: f64, sr: u32, dur_secs: f64, emb: Vec<f32>) -> Chunk {
+        let s = (t_secs * sr as f64) as usize;
+        Chunk {
+            start_sample: s,
+            end_sample: s + (dur_secs * sr as f64) as usize,
+            duration_secs: dur_secs,
+            embedding: emb,
+        }
+    }
+
+    #[test]
+    fn assign_interjection_chunk_takes_second_speaker() {
+        // 5 fine chunks; chunk 2 (t=4s) is the interjection nearest centroid B.
+        let sr = 16000u32;
+        let a = vec![1.0f32, 0.0, 0.0, 0.0];
+        let b = vec![0.0f32, 1.0, 0.0, 0.0];
+        let chunks = vec![
+            fine_chunk_at(0.0, sr, 2.0, a.clone()),
+            fine_chunk_at(2.0, sr, 2.0, a.clone()),
+            fine_chunk_at(4.0, sr, 2.0, b.clone()),
+            fine_chunk_at(6.0, sr, 2.0, a.clone()),
+            fine_chunk_at(8.0, sr, 2.0, a.clone()),
+        ];
+        let embeddings: Vec<Vec<f32>> = chunks.iter().map(|c| c.embedding.clone()).collect();
+        let timestamps: Vec<f64> = chunks.iter().map(|c| c.start_sample as f64 / sr as f64).collect();
+        let centroids: HashMap<u32, Vec<f32>> = [(10u32, a), (20u32, b)].into_iter().collect();
+
+        let labels = assign_to_nearest_centroids(&embeddings, &timestamps, &centroids);
+        assert_eq!(labels[2], 20, "interjection chunk takes the second speaker");
+
+        let segs = chunks_to_segments(&chunks, &labels, sr);
+        // Three runs: A | B (interjection) | A — the coarse run is split.
+        assert_eq!(segs.len(), 3, "coarse run split into 3 by the interjection");
+        assert_eq!(segs[1].speaker_id, 20);
+        let interjection = &segs[1];
+        assert!((interjection.start_seconds - 4.0).abs() < 1e-6);
+        assert!((interjection.end_seconds - 6.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn assign_labels_are_subset_of_centroid_keys() {
+        let cents: HashMap<u32, Vec<f32>> = [
+            (1u32, vec![1.0, 0.0, 0.0]),
+            (2u32, vec![0.0, 1.0, 0.0]),
+            (3u32, vec![0.0, 0.0, 1.0]),
+        ]
+        .into_iter()
+        .collect();
+        let embeddings = vec![
+            vec![0.9f32, 0.1, 0.0],
+            vec![0.1f32, 0.9, 0.0],
+            vec![0.0f32, 0.0, 1.0],
+            vec![0.4f32, 0.4, 0.2],
+        ];
+        let timestamps = vec![0.0, 2.0, 4.0, 6.0];
+        let labels = assign_to_nearest_centroids(&embeddings, &timestamps, &cents);
+        for &l in &labels {
+            assert!(cents.contains_key(&l), "Pass 2 invented label {}", l);
+        }
+        assert_eq!(labels.len(), embeddings.len());
+    }
+
+    #[test]
+    fn assign_single_centroid_no_fragmentation() {
+        let only = vec![1.0f32, 0.0, 0.0];
+        let centroids: HashMap<u32, Vec<f32>> = [(7u32, only.clone())].into_iter().collect();
+        let embeddings = vec![
+            vec![0.8f32, 0.2, 0.0],
+            vec![0.6f32, 0.4, 0.1],
+            vec![0.5f32, 0.3, 0.2],
+        ];
+        let timestamps = vec![0.0, 2.0, 4.0];
+        let labels = assign_to_nearest_centroids(&embeddings, &timestamps, &centroids);
+        assert!(labels.iter().all(|&l| l == 7), "single-centroid meeting not fragmented");
+    }
+
+    #[test]
+    fn assign_equidistant_chunk_takes_predecessor() {
+        // chunk0 clearly A; chunk1 equidistant (cos equal) → predecessor A (D3).
+        let a = vec![1.0f32, 0.0];
+        let b = vec![0.0f32, 1.0];
+        let equi = vec![1.0f32 / 2f32.sqrt(), 1.0 / 2f32.sqrt()]; // cos=a cos=b
+        let embeddings = vec![a.clone(), equi];
+        let timestamps = vec![0.0, 2.0];
+        let centroids: HashMap<u32, Vec<f32>> = [(10u32, a), (20u32, b)].into_iter().collect();
+        let labels = assign_to_nearest_centroids(&embeddings, &timestamps, &centroids);
+        assert_eq!(labels[0], 10);
+        assert_eq!(labels[1], 10, "equidistant chunk takes predecessor, not arbitrary");
+    }
+
+    // ── diarization-label-quality — facet-2 temporal-presence tests (§4.1/4.3/4.4)
+
+    fn seg(start: f64, end: f64, speaker: u32) -> SpeakerSegment {
+        SpeakerSegment {
+            start_seconds: start,
+            end_seconds: end,
+            speaker_id: speaker,
+        }
+    }
+
+    #[test]
+    fn orphan_without_nearby_support_is_relabeled() {
+        // [0:01] "Hello" analog: a single-window RIC segment before RIC joins.
+        let mut segments = vec![seg(0.0, 2.0, 30), seg(2.0, 30.0, 10)];
+        relabel_temporal_orphans(&mut segments, MIN_PRESENCE_SECS, PRESENCE_WINDOW_SECS);
+        assert_eq!(
+            segments[0].speaker_id, 10,
+            "absent-speaker orphan relabeled to the present speaker"
+        );
+    }
+
+    #[test]
+    fn genuine_interjection_with_support_is_preserved() {
+        // Short RIC between CYN and CARLOS, with another RIC within ±W.
+        let mut segments = vec![
+            seg(0.0, 20.0, 10),
+            seg(20.0, 22.0, 30),
+            seg(22.0, 40.0, 20),
+            seg(50.0, 52.0, 30),
+        ];
+        relabel_temporal_orphans(&mut segments, MIN_PRESENCE_SECS, PRESENCE_WINDOW_SECS);
+        assert_eq!(
+            segments[1].speaker_id, 30,
+            "short interjection WITH nearby same-label support is preserved"
+        );
+    }
+
+    #[test]
+    fn first_turn_with_only_future_support_is_preserved() {
+        // t=0 short X with no PRIOR support, but X recurs at t=6 → not orphan.
+        let mut segments = vec![
+            seg(0.0, 2.0, 10),
+            seg(2.0, 6.0, 20),
+            seg(6.0, 8.0, 10),
+            seg(8.0, 18.0, 30),
+        ];
+        relabel_temporal_orphans(&mut segments, MIN_PRESENCE_SECS, PRESENCE_WINDOW_SECS);
+        assert_eq!(
+            segments[0].speaker_id, 10,
+            "symmetric ±W keeps a first-turn chunk that has future support"
+        );
     }
 
     // ── diarization-clustering-perf — adversarial tests ───────────────────
