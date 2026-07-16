@@ -4,7 +4,7 @@
 
 Whisper groups transcript segments by sentence/VAD, not by speaker; on multi-speaker meetings these segments routinely span 15–30s and contain two or more speakers. The diarization output SHALL be granular enough that a speaker turn occurring inside a single Whisper transcript segment produces a diarization segment boundary at or near the turn, so that per-word alignment can attribute the words on each side of the turn to the correct speakers rather than collapsing the whole segment to one speaker.
 
-A turn of approximately 2 seconds or longer SHALL be resolved into its own speaker segment. Turns shorter than this MAY be absorbed into the dominant surrounding speaker (recovered instead by token-level word alignment).
+A turn of approximately 2 seconds (the fine-split granularity `FINE_SPLIT_SECS`, default 2.0s) or longer SHALL be resolved into its own speaker segment. Turns shorter than this MAY be absorbed into the dominant surrounding speaker; token-level word alignment cannot recover such sub-granularity overlaps — it attributes words within a segment but cannot create a speaker boundary the diarization pass did not find.
 
 #### Scenario: Sub-turn interjection is isolated, not swallowed
 
@@ -38,8 +38,9 @@ A chunk that is short but lies between two genuinely different speakers (a real 
 - **WHEN** the temporal-presence constraint is applied
 - **THEN** the 0:01 chunk is relabeled to a speaker present at the start of the meeting (not Ricardo), because Ricardo has no temporal support near 0:01
 
-#### Scenario: Genuine short interjection between two speakers is preserved
+#### Scenario: Genuine short interjection with nearby support is preserved
 
-- **GIVEN** a 2s chunk labeled Ricardo, sandwiched between a Cynthia segment (left) and a Carlos segment (right), where both neighbors differ from Ricardo
+- **GIVEN** a 1.5s chunk labeled Ricardo (below `MIN_PRESENCE_SECS`, so the orphan scan does evaluate it), sandwiched between a Cynthia segment (left) and a Carlos segment (right)
+- **AND** Ricardo has at least one other segment within `PRESENCE_WINDOW_SECS` on either side (Ricardo is a temporally-present speaker, not an orphan)
 - **WHEN** the temporal-presence constraint is applied
-- **THEN** the chunk retains the Ricardo label, because a short run between two different speakers is a real interjection, not a temporal orphan
+- **THEN** the chunk retains the Ricardo label — the constraint relabels only orphans whose label has no nearby same-label support, and this chunk has support
