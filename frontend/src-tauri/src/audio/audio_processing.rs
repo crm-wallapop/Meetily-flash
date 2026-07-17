@@ -699,37 +699,6 @@ pub fn write_audio_to_file_with_meeting_name(
     Ok(file_path_clone)
 }
 
-/// Write transcript text to a file alongside the recording (legacy plain text format)
-pub fn write_transcript_to_file(
-    transcript_text: &str,
-    output_path: &PathBuf,
-    meeting_name: Option<&str>,
-) -> Result<String> {
-    let timestamp = Utc::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-
-    // Create meeting folder if meeting name is provided (same logic as audio)
-    let final_output_path = if let Some(name) = meeting_name {
-        let sanitized_meeting_name = sanitize_filename(name);
-        let meeting_folder = output_path.join(&sanitized_meeting_name);
-
-        // Create the meeting folder if it doesn't exist
-        if !meeting_folder.exists() {
-            std::fs::create_dir_all(&meeting_folder)?;
-        }
-
-        meeting_folder
-    } else {
-        output_path.clone()
-    };
-
-    let file_path = final_output_path.join(format!("transcript_{}.txt", timestamp));
-
-    // Write transcript to file
-    std::fs::write(&file_path, transcript_text)?;
-
-    Ok(file_path.to_string_lossy().to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

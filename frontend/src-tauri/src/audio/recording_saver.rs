@@ -96,7 +96,7 @@ impl RecordingSaver {
         if auto_save {
             info!("Initializing incremental audio saver for recording (auto-save ENABLED)");
         } else {
-            info!("Starting recording without audio saving (auto-save DISABLED - transcripts only)");
+            info!("Starting recording without audio saving (auto-save DISABLED - metadata only)");
         }
 
         // Create channel for receiving audio chunks
@@ -144,7 +144,6 @@ impl RecordingSaver {
                         }
                     } else {
                         // auto_save is false: discard audio chunk (no-op)
-                        // Transcription already happened in the pipeline before this point
                     }
                 }
 
@@ -239,7 +238,7 @@ impl RecordingSaver {
 
         if !should_save_audio {
             info!("⚠️  No audio saver initialized (auto-save was disabled) - skipping audio finalization");
-            info!("✅ Transcripts and metadata already saved incrementally");
+            info!("✅ Metadata already saved");
             return Ok(None);
         }
 

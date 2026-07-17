@@ -773,7 +773,7 @@ async fn background_shutdown<R: Runtime>(
         save_attempted.store(true, Ordering::SeqCst);
     }
 
-    // SQLite save: persists meeting row + transcript segments so the queue worker
+    // SQLite save: persists the meeting row so the queue worker
     // can find the meeting when it dequeues the transcription job.
     if let Some(ref mgr) = manager {
         let mid = mgr.get_meeting_id().to_string();
