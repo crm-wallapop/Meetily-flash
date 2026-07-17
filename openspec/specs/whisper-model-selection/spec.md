@@ -31,19 +31,17 @@ The description shown for `small-q5_1` in the UI and catalog SHALL reference the
 
 ### Requirement: Whisper provider stores token timestamps in the database
 
-When Whisper is the active transcription provider, the transcription worker SHALL extract per-token timestamps from each Whisper segment (using `set_token_timestamps(true)` which is already enabled). The token timestamps SHALL be serialized as a JSON array of `{word: string, start_ms: i64, end_ms: i64}` objects and stored in the `token_timestamps` column of the `transcripts` table.
+When Whisper is the active transcription provider, per-token timestamps SHALL be extracted from each Whisper segment (using `set_token_timestamps(true)`, which is already enabled) and serialized as a JSON array of `{word: string, start_ms: i64, end_ms: i64}` objects into the `token_timestamps` column of the `transcripts` table. This SHALL hold for every transcription save path that actually runs: the post-meeting retranscription queue path (`start_retranscription`) and the import path. The transcription result type SHALL carry an optional `token_timestamps: Option<String>` field through these live save paths.
 
-The `TranscriptResult` struct SHALL be extended with an optional `token_timestamps: Option<String>` field. The `TranscriptUpdate` Tauri event SHALL include the `token_timestamps` field.
+Realtime transcription during recording is not supported — the `audio-recording-quality` requirement forbids Whisper inference and `transcript-update` emission while a recording is in progress. No `TranscriptUpdate` Tauri event is emitted; token timestamps reach the database solely via the post-meeting and import save paths.
 
 #### Scenario: Whisper provider populates token timestamps
 
-- **WHEN** Whisper transcribes an audio chunk and produces segments with token timestamps
+- **WHEN** a recording is transcribed post-meeting, or an audio file is imported, with Whisper as the active provider
 - **THEN** each transcript row in the database has `token_timestamps` populated with a JSON array of word-level timing
-- **AND** the `TranscriptUpdate` event carries the same `token_timestamps` data
 
 #### Scenario: Parakeet provider leaves token timestamps null
 
 - **WHEN** Parakeet is the active transcription provider
 - **THEN** transcript rows have `token_timestamps = NULL`
-- **AND** the `TranscriptUpdate` event has `token_timestamps = null`
 

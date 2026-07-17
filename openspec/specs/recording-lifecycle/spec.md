@@ -292,19 +292,11 @@ The `Diarizing` queue phase SHALL run as a separate job after `background_shutdo
 
 ---
 
-### Requirement: TranscriptSegment and TranscriptUpdate carry an optional speaker field
+### Requirement: TranscriptSegment carries an optional speaker field
 
-`TranscriptSegment` (Rust) and `TranscriptUpdate` (Tauri event) SHALL include an optional `speaker: Option<String>` field. The field SHALL be `None` during recording (no speaker labels available in offline-only mode) and SHALL be populated after the `Diarizing` queue phase completes.
+`TranscriptSegment` SHALL include an optional `speaker: Option<String>` field. The field SHALL be `None` until the `Diarizing` queue phase completes (no speaker labels are available before diarization runs), and SHALL be populated on the transcript rows after diarization. Speaker labels are not delivered via any realtime event during recording; transcription and diarization both run post-meeting (see `audio-recording-quality`).
 
-`TranscriptUpdate` SHALL also include an optional `token_timestamps: Option<String>` field containing a JSON array of `{word: string, start_ms: i64, end_ms: i64}` objects, populated when the transcription provider supports token-level timestamps (Whisper). The field SHALL be `None` for providers that do not support token timestamps (Parakeet).
-
-#### Scenario: TranscriptUpdate during recording has no speaker
-
-- **WHEN** a `TranscriptUpdate` event is emitted during recording
-- **THEN** `speaker` is `None`
-- **AND** `token_timestamps` is populated if the Whisper provider is active
-
-#### Scenario: TranscriptUpdate speaker populated after diarization
+#### Scenario: Transcript speaker populated after diarization
 
 - **WHEN** the `Diarizing` phase completes for a meeting
 - **THEN** the transcript rows in the database have `speaker` set to the assigned label

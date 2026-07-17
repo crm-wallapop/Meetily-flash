@@ -37,7 +37,7 @@
 
 ## 7. Spec sync + verification + follow-up issue
 
-- [ ] 7.1 Before `/opsx:archive`, sync MODIFIED/REMOVED/ADDED requirements into canonical `whisper-model-selection` and `recording-lifecycle` (handled by the archive step).
+- [x] 7.1 Before `/opsx:archive`, sync MODIFIED/REMOVED/ADDED requirements into canonical `whisper-model-selection` and `recording-lifecycle` (handled by the archive step). **Done:** `recording-lifecycle` — REMOVED "TranscriptSegment and TranscriptUpdate carry an optional speaker field" → ADDED "TranscriptSegment carries an optional speaker field"; `whisper-model-selection` — MODIFIED "Whisper provider stores token timestamps" to drop the `TranscriptUpdate` clause and scope to the live post-meeting/import save paths.
 - [x] 7.2 Grep-verified complete deletion — zero matches for any dead symbol in compiled sources.
 - [x] 7.3 `cargo test --lib`: **485 passed; 0 failed; 16 ignored** (the `#[ignore]` real-audio/device tests). The diarization §5.1 token oracle is §2.2's work and is not on this `main`-based branch.
 - [ ] 7.4 File the **frontend-orphan** follow-up GitHub issue (pending user authorization — visible-to-others action): the 3 `speech-detected` listeners (`recordingService.ts`, `RecordingControls.tsx`, `TranscriptView.tsx`), the `transcription-error` listener (`transcriptService.ts`) + any other worker-event listeners, the TS `TranscriptUpdate`/`TranscriptHistorySegment` types + `TranscriptContext` (incl. the `getTranscriptHistory` reload-sync path), the revive-speech-detected-from-VAD-vs-remove product decision, and the deferred `TranscriptionStatus`/`get_transcription_status` cleanup.
