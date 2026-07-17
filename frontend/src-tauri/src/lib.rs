@@ -1143,8 +1143,7 @@ pub fn run() {
             audio::recording_commands::is_recording_paused,
             audio::recording_commands::get_recording_state,
             audio::recording_commands::get_meeting_folder_path,
-            // Reload sync commands (retrieve transcript history and meeting name)
-            audio::recording_commands::get_transcript_history,
+            // Reload sync commands (retrieve meeting name)
             audio::recording_commands::get_recording_meeting_name,
             // Device monitoring commands (AirPods/Bluetooth disconnect/reconnect)
             audio::recording_commands::poll_audio_device_events,
@@ -1372,5 +1371,24 @@ mod tests {
             !LiveRecordingState.is_recording(),
             "LiveRecordingState must report idle during Saving (not Recording)"
         );
+    }
+
+    // Guard for remove-dead-realtime-transcription (D4): the LIVE common:: writer
+    // feeds read_transcript_text (the auto-summary reader). Deleting the dead
+    // recording_saver::write_transcripts_json method must not starve the summary chain.
+    #[tokio::test]
+    async fn common_writer_feeds_summary_reader() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let segments = crate::audio::common::create_transcript_segments(&[
+            ("hello world".to_string(), 0.0, 1000.0),
+            ("second bit".to_string(), 1000.0, 2000.0),
+        ]);
+        crate::audio::common::write_transcripts_json(dir.path(), &segments)
+            .expect("write transcripts.json");
+        let path = dir.path().join("transcripts.json");
+        let text = read_transcript_text(&path)
+            .await
+            .expect("read transcripts.json");
+        assert_eq!(text, "hello world second bit");
     }
 }

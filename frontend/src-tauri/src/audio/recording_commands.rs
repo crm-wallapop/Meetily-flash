@@ -22,12 +22,6 @@ use super::{
     DeviceMonitorType
 };
 
-// Import transcription modules
-use super::transcription::reset_speech_detected_flag;
-
-// Re-export TranscriptUpdate for backward compatibility
-pub use super::transcription::TranscriptUpdate;
-
 // ============================================================================
 // RECORDING PHASE — three-state lifecycle replacing IS_RECORDING bool
 // ============================================================================
@@ -308,7 +302,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     }
 
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
-    let _transcription_receiver = manager
+    manager
         .start_recording(microphone_device, system_device, auto_save, gate_floor_dbfs)
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
@@ -343,7 +337,6 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     }
 
     // Phase already set to Recording by the fetch_update above.
-    reset_speech_detected_flag(); // Reset for new recording session
     set_recording_gate(&app, true);
 
     // Emit phase transition event
@@ -453,7 +446,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     }
 
     // Start recording with specified devices and auto_save setting
-    let _transcription_receiver = manager
+    manager
         .start_recording(mic_device, system_device, auto_save, gate_floor_dbfs)
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
@@ -485,7 +478,6 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     }
 
     // Phase already set to Recording by the fetch_update above.
-    reset_speech_detected_flag(); // Reset for new recording session
     set_recording_gate(&app, true);
 
     // Emit phase transition event
@@ -576,7 +568,7 @@ where
                 mgr.get_recording_duration(),       // Option<f64>
                 mgr.get_active_recording_duration().unwrap_or(0.0),
                 mgr.get_total_pause_duration(),
-                mgr.get_transcript_segments().len() as u64,
+                0, // realtime transcript path removed; segments always empty at stop
                 state.has_fatal_error(),
                 state.get_microphone_device().map(|d| d.name.clone()),
                 state.get_system_device().map(|d| d.name.clone()),
@@ -787,8 +779,8 @@ async fn background_shutdown<R: Runtime>(
         let mid = mgr.get_meeting_id().to_string();
         let mname = mgr.get_meeting_name().unwrap_or_default();
         let mfolder = mgr.get_meeting_folder().map(|p| p.to_string_lossy().to_string());
-        let segments: Vec<crate::api::api::TranscriptSegment> =
-            mgr.get_transcript_segments().into_iter().map(Into::into).collect();
+        // Transcription runs post-meeting via the queue; no live segments at stop.
+        let segments: Vec<crate::api::api::TranscriptSegment> = Vec::new();
 
         match app.state::<crate::state::AppState>() {
             state => {
@@ -998,19 +990,6 @@ pub async fn get_meeting_folder_path() -> Result<Option<String>, String> {
         Ok(manager.get_meeting_folder().map(|p| p.to_string_lossy().to_string()))
     } else {
         Ok(None)
-    }
-}
-
-/// Get accumulated transcript segments from current recording session
-/// Used for syncing frontend state after page reload during active recording
-#[tauri::command]
-pub async fn get_transcript_history() -> Result<Vec<crate::audio::recording_saver::TranscriptSegment>, String> {
-    let manager_guard = RECORDING_MANAGER.lock().unwrap();
-
-    if let Some(manager) = manager_guard.as_ref() {
-        Ok(manager.get_transcript_segments())
-    } else {
-        Ok(Vec::new()) // No recording active, return empty
     }
 }
 

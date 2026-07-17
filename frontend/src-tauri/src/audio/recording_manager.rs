@@ -10,7 +10,7 @@ use super::devices::get_safe_recording_devices_macos;
 
 #[cfg(not(target_os = "macos"))]
 use super::devices::{default_input_device, default_output_device};
-use super::recording_state::{RecordingState, AudioChunk, DeviceType as RecordingDeviceType};
+use super::recording_state::{RecordingState, DeviceType as RecordingDeviceType};
 use super::pipeline::AudioPipelineManager;
 use super::stream::AudioStreamManager;
 use super::recording_saver::RecordingSaver;
@@ -74,12 +74,9 @@ impl RecordingManager {
         system_device: Option<Arc<AudioDevice>>,
         auto_save: bool,
         gate_floor_dbfs: i32,
-    ) -> Result<mpsc::UnboundedReceiver<AudioChunk>> {
+    ) -> Result<()> {
         info!("Starting recording manager (auto_save: {}, gate_floor: {}dBFS)", auto_save, gate_floor_dbfs);
         self.gate_floor_dbfs = gate_floor_dbfs;
-
-        // Set up transcription channel
-        let (transcription_sender, transcription_receiver) = mpsc::unbounded_channel::<AudioChunk>();
 
         // CRITICAL FIX: Create recording sender for pre-mixed audio from pipeline
         // Pipeline will mix mic + system audio professionally and send to this channel
@@ -118,7 +115,6 @@ impl RecordingManager {
         // 3) Apply VAD and send speech segments to transcription
         self.pipeline_manager.start(
             self.state.clone(),
-            transcription_sender,
             0, // Ignored - using dynamic sizing internally
             48000, // 48kHz sample rate
             Some(recording_sender), // CRITICAL: Pass recording sender to receive pre-mixed audio
@@ -148,7 +144,7 @@ impl RecordingManager {
         info!("Recording manager started successfully with {} active streams",
                self.stream_manager.active_stream_count());
 
-        Ok(transcription_receiver)
+        Ok(())
     }
 
     /// Start recording with default devices and auto_save setting
@@ -177,7 +173,7 @@ impl RecordingManager {
     ///
     /// User still hears audio via Bluetooth (playback), but recording captures
     /// via stable wired path for best quality.
-    pub async fn start_recording_with_defaults_and_auto_save(&mut self, auto_save: bool, gate_floor_dbfs: i32) -> Result<mpsc::UnboundedReceiver<AudioChunk>> {
+    pub async fn start_recording_with_defaults_and_auto_save(&mut self, auto_save: bool, gate_floor_dbfs: i32) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
             info!("🎙️ [macOS] Starting recording with smart device selection (Bluetooth override enabled)");
@@ -446,22 +442,6 @@ impl RecordingManager {
 
     pub fn set_meeting_id(&mut self, id: String) {
         self.recording_saver.set_meeting_id(id);
-    }
-
-    /// Add a structured transcript segment to be saved later
-    pub fn add_transcript_segment(&self, segment: super::recording_saver::TranscriptSegment) {
-        self.recording_saver.add_transcript_segment(segment);
-    }
-
-    /// Add a transcript chunk to be saved later (legacy method)
-    pub fn add_transcript_chunk(&self, text: String) {
-        self.recording_saver.add_transcript_chunk(text);
-    }
-
-    /// Get accumulated transcript segments from current recording session
-    /// Used for syncing frontend state after page reload during active recording
-    pub fn get_transcript_segments(&self) -> Vec<super::recording_saver::TranscriptSegment> {
-        self.recording_saver.get_transcript_segments()
     }
 
     /// Get meeting name from current recording session

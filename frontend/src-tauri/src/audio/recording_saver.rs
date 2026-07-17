@@ -11,19 +11,6 @@ use super::recording_state::AudioChunk;
 use super::audio_processing::create_meeting_folder;
 use super::incremental_saver::IncrementalAudioSaver;
 
-/// Structured transcript segment for JSON export
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TranscriptSegment {
-    pub id: String,
-    pub text: String,
-    pub audio_start_time: f64, // Seconds from recording start
-    pub audio_end_time: f64,   // Seconds from recording start
-    pub duration: f64,          // Segment duration in seconds
-    pub display_time: String,   // Formatted time for display like "[02:15]"
-    pub confidence: f32,
-    pub sequence_id: u64,
-}
-
 /// Meeting metadata structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeetingMetadata {
@@ -52,7 +39,6 @@ pub struct RecordingSaver {
     meeting_folder: Option<PathBuf>,
     meeting_name: Option<String>,
     metadata: Option<MeetingMetadata>,
-    transcript_segments: Arc<Mutex<Vec<TranscriptSegment>>>,
     chunk_receiver: Option<mpsc::UnboundedReceiver<AudioChunk>>,
     is_saving: Arc<Mutex<bool>>,
 }
@@ -64,7 +50,6 @@ impl RecordingSaver {
             meeting_folder: None,
             meeting_name: None,
             metadata: None,
-            transcript_segments: Arc::new(Mutex::new(Vec::new())),
             chunk_receiver: None,
             is_saving: Arc::new(Mutex::new(false)),
         }
@@ -101,48 +86,6 @@ impl RecordingSaver {
                 }
             }
         }
-    }
-
-    /// Add or update a structured transcript segment (upserts based on sequence_id)
-    /// Also saves incrementally to disk
-    pub fn add_transcript_segment(&self, segment: TranscriptSegment) {
-        if let Ok(mut segments) = self.transcript_segments.lock() {
-            // Check if segment with same sequence_id exists (update it)
-            if let Some(existing) = segments.iter_mut().find(|s| s.sequence_id == segment.sequence_id) {
-                *existing = segment.clone();
-                info!("Updated transcript segment {} (seq: {}) - total segments: {}",
-                      segment.id, segment.sequence_id, segments.len());
-            } else {
-                // New segment, add it
-                segments.push(segment.clone());
-                info!("Added new transcript segment {} (seq: {}) - total segments: {}",
-                      segment.id, segment.sequence_id, segments.len());
-            }
-        } else {
-            error!("Failed to lock transcript segments for adding segment {}", segment.id);
-        }
-
-        // NEW: Save incrementally to disk
-        if let Some(folder) = &self.meeting_folder {
-            if let Err(e) = self.write_transcripts_json(folder) {
-                warn!("Failed to write incremental transcript update: {}", e);
-            }
-        }
-    }
-
-    /// Legacy method for backward compatibility - converts text to basic segment
-    pub fn add_transcript_chunk(&self, text: String) {
-        let segment = TranscriptSegment {
-            id: format!("seg_{}", chrono::Utc::now().timestamp_millis()),
-            text,
-            audio_start_time: 0.0,
-            audio_end_time: 0.0,
-            duration: 0.0,
-            display_time: "[00:00]".to_string(),
-            confidence: 1.0,
-            sequence_id: 0,
-        };
-        self.add_transcript_segment(segment);
     }
 
     /// Start accumulation with optional incremental saving
@@ -267,61 +210,6 @@ impl RecordingSaver {
         Ok(())
     }
 
-    /// Write transcripts.json to disk (atomic write with temp file and validation)
-    fn write_transcripts_json(&self, folder: &PathBuf) -> Result<()> {
-        // Clone segments to avoid holding lock during I/O
-        let segments_clone = if let Ok(segments) = self.transcript_segments.lock() {
-            segments.clone()
-        } else {
-            error!("Failed to lock transcript segments for writing");
-            return Err(anyhow::anyhow!("Failed to lock transcript segments"));
-        };
-
-        info!("Writing {} transcript segments to JSON", segments_clone.len());
-
-        let transcript_path = folder.join("transcripts.json");
-        let temp_path = folder.join(".transcripts.json.tmp");
-
-        // Create JSON structure
-        let json = serde_json::json!({
-            "version": "1.0",
-            "segments": segments_clone,
-            "last_updated": chrono::Utc::now().to_rfc3339(),
-            "total_segments": segments_clone.len()
-        });
-
-        // Serialize to pretty JSON string
-        let json_string = serde_json::to_string_pretty(&json)
-            .map_err(|e| {
-                error!("Failed to serialize transcripts to JSON: {}", e);
-                anyhow::anyhow!("JSON serialization failed: {}", e)
-            })?;
-
-        // Write to temp file with error handling
-        std::fs::write(&temp_path, &json_string)
-            .map_err(|e| {
-                error!("Failed to write transcript temp file to {}: {}", temp_path.display(), e);
-                anyhow::anyhow!("Failed to write temp file: {}", e)
-            })?;
-
-        // Verify temp file was written correctly
-        if !temp_path.exists() {
-            error!("Temp transcript file does not exist after write: {}", temp_path.display());
-            return Err(anyhow::anyhow!("Temp file verification failed"));
-        }
-
-        // Atomic rename
-        std::fs::rename(&temp_path, &transcript_path)
-            .map_err(|e| {
-                error!("Failed to rename transcript file from {} to {}: {}",
-                       temp_path.display(), transcript_path.display(), e);
-                anyhow::anyhow!("Failed to rename transcript file: {}", e)
-            })?;
-
-        info!("✅ Successfully wrote transcripts.json with {} segments", segments_clone.len());
-        Ok(())
-    }
-
     pub fn get_stats(&self) -> (usize, u32) {
         (0, 48000)
     }
@@ -373,36 +261,12 @@ impl RecordingSaver {
             return Err("No incremental saver initialized".to_string());
         };
 
-        // Save final transcripts.json with validation
-        if let Some(folder) = &self.meeting_folder {
-            if let Err(e) = self.write_transcripts_json(folder) {
-                error!("❌ Failed to write final transcripts: {}", e);
-                return Err(format!("Failed to save transcripts: {}", e));
-            }
-
-            // Verify transcripts were written correctly
-            let transcript_path = folder.join("transcripts.json");
-            if !transcript_path.exists() {
-                error!("❌ Transcript file was not created at: {}", transcript_path.display());
-                return Err("Transcript file verification failed".to_string());
-            }
-            info!("✅ Transcripts saved and verified at: {}", transcript_path.display());
-        }
-
         // Update metadata to completed status with actual recording duration
         if let (Some(folder), Some(mut metadata)) = (&self.meeting_folder, self.metadata.clone()) {
             metadata.status = "completed".to_string();
             metadata.completed_at = Some(chrono::Utc::now().to_rfc3339());
 
-            // Use actual recording duration from RecordingState (more accurate than transcript segments)
-            // Falls back to last transcript segment if duration not provided
-            metadata.duration_seconds = recording_duration.or_else(|| {
-                if let Ok(segments) = self.transcript_segments.lock() {
-                    segments.last().map(|seg| seg.audio_end_time)
-                } else {
-                    None
-                }
-            });
+            metadata.duration_seconds = recording_duration;
 
             if let Err(e) = self.write_metadata(folder, &metadata) {
                 error!("❌ Failed to update metadata to completed: {}", e);
@@ -427,26 +291,12 @@ impl RecordingSaver {
             warn!("Failed to emit recording-saved event: {}", e);
         }
 
-        // Clean up transcript segments
-        if let Ok(mut segments) = self.transcript_segments.lock() {
-            segments.clear();
-        }
-
         Ok(Some(final_audio_path.to_string_lossy().to_string()))
     }
 
     /// Get the meeting folder path (for passing to backend)
     pub fn get_meeting_folder(&self) -> Option<&PathBuf> {
         self.meeting_folder.as_ref()
-    }
-
-    /// Get accumulated transcript segments (for reload sync)
-    pub fn get_transcript_segments(&self) -> Vec<TranscriptSegment> {
-        if let Ok(segments) = self.transcript_segments.lock() {
-            segments.clone()
-        } else {
-            Vec::new()
-        }
     }
 
     /// Get meeting name (for reload sync)

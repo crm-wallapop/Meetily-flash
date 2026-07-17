@@ -704,7 +704,6 @@ pub struct AudioPipeline {
 impl AudioPipeline {
     pub fn new(
         receiver: mpsc::UnboundedReceiver<AudioChunk>,
-        transcription_sender: mpsc::UnboundedSender<AudioChunk>,
         state: Arc<RecordingState>,
         target_chunk_duration_ms: u32,
         sample_rate: u32,
@@ -721,9 +720,6 @@ impl AudioPipeline {
               system_device_name, system_device_kind, system_device_kind.buffer_timeout());
 
         let _ = (mic_device_name, mic_device_kind, system_device_name, system_device_kind);
-        // transcription_sender is accepted for API compatibility but intentionally unused:
-        // transcription now runs post-meeting from the saved audio file.
-        let _ = transcription_sender;
         let _ = target_chunk_duration_ms;
 
         let ring_buffer = AudioMixerRingBuffer::new(sample_rate);
@@ -855,7 +851,6 @@ impl AudioPipelineManager {
     pub fn start(
         &mut self,
         state: Arc<RecordingState>,
-        transcription_sender: mpsc::UnboundedSender<AudioChunk>,
         target_chunk_duration_ms: u32,
         sample_rate: u32,
         recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
@@ -878,7 +873,6 @@ impl AudioPipelineManager {
         // Create and start pipeline with device information for adaptive mixing
         let mut pipeline = AudioPipeline::new(
             audio_receiver,
-            transcription_sender,
             state.clone(),
             target_chunk_duration_ms,
             sample_rate,
@@ -1007,24 +1001,16 @@ mod tests {
         samples
     }
 
-    /// RED test for task 1.2 (remove ContinuousVadProcessor from AudioPipeline).
-    ///
-    /// Currently FAILS: the pipeline contains ContinuousVadProcessor.  When fed
-    /// 5 s of 16 kHz speech-like audio (no resampling → same signal that triggers
-    /// Silero in vad.rs tests), the VAD emits ≥1 segment via transcription_sender.
-    ///
-    /// After task 1.2 removes the VAD path this test must PASS: nothing reaches the
-    /// transcription channel because the pipeline no longer has one.
+    /// AudioPipeline carries no transcription channel (removed with the dead realtime
+    /// worker). Guards that the run path completes cleanly on speech audio — the
+    /// structural guarantee formerly enforced by pipeline_does_not_initialise_vad.
     #[tokio::test]
-    async fn pipeline_does_not_initialise_vad() {
+    async fn pipeline_runs_without_transcription_channel() {
         let (audio_tx, audio_rx) = mpsc::unbounded_channel::<AudioChunk>();
-        let (transcription_tx, mut transcription_rx) = mpsc::unbounded_channel::<AudioChunk>();
         let state = RecordingState::new();
 
-        // 16 kHz pipeline: VAD receives samples directly (no resampling).
         let pipeline = AudioPipeline::new(
             audio_rx,
-            transcription_tx,
             state,
             50,
             16000,
@@ -1034,8 +1020,6 @@ mod tests {
             InputDeviceKind::Unknown,
         );
 
-        // 5 s of 16 kHz speech (entirely within the 5 s "on" phase of the pattern).
-        // ContinuousVadProcessor (currently present) will emit ≥1 segment on flush.
         let samples = make_speech_audio_16k(5.0);
         audio_tx
             .send(AudioChunk {
@@ -1046,15 +1030,8 @@ mod tests {
                 device_type: DeviceType::Microphone,
             })
             .unwrap();
-        drop(audio_tx); // close channel → pipeline reaches Ok(None) → flush → complete
+        drop(audio_tx);
 
         pipeline.run().await.expect("pipeline completed without error");
-
-        // After task 1.2: nothing in the transcription channel.
-        assert!(
-            transcription_rx.try_recv().is_err(),
-            "AudioPipeline must not forward audio to the transcription channel \
-             (ContinuousVadProcessor must be removed — task 1.2)"
-        );
     }
 }

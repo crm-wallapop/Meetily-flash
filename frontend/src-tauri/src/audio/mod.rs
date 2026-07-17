@@ -89,7 +89,7 @@ pub use stream::{AudioStreamManager};
 pub use recording_manager::{RecordingManager};
 pub use recording_commands::{
     start_recording, start_recording_with_devices, stop_recording,
-    is_recording, get_transcription_status, TranscriptionStatus, TranscriptUpdate
+    is_recording, get_transcription_status, TranscriptionStatus
 };
 pub use recording_preferences::{
     RecordingPreferences, get_default_recordings_folder
