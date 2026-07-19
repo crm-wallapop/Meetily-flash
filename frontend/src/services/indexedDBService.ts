@@ -8,7 +8,6 @@
  *     so the one-shot recovery modal can offer it on the first post-upgrade
  *     launch (see useTranscriptRecovery.ts / task 11.2).
  */
-import { TranscriptUpdate } from '@/types';
 import type { QueueJobStatus } from '@/services/queueService';
 
 // ── v1 schema interfaces (kept for the migration read path) ──────────────────

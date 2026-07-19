@@ -1,4 +1,15 @@
-import type { TranscriptHistorySegment, Block } from '@/types';
+import type { Block } from '@/types';
+
+export interface FixtureSegment {
+  id: string;
+  text: string;
+  audio_start_time: number;
+  audio_end_time: number;
+  duration: number;
+  display_time: string;
+  confidence: number;
+  sequence_id: number;
+}
 
 export interface TranscriptFixture {
   // `kind` is synthetic — assigned by the loader, not present in fixture files —
@@ -6,7 +17,7 @@ export interface TranscriptFixture {
   // switch on the Fixture union without sniffing keys.
   kind: 'transcript';
   meeting_id: string;
-  segments: TranscriptHistorySegment[];
+  segments: FixtureSegment[];
 }
 
 export interface SummaryFixture {
@@ -84,7 +95,7 @@ function validateTranscript(raw: Record<string, unknown>): TranscriptFixture {
       display_time: asString(s.display_time, `segments[${i}].display_time`),
       confidence: asFiniteNumber(s.confidence, `segments[${i}].confidence`),
       sequence_id: asFiniteNumber(s.sequence_id, `segments[${i}].sequence_id`),
-    } satisfies TranscriptHistorySegment;
+    } satisfies FixtureSegment;
   });
   return { kind: 'transcript', meeting_id, segments };
 }

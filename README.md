@@ -83,7 +83,7 @@ This is a personal project and a work in progress. Kudos to Zackriya-Solutions f
 
 ## Introduction
 
-Meetily is a privacy-first AI meeting assistant that runs entirely on your local machine. It captures your meetings, transcribes them in real-time, and generates summaries, all without sending any data to the cloud. This makes it the perfect solution for professionals and enterprises who need to maintain complete control over their sensitive information.
+Meetily is a privacy-first AI meeting assistant that runs entirely on your local machine. It captures your meetings, transcribes them after each meeting, and generates summaries, all without sending any data to the cloud. This makes it the perfect solution for professionals and enterprises who need to maintain complete control over their sensitive information.
 
 ## Why Meetily?
 
@@ -112,7 +112,7 @@ Whether you're a defense consultant, enterprise executive, legal professional, o
 ## Features
 
 - **Local First:** All processing is done on your machine. No data ever leaves your computer.
-- **Real-time Transcription:** Get a live transcript of your meeting as it happens.
+- **Post-meeting Transcription:** Get a high-quality transcript of your meeting generated after it ends.
 - **AI-Powered Summaries:** Generate summaries of your meetings using powerful language models.
 - **Multi-Platform:** Works on macOS, Windows, and Linux.
 - **Open Source:** Meetily is open source and free to use.

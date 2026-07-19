@@ -125,44 +125,6 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
     };
   }, [showModal]);
 
-  // Set up transcription error listener for model loading failures
-  useEffect(() => {
-    let unlistenFn: (() => void) | undefined;
-
-    const setupTranscriptionErrorListener = async () => {
-      try {
-        console.log('Setting up transcription-error listener...');
-        unlistenFn = await listen<{ error: string, userMessage: string, actionable: boolean }>('transcription-error', (event) => {
-          console.log('Transcription error received:', event.payload);
-          const { userMessage, actionable } = event.payload;
-
-          if (actionable) {
-            // This is a model-related error that requires user action
-            showModal('modelSelector', userMessage);
-          } else {
-            // Show toast instead of modal for non-actionable errors (consistent with sidebar)
-            toast.error('', {
-              description: userMessage,
-              duration: 5000,
-            });
-          }
-        });
-        console.log('Transcription error listener setup complete');
-      } catch (error) {
-        console.error('Failed to setup transcription error listener:', error);
-      }
-    };
-
-    setupTranscriptionErrorListener();
-
-    return () => {
-      console.log('Cleaning up transcription error listener...');
-      if (unlistenFn) {
-        unlistenFn();
-      }
-    };
-  }, [showModal]);
-
   // Listen for model download completion to auto-close modal
   useEffect(() => {
     const setupDownloadListeners = async () => {

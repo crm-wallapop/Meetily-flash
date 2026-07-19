@@ -3,7 +3,6 @@
 import { useCallback, useRef, useReducer, startTransition, useEffect, useState, useMemo, memo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAutoScroll } from "@/hooks/useAutoScroll";
-import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
 import { useSpeakerRename } from "@/hooks/useSpeakerRename";
 import { ConfidenceIndicator } from "./ConfidenceIndicator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
@@ -23,8 +22,6 @@ export interface VirtualizedTranscriptViewProps {
     isProcessing?: boolean;
     /** Whether stopping */
     isStopping?: boolean;
-    /** Enable streaming effect for latest segment */
-    enableStreaming?: boolean;
     /** Show confidence indicators */
     showConfidence?: boolean;
     /** Completely disable auto-scroll behavior (for meeting details page) */
@@ -69,6 +66,10 @@ function cleanStopWords(text: string): string {
     return cleanedText.replace(/\s+/g, ' ').trim();
 }
 
+export function computeDisplayText(text: string): string {
+    return cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
+}
+
 // Memoized transcript segment component
 const TranscriptSegment = memo(function TranscriptSegment({
     id,
@@ -77,7 +78,6 @@ const TranscriptSegment = memo(function TranscriptSegment({
     confidence,
     speaker,
     speakerIndex,
-    isStreaming,
     showConfidence,
     isEditingSpeaker,
     onSpeakerClick,
@@ -93,7 +93,6 @@ const TranscriptSegment = memo(function TranscriptSegment({
     confidence?: number;
     speaker?: string;
     speakerIndex?: number;
-    isStreaming: boolean;
     showConfidence: boolean;
     isEditingSpeaker?: boolean;
     onSpeakerClick?: () => void;
@@ -103,7 +102,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     canRevertSpeaker?: boolean;
     onSpeakerRevert?: () => void;
 }) {
-    const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
+    const displayText = computeDisplayText(text);
 
     return (
         <div id={`segment-${id}`} className="mb-3">
@@ -141,13 +140,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
                             )}
                         </div>
                     )}
-                    {isStreaming ? (
-                        <div className="bg-gray-100 border border-gray-200 rounded-lg px-3 py-2">
-                            <p className="text-base text-gray-800 leading-relaxed">{displayText}</p>
-                        </div>
-                    ) : (
-                        <p className="text-base text-gray-800 leading-relaxed">{displayText}</p>
-                    )}
+                    <p className="text-base text-gray-800 leading-relaxed">{displayText}</p>
                 </div>
             </div>
         </div>
@@ -160,7 +153,6 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     isPaused = false,
     isProcessing = false,
     isStopping = false,
-    enableStreaming = false,
     showConfidence = true,
     disableAutoScroll = false,
     hasMore = false,
@@ -203,13 +195,6 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         virtualizationThreshold: VIRTUALIZATION_THRESHOLD,
         disableAutoScroll,
     });
-
-    // Streaming text effect hook (typewriter animation for new transcripts)
-    const { streamingSegmentId, getDisplayText } = useTranscriptStreaming(
-        segments,
-        isRecording,
-        enableStreaming
-    );
 
     // Infinite scroll: IntersectionObserver to trigger loading more
     useEffect(() => {
@@ -320,7 +305,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                     ) : (
                         <>
                             <p className="text-lg font-semibold">Welcome to meetily!</p>
-                            <p className="text-xs mt-1">Start recording to see live transcription</p>
+                            <p className="text-xs mt-1">Start recording — transcript generates after you stop.</p>
                         </>
                     )}
                 </motion.div>
@@ -336,8 +321,6 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                     >
                         {virtualizer.getVirtualItems().map((virtualRow) => {
                             const segment = segments[virtualRow.index];
-                            const isStreaming = streamingSegmentId === segment.id;
-
                             return (
                                 <div
                                     key={segment.id}
@@ -354,11 +337,10 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                     <TranscriptSegment
                                         id={segment.id}
                                         timestamp={segment.timestamp}
-                                        text={getDisplayText(segment)}
+                                        text={segment.text}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
                                         speakerIndex={getSpeakerIndex(segment.speaker)}
-                                        isStreaming={isStreaming}
                                         showConfidence={showConfidence}
                                         isEditingSpeaker={editingSegmentId === segment.id}
                                         onSpeakerClick={segment.speaker ? () => setEditingSegmentId(segment.id) : undefined}
@@ -407,8 +389,6 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                 <>
                     <div className="space-y-1">
                         {segments.map((segment) => {
-                            const isStreaming = streamingSegmentId === segment.id;
-
                             return (
                                 <motion.div
                                     key={segment.id}
@@ -419,11 +399,10 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                     <TranscriptSegment
                                         id={segment.id}
                                         timestamp={segment.timestamp}
-                                        text={getDisplayText(segment)}
+                                        text={segment.text}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
                                         speakerIndex={getSpeakerIndex(segment.speaker)}
-                                        isStreaming={isStreaming}
                                         showConfidence={showConfidence}
                                         isEditingSpeaker={editingSegmentId === segment.id}
                                         onSpeakerClick={segment.speaker ? () => setEditingSegmentId(segment.id) : undefined}
