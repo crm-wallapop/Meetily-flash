@@ -209,7 +209,6 @@ export function TranscriptPanel({
             isPaused={false}
             isProcessing={false}
             isStopping={false}
-            enableStreaming={false}
             showConfidence={true}
             disableAutoScroll={disableAutoScroll}
             hasMore={hasMore}

@@ -1,7 +1,7 @@
 // Replaces @tauri-apps/api/event when PLAYWRIGHT_E2E=1 (see next.config.js).
 // listen/emit/once delegate to window.__tauriMockEventBus, installed by the
 // Playwright init script. Tests drive event-driven UI by calling
-// eventBus.emit('transcript-update', ...).
+// eventBus.emit('recording-started', ...).
 
 export type UnlistenFn = () => void;
 

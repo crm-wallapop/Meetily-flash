@@ -5,7 +5,7 @@ import { TAURI_MOCK_INIT_SCRIPT } from '../mocks/init-script';
 // event-dependent UI from fixtures. The app's `listen` import routes through
 // the mock to window.__tauriMockEventBus (installed by the init script); tests
 // inject events by calling the mock's `emit`. This is what lets a smoke spec
-// simulate 'transcript-update' / recording-state flows without a Rust runtime.
+// simulate 'recording-started' / recording-state flows without a Rust runtime.
 
 test.describe('event-bus mock (2.6)', () => {
   test.beforeEach(async ({ page }) => {
@@ -24,17 +24,17 @@ test.describe('event-bus mock (2.6)', () => {
         __tauriMockEmit: (event: string, payload?: unknown) => Promise<void>;
       };
       let received: unknown = null;
-      await w.__tauriMockListen('transcript-update', (e) => {
+      await w.__tauriMockListen('recording-started', (e) => {
         received = e;
       });
-      await w.__tauriMockEmit('transcript-update', { text: 'hello world', ts: 1234 });
+      await w.__tauriMockEmit('recording-started', { meeting_id: 'meet-001', title: 'hello world' });
       return received;
     });
 
     expect(captured).toEqual({
-      event: 'transcript-update',
+      event: 'recording-started',
       id: 0,
-      payload: { text: 'hello world', ts: 1234 },
+      payload: { meeting_id: 'meet-001', title: 'hello world' },
     });
   });
 

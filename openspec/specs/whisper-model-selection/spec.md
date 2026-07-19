@@ -33,7 +33,7 @@ The description shown for `small-q5_1` in the UI and catalog SHALL reference the
 
 When Whisper is the active transcription provider, per-token timestamps SHALL be extracted from each Whisper segment (using `set_token_timestamps(true)`, which is already enabled) and serialized as a JSON array of `{word: string, start_ms: i64, end_ms: i64}` objects into the `token_timestamps` column of the `transcripts` table. This SHALL hold for every transcription save path that actually runs: the post-meeting retranscription queue path (`start_retranscription`) and the import path. The transcription result type SHALL carry an optional `token_timestamps: Option<String>` field through these live save paths.
 
-Realtime transcription during recording is not supported — the `audio-recording-quality` requirement forbids Whisper inference and `transcript-update` emission while a recording is in progress. No `TranscriptUpdate` Tauri event is emitted; token timestamps reach the database solely via the post-meeting and import save paths.
+Realtime transcription during recording is not supported — the `audio-recording-quality` requirement forbids Whisper inference while a recording is in progress. No transcript content is delivered to the UI during recording via Tauri events; token timestamps reach the database solely via the post-meeting and import save paths.
 
 #### Scenario: Whisper provider populates token timestamps
 

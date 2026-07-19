@@ -112,7 +112,6 @@ export function TranscriptPanel({
               isPaused={isPaused}
               isProcessing={isProcessingStop}
               isStopping={isStopping}
-              enableStreaming={isRecording}
               showConfidence={true}
             />
           </div>

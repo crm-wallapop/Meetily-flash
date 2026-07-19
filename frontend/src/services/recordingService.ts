@@ -247,15 +247,6 @@ export class RecordingService {
       callback(event.payload);
     });
   }
-
-  /**
-   * Listen for speech-detected event (VAD)
-   * @param callback - Function to call when speech is detected
-   * @returns Promise that resolves to unlisten function
-   */
-  async onSpeechDetected(callback: () => void): Promise<UnlistenFn> {
-    return listen('speech-detected', callback);
-  }
 }
 
 // Export singleton instance

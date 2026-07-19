@@ -27,7 +27,6 @@ pub mod incremental_saver;  // NEW: Incremental audio saving with checkpoints
 pub mod level_monitor;
 pub mod simple_level_monitor;
 pub mod buffer_pool;
-pub mod post_processor;
 pub mod hardware_detector;
 pub mod async_logger;
 pub mod batch_processor;
@@ -89,7 +88,7 @@ pub use stream::{AudioStreamManager};
 pub use recording_manager::{RecordingManager};
 pub use recording_commands::{
     start_recording, start_recording_with_devices, stop_recording,
-    is_recording, get_transcription_status, TranscriptionStatus
+    is_recording
 };
 pub use recording_preferences::{
     RecordingPreferences, get_default_recordings_folder
@@ -97,7 +96,6 @@ pub use recording_preferences::{
 pub use recording_saver::RecordingSaver;
 pub use level_monitor::{AudioLevelMonitor, AudioLevelData, AudioLevelUpdate};
 pub use buffer_pool::{AudioBufferPool, PooledBuffer};
-pub use post_processor::{PostProcessor, PostProcessRequest, PostProcessResponse};
 pub use hardware_detector::{HardwareProfile, AdaptiveWhisperConfig, PerformanceTier, GpuType};
 pub use encode::{
     encode_single_audio, AudioInput

@@ -2,22 +2,20 @@ import { test, expect } from '@playwright/test';
 import { TAURI_MOCK_INIT_SCRIPT } from '../mocks/init-script';
 import { loadFixture } from '../_fixtures/loader';
 
-// Task 2.7 — adversarial: prompt injection. Proves two defense layers at the
-// harness level:
-//   (A) An event payload containing adversarial "ignore previous instructions"
-//       text cannot redirect the dispatcher — the command registry is unchanged
-//       and the adversarial string does not appear as a registered command. The
-//       event bus and the dispatcher are independent channels; events cannot
-//       register or invoke commands. Combined with the fail-closed contract
-//       (2.4), this makes command injection from a payload structurally
-//       impossible.
-//   (B) The adversarial text, rendered through the standard text-rendering path
-//       (textContent — the same DOM primitive React uses for {expr}), appears
-//       literally in the DOM and is not interpreted as HTML or script.
+// Task 2.7 — adversarial: prompt injection. Proves the command dispatcher is
+// isolated from the event bus: an event payload containing adversarial "ignore
+// previous instructions" text cannot register or redirect commands. The event
+// bus and the dispatcher are independent channels; events cannot register or
+// invoke commands. Combined with the fail-closed contract (2.4), this makes
+// command injection from a payload structurally impossible.
 //
-// Full end-to-end transcript rendering through the app's TranscriptView
-// component (recording-started → buffering → TranscriptPanel) is validated by
-// the smoke specs in Section 4 (summary-render.spec.ts, recording-basic.spec.ts).
+// Transcript rendering through VirtualizedTranscriptView (the production render
+// path) is validated by the smoke specs (summary-render.spec.ts,
+// recording-basic.spec.ts). The computeDisplayText pass-through property
+// (adversarial text survives text processing unchanged for React to escape) is
+// unit-tested in transcript-segment-injection.test.ts (task 8.3), and the
+// dangerouslySetInnerHTML guard in task 8.4 asserts no render path bypasses
+// React's escaping.
 
 const ADVERSARIAL_FIXTURE = loadFixture(
   JSON.stringify({
@@ -60,7 +58,6 @@ test.describe('prompt-injection defense (2.7)', () => {
           registeredCommands: () => string[];
         };
       };
-      w.__tauriMockDispatcher.register('get_transcript_history', () => []);
       w.__tauriMockDispatcher.register('start_recording', () => ({ ok: true }));
     });
 
@@ -70,9 +67,9 @@ test.describe('prompt-injection defense (2.7)', () => {
         __tauriMockEmit: (event: string, payload?: unknown) => Promise<void>;
       };
       const before = w.__tauriMockDispatcher.registeredCommands();
-      await w.__tauriMockEmit('transcription-complete', {
-        text: adversarialText,
+      await w.__tauriMockEmit('recording-started', {
         meeting_id: 'meet-injection-001',
+        title: adversarialText,
       });
       const after = w.__tauriMockDispatcher.registeredCommands();
       return { before, after };
@@ -83,39 +80,5 @@ test.describe('prompt-injection defense (2.7)', () => {
       result.after,
       'the injected text must not materialize as a registered command',
     ).not.toContain(ADVERSARIAL_TEXT);
-  });
-
-  test('(B) adversarial transcript text renders as inert literal DOM text', async ({ page }) => {
-    const domCheck = await page.evaluate(async (adversarialText) => {
-      const w = window as unknown as {
-        __tauriMockListen: (event: string, handler: (e: unknown) => void) => Promise<() => void>;
-        __tauriMockEmit: (event: string, payload?: unknown) => Promise<void>;
-      };
-
-      const host = document.createElement('div');
-      host.id = 'injection-sink';
-      document.body.appendChild(host);
-
-      await w.__tauriMockListen('transcription-complete', (e) => {
-        const payload = (e as { payload?: { text?: string } }).payload;
-        host.textContent = payload?.text ?? '';
-      });
-
-      await w.__tauriMockEmit('transcription-complete', { text: adversarialText });
-
-      return {
-        textContent: host.textContent,
-        innerHTML: host.innerHTML,
-        childElementCount: host.childElementCount,
-      };
-    }, ADVERSARIAL_TEXT);
-
-    expect(domCheck.textContent).toBe(ADVERSARIAL_TEXT);
-    expect(
-      domCheck.childElementCount,
-      'text must not spawn child elements — no HTML interpretation',
-    ).toBe(0);
-    expect(domCheck.innerHTML).toBe(ADVERSARIAL_TEXT);
-    expect(domCheck.innerHTML).not.toContain('<script');
   });
 });

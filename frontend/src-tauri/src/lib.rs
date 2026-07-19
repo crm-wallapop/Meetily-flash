@@ -74,13 +74,6 @@ static LAST_MEETING_TITLE: StdMutex<Option<String>> = StdMutex::new(None);
 static LANGUAGE_PREFERENCE: std::sync::LazyLock<StdMutex<String>> =
     std::sync::LazyLock::new(|| StdMutex::new("auto-translate".to_string()));
 
-#[derive(Debug, Serialize, Clone)]
-struct TranscriptionStatus {
-    chunks_in_queue: usize,
-    is_processing: bool,
-    last_activity_ms: u64,
-}
-
 #[tauri::command]
 async fn start_recording<R: Runtime>(
     app: AppHandle<R>,
@@ -307,15 +300,6 @@ fn __dev_simulate_meeting(
     handle: tauri::State<'_, detection::fake::FakeDetectorHandle>,
 ) -> Result<(), String> {
     handle.apply(&state, title.as_deref())
-}
-
-#[tauri::command]
-fn get_transcription_status() -> TranscriptionStatus {
-    TranscriptionStatus {
-        chunks_in_queue: 0,
-        is_processing: false,
-        last_activity_ms: 0,
-    }
 }
 
 #[tauri::command]
@@ -1063,7 +1047,6 @@ pub fn run() {
             #[cfg(debug_assertions)]
             __dev_inject_deep_link,
             is_recording,
-            get_transcription_status,
             read_audio_file,
             save_transcript,
             analytics::commands::init_analytics,
@@ -1390,5 +1373,31 @@ mod tests {
             .await
             .expect("read transcripts.json");
         assert_eq!(text, "hello world second bit");
+    }
+
+    // Guard for cleanup-realtime-transcription-orphans (D10): generate_handler!
+    // is the sole source of runtime command dispatch. A #[tauri::command] fn
+    // that lingers in source cannot be invoked unless registered here, so this
+    // proves get_transcription_status has no runtime dispatch path — not merely
+    // that no caller references it.
+    #[test]
+    fn get_transcription_status_absent_from_invoke_handler_table() {
+        let src = include_str!("lib.rs");
+        let start_idx = src
+            .find("generate_handler![")
+            .expect("generate_handler! block not found");
+        let rest = &src[start_idx..];
+        // Macro args close with `])` — unique vs. #[cfg(...)] attribute
+        // brackets, which are followed by a newline rather than `)`.
+        let end_idx = rest
+            .find("])")
+            .expect("generate_handler! block not closed with ])");
+        let handler_block = &rest[..end_idx];
+        assert!(
+            !handler_block.contains("get_transcription_status"),
+            "get_transcription_status must not be registered for runtime dispatch.\n\
+             Handler block:\n{}",
+            handler_block
+        );
     }
 }

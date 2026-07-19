@@ -106,13 +106,6 @@ pub struct StopRecordingResult {
     pub meeting_name: Option<String>,
 }
 
-#[derive(Debug, Serialize, Clone)]
-pub struct TranscriptionStatus {
-    pub chunks_in_queue: usize,
-    pub is_processing: bool,
-    pub last_activity_ms: u64,
-}
-
 // ============================================================================
 // RECORDING COMMANDS
 // ============================================================================
@@ -854,15 +847,6 @@ async fn background_shutdown<R: Runtime>(
 /// Check if recording is active
 pub async fn is_recording() -> bool {
     current_phase() == RecordingPhase::Recording
-}
-
-/// Get recording statistics
-pub async fn get_transcription_status() -> TranscriptionStatus {
-    TranscriptionStatus {
-        chunks_in_queue: 0,
-        is_processing: current_phase() == RecordingPhase::Recording,
-        last_activity_ms: 0,
-    }
 }
 
 /// Pause the current recording
