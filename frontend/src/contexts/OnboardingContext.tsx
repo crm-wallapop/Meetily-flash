@@ -303,11 +303,13 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
       if (status) {
         console.log('[OnboardingContext] Loaded saved status:', status);
 
-        // Don't trust saved status - verify actual model status on disk
-        const verifiedStatus = await verifyModelStatus(status);
+        // Set before the slow verifyModelStatus await — the 1s auto-save debounce would otherwise clobber persisted completed=true with the mount default.
+        setCompleted(status.completed);
+        setCurrentStep(status.current_step > 4 ? 3 : status.current_step);
 
-        setCurrentStep(verifiedStatus.currentStep);
-        setCompleted(verifiedStatus.completed);
+        // Don't trust saved status - verify actual model status on disk
+        const verifiedStatus = await verifyModelStatus();
+
         setParakeetDownloaded(verifiedStatus.parakeetDownloaded);
         setSummaryModelDownloaded(verifiedStatus.summaryModelDownloaded);
 
@@ -322,7 +324,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   };
 
   // Verify that models actually exist on disk, not just trust saved JSON
-  const verifyModelStatus = async (savedStatus: OnboardingStatus) => {
+  const verifyModelStatus = async () => {
     let parakeetDownloaded = false;
     let summaryModelDownloaded = false;
 
@@ -347,24 +349,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
       summaryModelDownloaded = false;
     }
 
-    // Determine the correct step based on verified status
-    // New simplified flow: Step 1: Welcome, Step 2: Setup Overview, Step 3: Download Progress, Step 4: Permissions (macOS)
-    let currentStep = savedStatus.current_step;
-    const completed = savedStatus.completed;
-
-    // Clamp step to new max (4)
-    if (currentStep > 4) {
-      currentStep = 3; // Go to download progress step
-    }
-
-    // Trust the completed status - don't revert based on model downloads
-    // Downloads continue in background; user stays in main app regardless
-    return {
-      currentStep,
-      completed,
-      parakeetDownloaded,
-      summaryModelDownloaded,
-    };
+    return { parakeetDownloaded, summaryModelDownloaded };
   };
 
   const saveOnboardingStatus = async () => {
