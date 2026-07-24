@@ -1363,8 +1363,8 @@ mod tests {
     async fn common_writer_feeds_summary_reader() {
         let dir = tempfile::tempdir().expect("tempdir");
         let segments = crate::audio::common::create_transcript_segments(&[
-            ("hello world".to_string(), 0.0, 1000.0),
-            ("second bit".to_string(), 1000.0, 2000.0),
+            ("hello world".to_string(), 0.0, 1000.0, None),
+            ("second bit".to_string(), 1000.0, 2000.0, None),
         ]);
         crate::audio::common::write_transcripts_json(dir.path(), &segments)
             .expect("write transcripts.json");

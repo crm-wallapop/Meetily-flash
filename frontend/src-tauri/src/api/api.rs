@@ -194,19 +194,6 @@ pub struct TranscriptSegment {
     pub token_timestamps: Option<String>,
 }
 
-impl From<crate::audio::recording_saver::TranscriptSegment> for TranscriptSegment {
-    fn from(s: crate::audio::recording_saver::TranscriptSegment) -> Self {
-        Self {
-            id: s.id,
-            text: s.text,
-            timestamp: s.display_time,
-            audio_start_time: Some(s.audio_start_time),
-            audio_end_time: Some(s.audio_end_time),
-            duration: Some(s.duration),
-            token_timestamps: None,
-        }
-    }
-}
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Profile {
     pub id: String,
