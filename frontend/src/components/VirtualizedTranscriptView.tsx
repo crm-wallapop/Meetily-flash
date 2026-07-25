@@ -70,6 +70,21 @@ export function computeDisplayText(text: string): string {
     return cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
 }
 
+// Build a stable speaker → index map in first-appearance order. Drives badge
+// color assignment. Extracted so the split-persistence invariant (one source
+// row → N rows with distinct speakers → distinct indices) is unit-testable
+// without @testing-library/react.
+export function buildSpeakerIndexMap<T extends { speaker?: string }>(segments: T[]): Map<string, number> {
+    const map = new Map<string, number>();
+    let idx = 0;
+    for (const seg of segments) {
+        if (seg.speaker && !map.has(seg.speaker)) {
+            map.set(seg.speaker, idx++);
+        }
+    }
+    return map;
+}
+
 // Memoized transcript segment component
 const TranscriptSegment = memo(function TranscriptSegment({
     id,
@@ -256,16 +271,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     const useVirtualization = segments.length >= VIRTUALIZATION_THRESHOLD;
 
     // Build stable speaker → index mapping (first appearance order)
-    const speakerIndexMap = useMemo(() => {
-        const map = new Map<string, number>();
-        let idx = 0;
-        for (const seg of segments) {
-            if (seg.speaker && !map.has(seg.speaker)) {
-                map.set(seg.speaker, idx++);
-            }
-        }
-        return map;
-    }, [segments]);
+    const speakerIndexMap = useMemo(() => buildSpeakerIndexMap(segments), [segments]);
 
     const getSpeakerIndex = (speaker: string | undefined): number | undefined =>
         speaker ? speakerIndexMap.get(speaker) : undefined;

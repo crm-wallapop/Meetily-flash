@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::audio::decoder::decode_audio_file;
 use crate::audio::speaker::alignment::{
-    align_transcripts_with_diarization, DiarizationSegment, TranscriptInput,
+    align_transcripts_with_diarization, AlignedSegment, DiarizationSegment, TranscriptInput,
 };
 use crate::audio::speaker::diarization::{DiarizationOutput, DiarizationPort};
 use crate::database::repositories::speaker::SpeakerRepository;
@@ -182,15 +182,19 @@ impl DiarizationProcessor {
 
         let aligned = align_transcripts_with_diarization(transcripts, &diarization_segs);
 
-        // Store aligned results
-        let mut segments_labeled = 0;
-        for seg in &aligned {
-            let label = resolve_label(&seg.speaker, &label_map);
-            let source = "auto";
-            SpeakerRepository::update_transcript_speaker(pool, &seg.original_id, &label, source)
-                .await?;
-            segments_labeled += 1;
-        }
+        // Persist aligned per-speaker splits (group by source row, one
+        // transactional call each). This path is dead in production — the
+        // transcription queue is wired with None at transcription_queue.rs, so
+        // process() is never called from the live app — but fixed defensively
+        // so the compute-then-discard defect cannot recur if it is re-enabled.
+        let aligned: Vec<AlignedSegment> = aligned
+            .into_iter()
+            .map(|mut s| {
+                s.speaker = resolve_label(&s.speaker, &label_map);
+                s
+            })
+            .collect();
+        let segments_labeled = SpeakerRepository::persist_aligned_groups(pool, aligned).await?;
 
         Ok(DiarizationCompletePayload {
             meeting_id: meeting_id.to_string(),

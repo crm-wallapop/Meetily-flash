@@ -271,12 +271,34 @@ pub async fn set_segment_speaker(
         .map_err(|e| e.to_string())
 }
 
+// Per-meeting diarization serialization. Keyed by meeting_id so diarization
+// of DISTINCT meetings proceed in parallel, while two simultaneous calls on
+// the SAME meeting serialize — preventing clear/align/persist interleaving
+// that would otherwise corrupt transcript rows (e.g. the second pass's
+// clear_auto_labels racing the first pass's persist).
+static DIARIZATION_LOCKS: std::sync::OnceLock<
+    Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+> = std::sync::OnceLock::new();
+
+pub(crate) async fn diarization_lock_for(meeting_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let map = DIARIZATION_LOCKS
+        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())));
+    let mut guard = map.lock().await;
+    guard
+        .entry(meeting_id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 pub async fn run_diarization_for_meeting(
     pool: &SqlitePool,
     meeting_id: &str,
     threshold_fp: u32,
     registry: Arc<Mutex<Option<SherpaOnnxRegistryAdapter>>>,
 ) -> Result<DiarizationResult, String> {
+    let meeting_lock = diarization_lock_for(meeting_id).await;
+    let _diarization_guard = meeting_lock.lock().await;
+
     let cleared = SpeakerRepository::clear_auto_speaker_labels(pool, meeting_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -486,7 +508,7 @@ pub async fn run_diarization_for_meeting(
     }
 
     use crate::audio::speaker::alignment::{
-        align_transcripts_with_diarization, DiarizationSegment,
+        align_transcripts_with_diarization, AlignedSegment, DiarizationSegment, SpeakerSource,
     };
 
     let diarization_segs: Vec<DiarizationSegment> = segments
@@ -512,7 +534,14 @@ pub async fn run_diarization_for_meeting(
 
     let mut temporal_assigned = 0u64;
     for seg in &mut aligned {
-        if seg.speaker == "Unknown Speaker" && !labeled_midpoints.is_empty() {
+        // Proportional-tail Unknowns (speaker_source == Unknown) carry words
+        // that fall outside every diarization segment — they must survive as
+        // "Unknown Speaker" rather than be borrowed onto a nearby speaker.
+        // Token-path gap Unknowns (speaker_source == Auto) remain eligible.
+        if seg.speaker == "Unknown Speaker"
+            && seg.speaker_source != SpeakerSource::Unknown
+            && !labeled_midpoints.is_empty()
+        {
             let mid = (seg.audio_start_ms + seg.audio_end_ms) / 2;
             let nearest = labeled_midpoints
                 .iter()
@@ -528,15 +557,21 @@ pub async fn run_diarization_for_meeting(
         log::warn!("DIARIZATION: assigned {} short segments via temporal adjacency", temporal_assigned);
     }
 
-    // Step 8: Write labels to DB.
-    let mut segments_labeled = 0u64;
-    for seg in &aligned {
-        let label = resolve_label(&seg.speaker, &label_map);
-        SpeakerRepository::update_transcript_speaker(pool, &seg.original_id, &label, "auto")
-            .await
-            .map_err(|e| e.to_string())?;
-        segments_labeled += 1;
-    }
+    // Step 8: Persist aligned per-speaker splits. Resolve registry labels, then
+    // group by source row and persist each group in one transaction. The prior
+    // per-segment UPDATE-by-id loop collapsed N splits onto the shared source
+    // id (last-writer-wins) and discarded the split text.
+    let aligned: Vec<AlignedSegment> = aligned
+        .into_iter()
+        .map(|mut s| {
+            s.speaker = resolve_label(&s.speaker, &label_map);
+            s
+        })
+        .collect();
+    let segments_labeled = SpeakerRepository::persist_aligned_groups(pool, aligned)
+        .await
+        .map_err(|e| e.to_string())?
+        as u64;
 
     log::info!(
         "run_diarization_for_meeting: labeled {} segments for meeting {}",
@@ -2323,5 +2358,34 @@ mod tests {
             after.effective, 6,
             "changing global default must immediately affect non-overridden meetings"
         );
+    }
+
+    // 3.2 — two concurrent diarize invocations on the same meeting_id are
+    // serialized by the meeting-level guard. Verified at the lock-helper level
+    // (the function wraps the entire pipeline, which needs real audio + models).
+    #[tokio::test]
+    async fn rediarize_mutual_exclusion_per_meeting() {
+        let meeting = format!("test-mutex-{}", Uuid::new_v4());
+        let lock = diarization_lock_for(&meeting).await;
+        let guard = lock.lock().await;
+
+        let lock2 = diarization_lock_for(&meeting).await;
+        let join = tokio::spawn(async move {
+            let _g2 = lock2.lock().await;
+            "proceeded"
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !join.is_finished(),
+            "second diarize on same meeting must block while first holds the lock"
+        );
+
+        drop(guard);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), join)
+            .await
+            .expect("second diarize did not proceed within 2s of first releasing")
+            .expect("spawned task panicked");
+        assert_eq!(result, "proceeded");
     }
 }

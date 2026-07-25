@@ -49,11 +49,6 @@ fn speaker_at_time(segments: &[DiarizationSegment], time_ms: i64) -> Option<&Dia
     segments.iter().find(|s| time_ms >= s.start_ms && time_ms < s.end_ms)
 }
 
-/// Split a text into words (whitespace-delimited).
-fn split_words(text: &str) -> Vec<&str> {
-    text.split_whitespace().collect()
-}
-
 /// Align transcript segments with diarization speaker segments.
 ///
 /// For each transcript segment:
@@ -187,13 +182,14 @@ fn align_proportional(
         }];
     }
 
-    let words = split_words(&transcript.text);
-    if words.is_empty() {
+    let (units, separator) = proportional_units(&transcript.text);
+    if units.is_empty() {
         return Vec::new();
     }
 
+    let total = units.len() as f64;
     let mut results = Vec::new();
-    let mut word_idx = 0;
+    let mut idx = 0usize;
 
     for seg in diarization {
         // Clamp segment to transcript boundaries
@@ -204,15 +200,15 @@ fn align_proportional(
         }
 
         let seg_duration = (seg_end - seg_start) as f64;
-        let words_in_seg = ((seg_duration / duration) * words.len() as f64).round() as usize;
-        let words_in_seg = words_in_seg.max(1);
-        let end_idx = (word_idx + words_in_seg).min(words.len());
+        let units_in_seg = ((seg_duration / duration) * total).round() as usize;
+        let units_in_seg = units_in_seg.max(1);
 
-        if word_idx >= words.len() {
+        if idx >= units.len() {
             break;
         }
+        let end_idx = (idx + units_in_seg).min(units.len());
 
-        let text = words[word_idx..end_idx].join(" ");
+        let text = units[idx..end_idx].join(separator);
         results.push(AlignedSegment {
             original_id: transcript.id.clone(),
             text,
@@ -222,27 +218,48 @@ fn align_proportional(
             speaker_source: SpeakerSource::Fallback,
         });
 
-        word_idx = end_idx;
+        idx = end_idx;
     }
 
-    // Remaining words go to the last segment or "Unknown"
-    if word_idx < words.len() {
-        let text = words[word_idx..].join(" ");
-        let last_speaker = diarization
+    // Tail: leftover units fall outside every diarization segment, so they
+    // belong to no detected speaker. Label them "Unknown Speaker" and keep the
+    // source row's own timing — do NOT borrow diarization.last()'s speaker,
+    // which attributes text to a speaker whose segment does not cover it and
+    // can emit audio_start_ms > audio_end_ms when the last segment ends past
+    // the transcript range.
+    if idx < units.len() {
+        let text = units[idx..].join(separator);
+        let tail_start = results
             .last()
-            .map(|s| format!("Speaker {}", s.speaker_id))
-            .unwrap_or_else(|| "Unknown Speaker".to_string());
+            .map(|r| r.audio_end_ms)
+            .unwrap_or(transcript.audio_start_ms);
+        let tail_end = transcript.audio_end_ms.max(tail_start);
         results.push(AlignedSegment {
             original_id: transcript.id.clone(),
             text,
-            audio_start_ms: diarization.last().map(|s| s.end_ms).unwrap_or(transcript.audio_end_ms),
-            audio_end_ms: transcript.audio_end_ms,
-            speaker: last_speaker,
-            speaker_source: SpeakerSource::Fallback,
+            audio_start_ms: tail_start,
+            audio_end_ms: tail_end,
+            speaker: "Unknown Speaker".to_string(),
+            speaker_source: SpeakerSource::Unknown,
         });
     }
 
     results
+}
+
+/// Split text into proportional allocation units. Whitespace-delimited text
+/// yields word units; whitespace-free text (e.g. CJK without spaces, or a
+/// single token) is split into character units so proportional allocation can
+/// divide it across speakers instead of dumping 100% to the first speaker
+/// (which is what happens when `split_whitespace` returns a single element).
+fn proportional_units(text: &str) -> (Vec<String>, &'static str) {
+    if text.split_whitespace().count() > 1 {
+        (text.split_whitespace().map(String::from).collect(), " ")
+    } else if text.chars().count() > 1 {
+        (text.chars().map(|c| c.to_string()).collect(), "")
+    } else {
+        (vec![text.to_string()], "")
+    }
 }
 
 #[cfg(test)]
@@ -603,5 +620,68 @@ mod tests {
         // No field is reinterpreted as a command — the payload survives intact.
         let rejoined: String = result.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join(" ");
         assert_eq!(rejoined, payload);
+    }
+
+    // ── Proportional tail with no overlapping diarization (spec scenario) ──
+    // Words that fall outside every diarization segment are labeled "Unknown
+    // Speaker" with the source row's own timing — no foreign-speaker borrow,
+    // no inverted (start > end) range. Against the OLD code this fails: the
+    // tail borrowed diarization.last()'s speaker ("Speaker 1") and set
+    // audio_start_ms = last segment's end (3000), below the row's own start.
+
+    #[test]
+    fn proportional_no_overlap_labels_unknown_with_own_timing() {
+        // Diarization covers 0-3000; transcript row is 5000-9000 (no overlap).
+        let t = transcript("t1", "alpha beta gamma", 5000, 9000);
+        let diarization = vec![seg(0, 3000, 1)];
+
+        let result = align_transcripts_with_diarization(vec![t], &diarization);
+
+        assert_eq!(result.len(), 1, "no-overlap collapses to one tail segment");
+        assert_eq!(result[0].speaker, "Unknown Speaker");
+        assert_eq!(result[0].speaker_source, SpeakerSource::Unknown);
+        assert!(
+            result[0].audio_start_ms <= result[0].audio_end_ms,
+            "no inverted range: start={} end={}",
+            result[0].audio_start_ms,
+            result[0].audio_end_ms
+        );
+        assert_eq!(result[0].audio_start_ms, 5000);
+        assert_eq!(result[0].audio_end_ms, 9000);
+        assert_eq!(result[0].text, "alpha beta gamma");
+    }
+
+    #[test]
+    fn proportional_partial_overlap_tail_is_unknown_non_inverted() {
+        let t = transcript("t1", "one two three four five six", 5000, 9000);
+        let diarization = vec![seg(5000, 6000, 1)];
+
+        let result = align_transcripts_with_diarization(vec![t], &diarization);
+
+        let tail = result.last().expect("a tail segment exists");
+        assert_eq!(tail.speaker, "Unknown Speaker");
+        assert_eq!(tail.speaker_source, SpeakerSource::Unknown);
+        assert!(tail.audio_start_ms <= tail.audio_end_ms);
+    }
+
+    // ── CJK / no-whitespace proportional split (spec scenario) ────────────
+    // Whitespace-free text must be divided by character ratio, not dumped 100%
+    // to the first speaker. Against the OLD code this fails: split_whitespace
+    // returns one element, so words_in_seg clamps to 1 and the whole string
+    // lands on Speaker 1.
+
+    #[test]
+    fn proportional_cjk_no_whitespace_is_divided() {
+        let t = transcript("t1", "你好世界", 0, 4000);
+        let diarization = vec![seg(0, 2000, 1), seg(2000, 4000, 2)];
+
+        let result = align_transcripts_with_diarization(vec![t], &diarization);
+
+        assert_eq!(result.len(), 2, "CJK text splits across both speakers");
+        assert_eq!(result[0].speaker, "Speaker 1");
+        assert_eq!(result[1].speaker, "Speaker 2");
+        assert_ne!(result[0].text, "你好世界", "not dumped 100% to one speaker");
+        let rejoined: String = result.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(rejoined, "你好世界", "all characters preserved");
     }
 }
