@@ -876,6 +876,7 @@ mod tests {
         summary: Option<String>,
         action_items: Option<String>,
         key_points: Option<String>,
+        speaker: Option<String>,
         audio_start_time: Option<f64>,
         audio_end_time: Option<f64>,
         duration: Option<f64>,
@@ -888,7 +889,7 @@ mod tests {
     async fn read_rows(pool: &SqlitePool, meeting_id: &str) -> Vec<ReadRow> {
         sqlx::query_as::<_, ReadRow>(
             "SELECT id, transcript, meeting_id, timestamp, summary, action_items, key_points, \
-             audio_start_time, audio_end_time, duration, speaker_label, speaker_source, \
+             speaker, audio_start_time, audio_end_time, duration, speaker_label, speaker_source, \
              token_timestamps, previous_label \
              FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time ASC, id ASC",
         )
@@ -1058,11 +1059,11 @@ mod tests {
         let pool = transcripts_test_pool().await;
         sqlx::query(
             "INSERT INTO transcripts \
-             (id, meeting_id, transcript, timestamp, summary, action_items, key_points, \
+             (id, meeting_id, transcript, timestamp, summary, action_items, key_points, speaker, \
               audio_start_time, audio_end_time, duration, speaker_label, speaker_source, \
               token_timestamps, previous_label) \
              VALUES ('src-2', 'meet-2', 'orig text', '2026-07-25T01:02:03Z', 'the-summary', \
-                     'the-actions', 'the-keys', 5.0, 9.0, 4.0, 'Speaker Old', 'auto', \
+                     'the-actions', 'the-keys', 'mic', 5.0, 9.0, 4.0, 'Speaker Old', 'auto', \
                      '[{\"word\":\"x\"}]', 'prev-label')",
         )
         .execute(&pool)
@@ -1102,6 +1103,7 @@ mod tests {
             assert_eq!(r.summary.as_deref(), Some("the-summary"));
             assert_eq!(r.action_items.as_deref(), Some("the-actions"));
             assert_eq!(r.key_points.as_deref(), Some("the-keys"));
+            assert_eq!(r.speaker.as_deref(), Some("mic"), "audio-source speaker column copied through");
             assert_eq!(r.previous_label.as_deref(), Some("prev-label"));
             // Overridden:
             assert_ne!(r.id, "src-2", "fresh UUID id");
