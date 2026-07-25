@@ -258,6 +258,7 @@ fn proportional_units(text: &str) -> (Vec<String>, &'static str) {
     } else if text.chars().count() > 1 {
         (text.chars().map(|c| c.to_string()).collect(), "")
     } else {
+        // Single character (or empty): cannot be subdivided — one unit.
         (vec![text.to_string()], "")
     }
 }

@@ -22,6 +22,7 @@ pub struct TranscriptSourceRow {
     pub summary: Option<String>,
     pub action_items: Option<String>,
     pub key_points: Option<String>,
+    pub speaker: Option<String>,
     pub audio_start_time: Option<f64>,
     pub audio_end_time: Option<f64>,
     pub duration: Option<f64>,
@@ -316,7 +317,7 @@ impl SpeakerRepository {
 
         let source = sqlx::query_as::<_, TranscriptSourceRow>(
             "SELECT id, meeting_id, transcript, timestamp, summary, action_items, key_points, \
-             audio_start_time, audio_end_time, duration, speaker_label, speaker_source, \
+             speaker, audio_start_time, audio_end_time, duration, speaker_label, speaker_source, \
              token_timestamps, previous_label \
              FROM transcripts WHERE id = ?",
         )
@@ -374,9 +375,9 @@ impl SpeakerRepository {
             sqlx::query(
                 "INSERT INTO transcripts \
                    (id, meeting_id, transcript, timestamp, summary, action_items, key_points, \
-                    audio_start_time, audio_end_time, duration, speaker_label, speaker_source, \
-                    token_timestamps, previous_label) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+                    speaker, audio_start_time, audio_end_time, duration, speaker_label, \
+                    speaker_source, token_timestamps, previous_label) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
             )
             .bind(&new_id)
             .bind(&source.meeting_id)
@@ -385,6 +386,7 @@ impl SpeakerRepository {
             .bind(source.summary.as_deref())
             .bind(source.action_items.as_deref())
             .bind(source.key_points.as_deref())
+            .bind(source.speaker.as_deref())
             .bind(audio_start)
             .bind(audio_end)
             .bind(duration)
@@ -861,6 +863,7 @@ mod tests {
         "summary",
         "action_items",
         "key_points",
+        "speaker",
         "previous_label",
     ];
 
@@ -895,53 +898,40 @@ mod tests {
         .unwrap()
     }
 
-    /// Full 14-column schema mirroring the production `transcripts` table
-    /// (NOT NULL only on id/meeting_id/transcript/timestamp, matching the
-    /// ALTER-TABLE migrations). Used by the split-persistence tests so the
-    /// dynamic PRAGMA column check sees the real column set.
-    async fn transcripts_test_pool() -> SqlitePool {
-        let pool = SqlitePool::connect(":memory:").await.unwrap();
-        sqlx::query(
+    /// Schema mirroring the production `transcripts` table (NOT NULL only on
+    /// id/meeting_id/transcript/timestamp, matching the ALTER-TABLE migrations).
+    /// Used by the split-persistence tests so the dynamic PRAGMA column check
+    /// sees the real column set. All pool builders call this so the column
+    /// list cannot drift between the default, atomicity, and single-connection
+    /// variants.
+    async fn apply_transcripts_schema(pool: &SqlitePool, transcript_ddl: &str) {
+        sqlx::query(&format!(
             "CREATE TABLE transcripts (
                 id TEXT PRIMARY KEY,
                 meeting_id TEXT NOT NULL,
-                transcript TEXT NOT NULL,
+                {transcript_ddl},
                 timestamp TEXT NOT NULL,
-                summary TEXT,
-                action_items TEXT,
-                key_points TEXT,
-                audio_start_time REAL,
-                audio_end_time REAL,
-                duration REAL,
-                speaker_label TEXT,
-                speaker_source TEXT,
-                token_timestamps TEXT,
-                previous_label TEXT
+                summary TEXT, action_items TEXT, key_points TEXT,
+                speaker TEXT,
+                audio_start_time REAL, audio_end_time REAL, duration REAL,
+                speaker_label TEXT, speaker_source TEXT,
+                token_timestamps TEXT, previous_label TEXT
             )",
-        )
-        .execute(&pool)
+        ))
+        .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn transcripts_test_pool() -> SqlitePool {
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        apply_transcripts_schema(&pool, "transcript TEXT NOT NULL").await;
         pool
     }
 
     async fn atomicity_test_pool() -> SqlitePool {
         let pool = SqlitePool::connect(":memory:").await.unwrap();
-        sqlx::query(
-            "CREATE TABLE transcripts (
-                id TEXT PRIMARY KEY,
-                meeting_id TEXT NOT NULL,
-                transcript TEXT NOT NULL CHECK (transcript <> '__FAIL__'),
-                timestamp TEXT NOT NULL,
-                summary TEXT, action_items TEXT, key_points TEXT,
-                audio_start_time REAL, audio_end_time REAL, duration REAL,
-                speaker_label TEXT, speaker_source TEXT,
-                token_timestamps TEXT, previous_label TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        apply_transcripts_schema(&pool, "transcript TEXT NOT NULL CHECK (transcript <> '__FAIL__')").await;
         pool
     }
 
@@ -1280,10 +1270,14 @@ mod tests {
         assert_eq!(rows[0].speaker_source.as_deref(), Some("auto"));
     }
 
-    // 1.13 — a ~500 kB source row splits without OOM, and N≈120 splits insert
-    // without hitting SQLite's per-statement host-parameter ceiling.
+    // 1.13 — a ~500 kB source row splits without OOM, and a large split count
+    // (N=120) persists without error. The implementation uses per-row INSERTs
+    // (15 host params each), so no single statement approaches SQLite's
+    // per-statement host-parameter ceiling regardless of N — this test guards
+    // the oversized-row and large-N paths, not a chunking scheme (there is
+    // none: per-row inserts keep the bound well under the ceiling).
     #[tokio::test]
-    async fn persist_aligned_splits_oversized_and_host_param_ceiling() {
+    async fn persist_aligned_splits_oversized_row_and_large_n() {
         let pool = transcripts_test_pool().await;
         let big = "a ".repeat(250_000);
         insert_full_row(&pool, "src-10", &big, None).await;
@@ -1294,7 +1288,7 @@ mod tests {
             splits.push(aligned("src-10", "x", s, s + chunk_ms, &format!("Speaker {}", i % 3)));
         }
         let res = SpeakerRepository::persist_aligned_splits(&pool, "src-10", &splits).await;
-        assert!(res.is_ok(), "no 'too many SQL variables' / OOM: {:?}", res.err());
+        assert!(res.is_ok(), "no OOM / SQL error on oversized row + large N: {:?}", res.err());
         let rows = read_rows(&pool, "meet-1").await;
         assert_eq!(rows.len(), 120);
     }
@@ -1485,36 +1479,23 @@ mod tests {
         }
     }
 
-    // 3.3 — two transactions splitting distinct source rows do not interfere
-    // (transactional isolation): each DELETE is scoped by source id and each
-    // transaction commits independently. SQLite serializes writers (a file-based
-    // production pool retries via busy_timeout; the in-memory shared-cache pool
-    // returns SQLITE_LOCKED, which busy_timeout cannot retry), so the test pool
-    // uses a single connection — the concurrent tokio::join! invocation then
-    // serializes safely at the pool level, proving the two persists don't
-    // corrupt each other's rows.
+    // 3.3 — two persisted splits on distinct source rows do not corrupt each
+    // other. SQLite serializes writers: a file-based production pool retries a
+    // contending writer via busy_timeout, while the in-memory shared-cache pool
+    // returns SQLITE_LOCKED (which busy_timeout cannot retry), so this test
+    // pool uses a single connection and the tokio::join! invocation serializes
+    // at the pool level. This proves row-correctness (each DELETE is scoped by
+    // source id; the two split sets are disjoint) — it does NOT prove
+    // SQLite-level isolation under true concurrency, which a file-based pool
+    // with busy_timeout would be needed to exercise.
     #[tokio::test]
-    async fn persist_aligned_splits_concurrent_distinct_sources() {
+    async fn persist_aligned_splits_distinct_sources_correct_under_serialized_writes() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect(":memory:")
             .await
             .unwrap();
-        sqlx::query(
-            "CREATE TABLE transcripts (
-                id TEXT PRIMARY KEY,
-                meeting_id TEXT NOT NULL,
-                transcript TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                summary TEXT, action_items TEXT, key_points TEXT,
-                audio_start_time REAL, audio_end_time REAL, duration REAL,
-                speaker_label TEXT, speaker_source TEXT,
-                token_timestamps TEXT, previous_label TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        apply_transcripts_schema(&pool, "transcript TEXT NOT NULL").await;
         insert_full_row(&pool, "c-1", "alpha beta", None).await;
         insert_full_row(&pool, "c-2", "gamma delta", None).await;
         let s1 = vec![
