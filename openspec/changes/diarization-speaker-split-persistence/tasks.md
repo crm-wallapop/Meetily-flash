@@ -37,5 +37,5 @@
 ## 5. Pre-archive gate
 
 - [x] 5.1 Run `cargo test`, `pytest backend/`, `pnpm test`, `pnpm lint`, `pnpm test:smoke` — all green.
-- [ ] 5.2 Re-read `openspec/specs/speaker-diarization/spec.md` and `openspec/specs/post-meeting-pipeline/spec.md` + this change's `design.md`; amend deltas if implementation evolved during apply.
+- [x] 5.2 Re-read `openspec/specs/speaker-diarization/spec.md` and `openspec/specs/post-meeting-pipeline/spec.md` + this change's `design.md`; amend deltas if implementation evolved during apply.
 - [ ] 5.3 `/opsx:archive` after spec/design reconciliation.
