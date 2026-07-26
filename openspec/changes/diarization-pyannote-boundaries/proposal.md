@@ -1,10 +1,17 @@
-> **STATUS (2026-07-25, updated 2026-07-26): NOT CONVERGED — DO NOT `/opsx:apply`.** Two compounding blockers:
+> **STATUS (2026-07-26): EMPIRICAL BLOCK RESOLVED — re-converging.** Prior blockers cleared:
 >
-> 1. **Empirical block (2026-07-25).** Three shark-tank rounds refuted three successive D1 formulations (see `openspec/exploration/diarization-speaker-split-persistence.md` § "Part B empirical block"). The core design depends on empirical results (which pyannote threshold resolves turns on real audio) that do not yet exist. The proposal also carries known text errors (`threshold: 1.0` residuals; supersession clause in the wrong canonical requirement).
+> 1. ~~Empirical block~~ — **RESOLVED.** The `pyannote_cde5c264_threshold_sweep` probe (`frontend/src-tauri/tests/pyannote_ort_probe.rs`, branch `diarize/pyannote-threshold-probe`, commit `8426e65`) ran pyannote via the project's `ort = 2.0.0-rc.10` dep on the real cde5c264 recording at onset thresholds 0.3/0.5/0.7. Results (33s wall, 19.7s inference on 165 ROI windows):
+>    - **Banter 5.7–32.5s:** 1 boundary (baseline chunk grid) → **36–42 boundaries** (pyannote)
+>    - **Ricardo join 17:37:** sparse → **35–43 boundaries**
+>    - **Ricardo interjection 46:58:** collapsed → **22–27 boundaries**
+>    - Thresholds nearly equivalent (203–210 total change-points); onset **0.5** (pyannote default) is the chosen value.
+>    - Core premise confirmed: pyannote provides boundaries the chunk grid structurally cannot.
 >
-> 2. **HARD ENVIRONMENT BLOCK (2026-07-26).** The pyannote threshold probe (`test_cde5c264_pyannote_threshold_probe`, branch `diarize/pyannote-threshold-probe`) crashes during `OfflineSpeakerDiarization::create()` with `STATUS_ACCESS_VIOLATION` before any threshold sweep can run. Root cause: `pyannote-segmentation-3.0.onnx` requires ORT C-API version 24–27, but the sherpa-onnx 1.13.x Rust crate statically bundles ORT 1.17.1 (API ≤17). **Bumping the Rust crate 1.13.2 → 1.13.4 did NOT move the bundled ORT** (warning changed from "API 24 not available" to "API 27 not available" but ORT stayed at 1.17.1). The Rust crate line is capped at 1.13.4 — there is no ≥1.14. See memory `project_sherpa_onnx_ort_pyannote_block.md`.
+> 2. ~~Hard environment block~~ — **RESOLVED via unblock lever (b).** sherpa-onnx 1.13.x's bundled ORT 1.17.1 cannot load pyannote-3.0, but the project's existing `ort = 2.0.0-rc.10` dep (Cargo.toml:113) loads it cleanly via `Session::commit_from_file` + `session.run()`. No new dependency, no sherpa-onnx upgrade; pyannote runs alongside nemo_titanet+AHC+registry (preserved).
 >
-> **Unblock levers** (any one): (a) wait for sherpa-onnx Rust crate to ship a newer ORT (timeline unknown); (b) rebuild the segmentation+embedding+clustering pipeline on the project's existing `ort = 2.0.0-rc.10` dep (Cargo.toml:113) via `pyannote-rs` or hand-rolled — discards nemo_titanet+AHC+registry; (c) source an older pyannote model (v1.x/2.x converted at low opset) compatible with ORT 1.17.1.
+> **Perf gate met:** 120ms/window on CPU; full 83-min recording projects to ~10min. Acceptable for a diarization-time-only cost (does not block transcription).
+>
+> **Next:** re-panel to convergence (D1 needs reframing around the empirically-chosen onset 0.5 + Meetily's existing `MIN_SPEECH_SECS=1.5s` floor for coalescing sub-second noise boundaries), then `/opsx:apply`.
 >
 > Part A (`diarization-speaker-split-persistence`) is converged and **archived** (2026-07-25) independently.
 
@@ -13,6 +20,8 @@
 The companion change `diarization-speaker-split-persistence` makes the per-speaker split persist correctly — but on `meeting-cde5c264-…` it yields only a **2-way split** of the 26.8 s evidence window, not the per-turn resolution the transcript text implies. The diarization emits boundaries only where the uniform chunk grid (`SPLIT_TARGET_SECS = 3.0`, `FINE_SPLIT_SECS = 2.0`) changes AHC label, so rapid back-and-forth *within* one grid cell is collapsed into a single run. Storage persistence is necessary but not sufficient; the complaint is not resolved until there are more boundaries.
 
 The boundary source already exists, unused. `pyannote-segmentation.onnx` is a **phantom dependency**: `sherpa_adapter.rs:103-106` accepts `segmentation_model_path`, checks the file exists, and never passes it to any sherpa-onnx config — the only ONNX object built is a `SpeakerEmbeddingExtractor` (nemo_titanet). sherpa-onnx 1.13.2 (pinned `Cargo.toml:141`) ships a complete pyannote-backed `offline_speaker_diarization` module (`sherpa-onnx-1.13.2/src/offline_speaker_diarization.rs`) whose segmentation model operates at ~100 ms frame resolution — far finer than the 2–3 s chunk grid. The canonical `post-meeting-pipeline` spec even names `OfflineSpeakerDiarization::process(samples)` at step 3 (`spec.md:290`); the implementation doesn't conform. Wiring it up closes an existing spec/impl gap.
+
+**Empirical confirmation (2026-07-26):** The probe ran pyannote segmentation via `ort 2.0.0-rc.10` on the real cde5c264 recording. The 5.7–32.5s banter window — which the chunk grid collapses to **1 boundary at 21.36s** — produces **36 boundaries at onset 0.5**. The 46:58 Ricardo interjection — collapsed to a single run in production — produces **24 boundaries**. The premise that pyannote provides finer boundaries than the chunk grid is empirically verified.
 
 > **Depends on `diarization-speaker-split-persistence` being archived first.** Finer boundaries produce more N>1 splits, which need the corrected persist path. This change assumes that path is in place.
 
