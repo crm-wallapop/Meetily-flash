@@ -80,3 +80,4 @@ frontend/src-tauri/binaries/
 Cargo.lock
 .worktrees/
 .claude/scheduled_tasks.lock
+.zcode/
