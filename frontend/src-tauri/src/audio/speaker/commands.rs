@@ -1744,6 +1744,257 @@ mod tests {
         );
     }
 
+    // Empirical threshold probe for the parked `diarization-pyannote-boundaries`
+    // change. The Part B shark-tank refuted 3 successive D1 formulations; the
+    // panel concluded the right threshold (and whether to keep or discard
+    // sherpa's labels through chunk formation) cannot be settled analytically.
+    // This probe runs sherpa's OfflineSpeakerDiarization directly — bypassing
+    // Meetily's adapter — at several FastClusteringConfig.threshold values and
+    // dumps the resulting segment boundaries next to known ground-truth turns
+    // (Ricardo joins at 17:37; banter window 5.7–32.5s; interjection at 46:58).
+    // WHY direct sherpa: Meetily's adapter never wires pyannote (phantom dep —
+    // sherpa_adapter.rs:103-106); this is the only way to see its raw output.
+    #[ignore]
+    #[tokio::test]
+    async fn test_cde5c264_pyannote_threshold_probe() {
+        let db_path = r"C:\Users\CarlosRuizMartínez\AppData\Roaming\com.meetily.ai\meeting_minutes.sqlite";
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=ro", db_path))
+            .await
+            .expect("DB connect (read-only)");
+        let meeting_id = "meeting-cde5c264-1c4a-49d9-97c5-6a7e69bb9323";
+
+        let row = sqlx::query("SELECT folder_path FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(&pool)
+            .await
+            .expect("fetch meeting");
+        let folder = row
+            .and_then(|r| sqlx::Row::get::<Option<String>, _>(&r, "folder_path"))
+            .expect("cde5c264 folder_path missing");
+        let audio_path = find_audio_in_folder(std::path::Path::new(&folder)).expect("audio file");
+        let decoded = crate::audio::decoder::decode_audio_file(&audio_path).expect("decode audio");
+        let full_samples = decoded.to_whisper_format();
+        let audio_duration = decoded.duration_seconds.max(0.001);
+        // WHY slice to 50 min: sherpa's OfflineSpeakerDiarization::process()
+        // access-violates on the full 83-min buffer (status 0xc0000005). 50 min
+        // covers all three ground-truth windows (banter 5.7–32.5s, Ricardo join
+        // 17:37, interjection 46:58) at ~48M samples — under whatever limit
+        // sherpa hit. Full-audio crash investigation deferred (would only
+        // matter if Part B ships without external chunking).
+        const PROBE_MINUTES: usize = 50;
+        let probe_samples = PROBE_MINUTES * 60 * 16000;
+        let samples = if full_samples.len() > probe_samples {
+            eprintln!(
+                "PROBE: slicing {} -> {} samples ({} min cap for sherpa process() stability)",
+                full_samples.len(), probe_samples, PROBE_MINUTES
+            );
+            full_samples[..probe_samples].to_vec()
+        } else {
+            full_samples
+        };
+        eprintln!(
+            "PROBE: {} samples ({:.1}s @ 16kHz mono)",
+            samples.len(),
+            audio_duration
+        );
+
+        let models_dir = dirs::home_dir().unwrap_or_default().join(".meetily-models");
+        let segmentation_path = models_dir.join("pyannote-segmentation.onnx");
+        let embedding_path =
+            models_dir.join(crate::audio::speaker::model_download::embedding_filename());
+        assert!(segmentation_path.exists(), "pyannote model missing");
+        assert!(embedding_path.exists(), "titanet embedding model missing");
+        let segmentation_str = segmentation_path.to_str().unwrap().to_string();
+        let embedding_str = embedding_path.to_str().unwrap().to_string();
+
+        // WHY use sherpa_onnx::* flat paths: crate lib.rs (1.13.2 line 210)
+        // declares `mod offline_speaker_diarization` (private module) and
+        // re-exports via `pub use offline_speaker_diarization::*` (line 228)
+        // so the qualified module path is not reachable from outside.
+        use sherpa_onnx::{
+            FastClusteringConfig, OfflineSpeakerDiarization,
+            OfflineSpeakerDiarizationConfig, OfflineSpeakerSegmentationModelConfig,
+            OfflineSpeakerSegmentationPyannoteModelConfig, SpeakerEmbeddingExtractorConfig,
+        };
+
+        // threshold is a cosine DISSIMILARITY cutoff (smaller -> more clusters).
+        // 0.0 maximally fragments, 0.5 is sherpa's default, ~0.3 is a middle
+        // ground. min_duration_on/off held at defaults so the comparison
+        // isolates threshold's effect on boundary placement.
+        //
+        // STEP 0 (diagnostic): create-only with a tiny synthetic buffer to
+        // isolate whether the crash is in model loading (create) or processing.
+        // Production NEVER loads pyannote (sherpa_adapter.rs:103-106 only
+        // existence-checks the path), so this is the first code to actually
+        // pass it to ORT 1.17.1 — if the model is unloadable in this build,
+        // Part B is blocked on an ORT/sherpa upgrade regardless of threshold.
+        eprintln!("PROBE STEP 0: create-only diagnostic (threshold 0.5, 1600 samples of silence)");
+        {
+            let cfg = OfflineSpeakerDiarizationConfig {
+                segmentation: OfflineSpeakerSegmentationModelConfig {
+                    pyannote: OfflineSpeakerSegmentationPyannoteModelConfig {
+                        model: Some(segmentation_str.clone()),
+                    },
+                    num_threads: 1,
+                    debug: true,
+                    provider: Some("cpu".to_string()),
+                },
+                embedding: SpeakerEmbeddingExtractorConfig {
+                    model: Some(embedding_str.clone()),
+                    num_threads: 1,
+                    debug: true,
+                    provider: Some("cpu".to_string()),
+                },
+                clustering: FastClusteringConfig { num_clusters: -1, threshold: 0.5 },
+                min_duration_on: 0.3,
+                min_duration_off: 0.5,
+            };
+            eprintln!("PROBE STEP 0: calling create()...");
+            match OfflineSpeakerDiarization::create(&cfg) {
+                Some(d) => {
+                    eprintln!("PROBE STEP 0: create OK, sample_rate={}, calling process(1600 samples)...", d.sample_rate());
+                    let tiny: Vec<f32> = vec![0.0; 1600];
+                    match d.process(&tiny) {
+                        Some(r) => eprintln!("PROBE STEP 0: process OK, {} segments", r.num_segments()),
+                        None => eprintln!("PROBE STEP 0: process returned None"),
+                    }
+                }
+                None => eprintln!("PROBE STEP 0: create returned None"),
+            }
+        }
+        eprintln!("PROBE STEP 0: complete\n");
+
+        for &threshold in &[0.0f32, 0.3, 0.5] {
+            let config = OfflineSpeakerDiarizationConfig {
+                segmentation: OfflineSpeakerSegmentationModelConfig {
+                    pyannote: OfflineSpeakerSegmentationPyannoteModelConfig {
+                        model: Some(segmentation_str.clone()),
+                    },
+                    num_threads: 1,
+                    debug: false,
+                    provider: Some("cpu".to_string()),
+                },
+                embedding: SpeakerEmbeddingExtractorConfig {
+                    model: Some(embedding_str.clone()),
+                    num_threads: 1,
+                    debug: false,
+                    provider: Some("cpu".to_string()),
+                },
+                clustering: FastClusteringConfig {
+                    num_clusters: -1,
+                    threshold,
+                },
+                min_duration_on: 0.3,
+                min_duration_off: 0.5,
+            };
+
+            let t0 = std::time::Instant::now();
+            let diarizer = OfflineSpeakerDiarization::create(&config).expect("create diarizer failed");
+
+            let n_expected = diarizer.sample_rate();
+            // samples is owned by the outer test fn; clone per iteration so
+            // multiple thresholds can be probed without re-decoding the audio.
+            let samples_for_threshold = samples.clone();
+            let result = tokio::task::spawn_blocking(move || diarizer.process(&samples_for_threshold))
+                .await
+                .expect("process panicked")
+                .expect("process failed");
+            let elapsed = t0.elapsed().as_secs_f64();
+
+            let segments = result.sort_by_start_time();
+            let num_speakers = result.num_speakers();
+            eprintln!(
+                "\n===== threshold {:.2}: {} segments, {} speakers, sample_rate={}, {:.1}s wall =====",
+                threshold, segments.len(), num_speakers, n_expected, elapsed
+            );
+
+            // Ground-truth windows to inspect.
+            let banter_start = 5.7f32;
+            let banter_end = 32.5f32;
+            let ricardo_join = 17.0 * 60.0 + 37.0; // 17:37
+            let interject = 46.0 * 60.0 + 58.0; // 46:58
+
+            let banter_boundaries: Vec<(f32, f32, i32)> = segments
+                .iter()
+                .filter(|s| s.start < banter_end && s.end > banter_start)
+                .map(|s| (s.start, s.end, s.speaker))
+                .collect();
+            eprintln!(
+                "  banter [5.7–32.5s]: {} segments, {} speaker-changes, speakers {:?}",
+                banter_boundaries.len(),
+                banter_boundaries.windows(2).filter(|w| w[0].2 != w[1].2).count(),
+                {
+                    let mut s: Vec<i32> = banter_boundaries.iter().map(|x| x.2).collect();
+                    s.sort();
+                    s.dedup();
+                    s
+                }
+            );
+            for (st, en, sp) in &banter_boundaries {
+                eprintln!("    [{:7.2} – {:7.2}] speaker {}", st, en, sp);
+            }
+
+            let pre_join_speakers: Vec<i32> = {
+                let mut s: Vec<i32> = segments
+                    .iter()
+                    .filter(|s| s.start < ricardo_join)
+                    .map(|s| s.speaker)
+                    .collect();
+                s.sort();
+                s.dedup();
+                s
+            };
+            let post_join_speakers: Vec<i32> = {
+                let mut s: Vec<i32> = segments
+                    .iter()
+                    .filter(|s| s.start >= ricardo_join)
+                    .map(|s| s.speaker)
+                    .collect();
+                s.sort();
+                s.dedup();
+                s
+            };
+            eprintln!(
+                "  ricardo-join {}: pre-join speakers {:?}, post-join speakers {:?}, new-after {:?}",
+                ricardo_join,
+                pre_join_speakers,
+                post_join_speakers,
+                post_join_speakers
+                    .iter()
+                    .filter(|s| !pre_join_speakers.contains(s))
+                    .collect::<Vec<_>>()
+            );
+
+            let near_interject: Vec<(f32, f32, i32)> = segments
+                .iter()
+                .filter(|s| s.start < interject + 5.0 && s.end > interject - 5.0)
+                .map(|s| (s.start, s.end, s.speaker))
+                .collect();
+            eprintln!(
+                "  interjection [{}±5s]: {} segments (target: ≥1 boundary near {})",
+                interject,
+                near_interject.len(),
+                interject
+            );
+            for (st, en, sp) in &near_interject {
+                eprintln!("    [{:7.2} – {:7.2}] speaker {}", st, en, sp);
+            }
+
+            let out =
+                std::env::temp_dir().join(format!("probe_cde5c264_t{}.txt", (threshold * 100.0) as u32));
+            let mut body = String::new();
+            body.push_str(&format!(
+                "# threshold {} min_duration_on 0.3 min_duration_off 0.5 num_speakers {} wall {:.1}s\n",
+                threshold, num_speakers, elapsed
+            ));
+            for s in &segments {
+                body.push_str(&format!("SEG {:.3} {:.3} {}\n", s.start, s.end, s.speaker));
+            }
+            std::fs::write(&out, body).expect("write probe");
+            eprintln!("  wrote {}", out.display());
+        }
+    }
+
     // §5.2: end-to-end integration of the real two-pass diarization with the
     // token-level alignment layer on the [46:42–47:02] target. §5.1 proves the
     // boundary exists (Ricardo [2802–2820s]); this test proves it reaches
