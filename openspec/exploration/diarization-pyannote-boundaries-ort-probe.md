@@ -194,3 +194,35 @@ The panel's sequencing rule resolves it: gate failed → Option 3. Three corrobo
 3. Rewrite the proposal's D1–D4 around Option 3 before any `/opsx:apply`. The current D1–D4 (sherpa `OfflineSpeakerDiarization`) is falsified; the new D1 should reference the subprocess boundary as the runtime-isolation mechanism.
 
 The empirical data (Phase 1/2/2b — pyannote gives 24 banter turns, hits both anchors) remains valid and transfers to Option 3: the child binary runs pyannote via ort exactly as the probes did, just packaged as a standalone CLI.
+
+---
+
+## CORRECTION (2026-07-27): the Loop 1 panel overturned "Option 3 won"
+
+The section above ("Converged verdict: Option 3") was **premature** — I declared convergence by applying the prior panel's sequencing rule ("if the gate fails, Option 3") without re-convening the panel on the updated cost picture. When the user pushed back and asked whether I'd actually looped to convergence, I ran a fresh 3-way panel with the full updated cost data. **All three fresh panelists overturned the prior verdict.**
+
+### What the fresh panel saw that changed the answer
+- Option 1's gate failed (cosine 0.95 < 0.99) BUT the failure signature is **diagnostic, not fatal**: cosines scale monotonically with clip quality (silence 0.04 → clean 0.95), 2.9× norm ratio on silence. This is the textbook signature of a missing/mis-applied preprocessing normalization (CMVN or similar), NOT a broken forward pass or random noise.
+- The prior panel's "unbounded effort" framing conflated the *deployment constraint* (sherpa-onnx-sys ships prebuilt static libs, no local instrumentation) with the *investigation cost* (read sherpa-onnx's C++ source on GitHub). The cosine gate is the test; you don't need runtime instrumentation to run it.
+- Option 3's harness is built (sunk cost), but Option 3 still carries **permanent operational tax**: a second signed binary, recurring per-release signing, updater version-skew, IPC schema maintenance, Windows Defender stall → silent fallback. These don't go away.
+
+### The fresh panel's verdict (unanimous)
+**Option 1 deserves a bounded diagnostic round before any commitment to Option 3.** Read sherpa-onnx's nemo frontend C++ source on GitHub, identify the preprocessing divergence the data points at, fix it, re-run the cosine gate. Hard cap 3-7 days.
+
+### The agreed flip condition (also unanimous)
+Abandon Option 1 and commit to Option 3 the moment the diagnostic reveals a **second independent divergence** after the obvious normalization fix. One fix = signal worth pursuing; two fixes = the "fractal" materializing and the "bounded subsystem" premise invalidates. Panelist C named this precisely: "normalizations are fractal — fix CMVN, cosine climbs to 0.97, then a windowing mismatch surfaces, then resampling, then float precision."
+
+### Why this loop mattered
+The prior shortcut would have shipped Option 3's permanent subprocess tax based on one failed gate attempt, when the failure signature actually names the bug. Two of three panelists explicitly called out that "gate failed once → Option 3" is **premature sequencing** when the gate's own premise (cheap, in-process, would pass) had already broken twice.
+
+### Status of the Option 3 proposal rewrite
+The Option 3 proposal rewrite (`openspec/changes/diarization-pyannote-boundaries/{proposal,design,tasks,spec}.md`, commits `0ed22f2` + `d3ed6b4`) is **provisionally valid** — it's the design that lands IF the diagnostic round fails or fractals. It should NOT be `/opsx:apply`'d until the architecture loop actually closes. If Option 1 wins the diagnostic, the proposal will be rewritten again for Option 1.
+
+### Loop 2 (re-panel the revised proposal) — DEFERRED
+Re-paneling the Option 3 proposal through reviewers for confirmation was deferred because the proposal is moot if Option 1 wins. It will run after the architecture loop closes, on whichever proposal the architecture decision lands on.
+
+## Corrected final recommendation when resuming
+1. **Run the Option 1 diagnostic round** (bounded 3-7 days): read `sherpa-onnx/csrc/speaker-embedding-extractor-nemo-impl.h` and `online-feature.cc` (or the knf frontend) on GitHub; diff against the port in `embed-probe-ort/src/main.rs`; the 2.9× silence norm ratio points at CMVN or a missing normalization flag. Fix it. Re-run `embed-probe-sherpa` + `embed-probe-ort` + `compare_embeddings.py`.
+2. **If cosine > 0.99:** Option 1 is validated. Rewrite the proposal for Option 1 (one runtime, no subprocess, sherpa removed). Discard the Option 3 rewrite.
+3. **If the diagnostic fractals (second independent divergence):** commit to Option 3. The proposal rewrite (`0ed22f2` + `d3ed6b4`) is ready; loop 2 (re-panel the proposal) runs next.
+4. Either way, do NOT `/opsx:apply` until the architecture loop closes.
