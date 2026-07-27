@@ -139,3 +139,58 @@ Whichever path is chosen, run the **Option 1 cosine-equivalence probe first**. I
 2. If it passes: commit to Option 1. Port the extractor, remove sherpa, unify on one `ort` runtime. The AHC/cap/smoothing pipeline is already runtime-agnostic — only the embedding call changes.
 3. If it fails or doesn't converge in ~2 days: fall back to Option 3 (subprocess + IPC). Build the `[[bin]]`, wire IPC, gate on Windows spawn + signing + crash propagation.
 4. Either way: rewrite the proposal's D1–D4 around the chosen path before any `/opsx:apply`.
+
+---
+
+## Update (2026-07-27, later): the gate was run — Option 1 FAILS, Option 3 is the panel's answer
+
+The panel's sequencing rule was explicit: "run the Option 1 cosine gate; if it passes, Option 1; if it fails, Option 3." The gate was run. It failed. **Per the panel's own rule, Option 3 is the converged answer.**
+
+### Two structural discoveries during gate execution
+
+**Discovery 1: the in-process gate is impossible.** The first gate attempt (`nemo_titanet_ort_cosine_equivalence` test in `pyannote_ort_probe.rs`) loaded sherpa's `SpeakerEmbeddingExtractor` AND an `ort::Session` in the same process — STATUS_ACCESS_VIOLATION, the exact C-API 17-vs-27 conflict that motivates Option 1 in the first place. The panel and I defined Option 1's gate as "compare sherpa embedding to ort-port embedding in-process" without noticing the reference path is the thing Option 1 removes. This inverts the panel's recommendation: validating Option 1 requires building Option 3's subprocess infrastructure first.
+
+**Discovery 2: a subprocess harness was built and the gate was run across a process boundary.** Two standalone crates (`embed-probe-sherpa` linking only sherpa, `embed-probe-ort` linking only ort, both resampling 48k→16k via the production rubato params) produce comparable embeddings via file I/O. The harness itself validates Option 3's feasibility — two binaries, one runtime each, comparable output.
+
+### Gate result (FAILED)
+
+10 clips (2 silence, 2 short <1s, 2 overlap, 4 clean single-speaker), cosine threshold > 0.99:
+
+| category | cosine range |
+|---|---|
+| silence | 0.04 – 0.31 (degenerate, near-random) |
+| short <1s | 0.62 – 0.83 |
+| overlap | 0.73 – 0.91 |
+| clean (4–22s) | 0.84 – **0.95** (max) |
+
+**Max cosine 0.95 on the best clip** (clean-1, 22s monologue). Threshold 0.99 not met on any clip.
+
+### Diagnostic pattern
+Cosines scale with clip length/quality. A faithful port should hit 0.999+ on a clean long clip; the 0.05 gap on clean-1 indicates a **systematic preprocessing divergence that compounds over frames**, not random noise. The sherpa-vs-ort norm difference (2.34 vs 0.81 on silence-1, a 2.9× ratio) is the tell: the divergence is in a step that affects overall scale, most likely CMVN normalization or a missing normalization sherpa applies that the port doesn't.
+
+### Why diagnosis was not pursued further
+Pinpointing the divergence requires instrumenting sherpa's C++ internals (sherpa-onnx-sys ships prebuilt static libs, no source), which is unbounded. The Rust port can dump its own intermediates but cannot dump sherpa's, so divergence attribution would require reading the sherpa-onnx C++ source blind and guessing. That's no longer "verifying a port" — it's "re-deriving sherpa's frontend from scratch," which is exactly the multi-week effort the Option 1 champion flagged as the gate's failure mode. The panel anticipated this: "Option 1's risk is silent embedding drift... the cost is borne to reproduce existing behavior."
+
+### Converged verdict: Option 3 (process-boundary)
+
+The panel's sequencing rule resolves it: gate failed → Option 3. Three corroborating points:
+
+1. **The harness proves Option 3 works.** Two standalone binaries, each linking one runtime, producing comparable embeddings via file I/O. The architecture is validated; what remains is productionizing it (Windows signing, IPC schema, integration at `commands.rs:413-432`).
+2. **Option 1's gate cost was underestimated.** The "2-day gate" assumed in-process cosine measurement. The real gate required building the entire subprocess harness first — which IS Option 3's infrastructure. The panel's "Option 1 is cheaper to validate" premise was wrong.
+3. **Option 1's silent-risk profile is confirmed.** A port that produces 0.95 cosine on its best clip would silently drift the AHC threshold (0.40) and corrupt the cross-meeting registry before any test caught it. Option 3 preserves sherpa's verified extractor bit-for-bit.
+
+### Artifacts preserved on the branch
+- `embed-probe-sherpa/` — reference binary (sherpa-only)
+- `embed-probe-ort/` — candidate binary (ort-only, with full nemo preprocessing pipeline)
+- `embed-probe-clips.json` — 10-clip manifest (cde5c264, 48kHz)
+- `compare_embeddings.py` — gate comparison script
+- `embed-probe-sherpa/gen_clips_manifest.py` — manifest generator
+- `nemo_titanet_ort_cosine_equivalence` test in `pyannote_ort_probe.rs` — the in-process gate (preserved as a documented finding; cannot run)
+
+## Final recommendation when resuming
+**Commit to Option 3.** The panel's gate answered the question. Next steps:
+1. Productionize the subprocess: define the IPC contract (stdin = audio path + onset params, stdout = JSON boundaries), wire it into `commands.rs:413-432` as the `transcript_segments` source, handle Windows signing and crash propagation.
+2. The `embed-probe-ort` crate is ~80% of the production child binary — package its preprocessing + pyannote smoothing (already in `pyannote_ort_probe.rs`) as the child's main.
+3. Rewrite the proposal's D1–D4 around Option 3 before any `/opsx:apply`. The current D1–D4 (sherpa `OfflineSpeakerDiarization`) is falsified; the new D1 should reference the subprocess boundary as the runtime-isolation mechanism.
+
+The empirical data (Phase 1/2/2b — pyannote gives 24 banter turns, hits both anchors) remains valid and transfers to Option 3: the child binary runs pyannote via ort exactly as the probes did, just packaged as a standalone CLI.
