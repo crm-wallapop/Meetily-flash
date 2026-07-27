@@ -1179,3 +1179,205 @@ async fn pyannote_cde5c264_ahc_reclustering() {
     eprintln!("AHC: DONE — if Path B banter shows more distinct speakers than Path A, Part B's D4 hypothesis holds.");
 }
 
+// ============================================================================
+// PHASE 2d — CRUX-RESOLUTION PROBE: does sherpa's OfflineSpeakerDiarization
+// load + run pyannote WITHOUT the ort crate?
+//
+// WHY this single test decides the design: Round 1 of the adversarial panel
+// converged on one empirical dispute. The all-sherpa champion claims the
+// on-disk pyannote-segmentation.onnx (opset 13, IR 7, all standard-domain
+// node ops) loads fine under sherpa's bundled ORT 1.17.1 — which would
+// dissolve the entire two-ORT conflict by removing the `ort` dep from the
+// diarization path. Options 1 (port nemo_titanet to ort) and 3 (subprocess
+// IPC) both presuppose this is FALSE.
+//
+// This test is the arbiter. It:
+//   1. Constructs sherpa's OfflineSpeakerDiarizationConfig pointing the
+//      segmentation model at the on-disk pyannote file, the embedding model
+//      at nemo_titanet (the model sherpa ALREADY loads today).
+//   2. Calls OfflineSpeakerDiarization::create() — the exact step the design
+//      doc D1 assumes works. If this returns None or panics, all-sherpa is
+//      falsified; the conflict is real and Options 1/3 remain.
+//   3. Runs process() on 60s of real cde5c264 audio. If it returns non-empty
+//      in-range segments, sherpa's full diarization pipeline (segmentation +
+//      embedding + clustering) runs on ONE ORT — Option 2 is confirmed.
+//
+// Per the design doc D1, FastClusteringConfig uses num_clusters=-1,
+// threshold=0.0, min_duration_on=0.0, min_duration_off=0.0 to get maximally
+// fragmented candidate boundaries (the design's intent).
+//
+// Run:
+//   cargo test --release --test pyannote_ort_probe -- --ignored --nocapture pyannote_sherpa_load_crux
+// ============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn pyannote_sherpa_load_crux() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // --- Resolve model paths ---
+    let home = dirs::home_dir().expect("home dir").join(".meetily-models");
+    let emb_name = app_lib::audio::speaker::model_download::embedding_filename();
+    let emb_path = home.join(emb_name);
+    let seg_path = home.join("pyannote-segmentation.onnx");
+    assert!(emb_path.exists(), "embedding model missing at {}", emb_path.display());
+    assert!(seg_path.exists(), "segmentation model missing at {}", seg_path.display());
+
+    eprintln!("CRUX: seg model opset/IR (verified externally via onnx Python):");
+    eprintln!("CRUX:   pyannote: opset 13, IR 7, standard-domain node ops only");
+    eprintln!("CRUX:   (nemo_titanet loads fine at opset 17/IR 8 — higher than pyannote)");
+
+    // --- Construct sherpa's OfflineSpeakerDiarizationConfig (D1 settings) ---
+    // The structs are re-exported at the sherpa_onnx crate root
+    // (lib.rs: `pub use offline_speaker_diarization::*;`); the module itself
+    // is private, so import from the crate root, not the module path.
+    use sherpa_onnx::{
+        FastClusteringConfig, OfflineSpeakerDiarization, OfflineSpeakerDiarizationConfig,
+        OfflineSpeakerSegmentationModelConfig, OfflineSpeakerSegmentationPyannoteModelConfig,
+        SpeakerEmbeddingExtractorConfig,
+    };
+
+    let config = OfflineSpeakerDiarizationConfig {
+        segmentation: OfflineSpeakerSegmentationModelConfig {
+            pyannote: OfflineSpeakerSegmentationPyannoteModelConfig {
+                model: Some(seg_path.to_str().expect("seg path utf8").to_string()),
+            },
+            num_threads: 1,
+            debug: false,
+            provider: Some("cpu".to_string()),
+        },
+        embedding: SpeakerEmbeddingExtractorConfig {
+            model: Some(emb_path.to_str().expect("emb path utf8").to_string()),
+            num_threads: 1,
+            debug: false,
+            provider: Some("cpu".to_string()),
+        },
+        // D1: maximally fragmented candidate boundaries. threshold=0.0 is a
+        // cosine-DISSIMILARITY cutoff where smaller → more clusters (per the
+        // design doc's correction of the original threshold=1.0).
+        clustering: FastClusteringConfig {
+            num_clusters: -1,
+            threshold: 0.0,
+        },
+        min_duration_on: 0.0,
+        min_duration_off: 0.0,
+    };
+
+    eprintln!("CRUX: calling OfflineSpeakerDiarization::create()...");
+    let t0 = std::time::Instant::now();
+    let diarizer = match OfflineSpeakerDiarization::create(&config) {
+        Some(d) => {
+            eprintln!(
+                "CRUX PASS: create() succeeded in {:.1}s — sherpa loaded pyannote-3.0 via its bundled ORT 1.17.1",
+                t0.elapsed().as_secs_f64()
+            );
+            eprintln!("CRUX   → the two-ORT conflict is DISSOLVED by routing pyannote through sherpa");
+            eprintln!("CRUX   → Option 2 (all-sherpa) central claim CONFIRMED; Options 1 & 3 solve a non-problem");
+            d
+        }
+        None => {
+            eprintln!(
+                "CRUX FAIL: create() returned None in {:.1}s — sherpa's ORT 1.17.1 CANNOT load pyannote-3.0",
+                t0.elapsed().as_secs_f64()
+            );
+            eprintln!("CRUX   → the two-ORT conflict is REAL; Option 2 falsified; Options 1 & 3 remain");
+            panic!("sherpa OfflineSpeakerDiarization::create() failed for pyannote-3.0");
+        }
+    };
+    eprintln!("CRUX: sample_rate = {}", diarizer.sample_rate());
+
+    // --- Run process() on 60s of real cde5c264 audio ---
+    let db_path = r"C:\Users\CarlosRuizMartínez\AppData\Roaming\com.meetily.ai\meeting_minutes.sqlite";
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=ro", db_path))
+        .await
+        .expect("DB connect (read-only)");
+    let meeting_id = "meeting-cde5c264-1c4a-49d9-97c5-6a7e69bb9323";
+    let row = sqlx::query("SELECT folder_path FROM meetings WHERE id = ?")
+        .bind(meeting_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("fetch meeting");
+    let folder = row
+        .and_then(|r| sqlx::Row::get::<Option<String>, _>(&r, "folder_path"))
+        .expect("cde5c264 folder_path missing");
+    drop(pool);
+
+    let audio_dir = std::path::Path::new(&folder);
+    let audio_path = ["audio.mp4", "audio.wav", "audio.m4a", "audio.mp3"]
+        .iter()
+        .map(|n| audio_dir.join(n))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| panic!("no audio file in {}", folder));
+    let decoded = app_lib::audio::decoder::decode_audio_file(&audio_path).expect("decode audio");
+    let samples = decoded.to_whisper_format();
+
+    // First 60s — includes the banter window 5.7–32.5s where the merged-speakers
+    // bug manifests. If sherpa's diarizer produces >1 segment here, the bug is
+    // fixed by this path on real audio.
+    let probe_samples = &samples[..(60 * 16000).min(samples.len())];
+    eprintln!(
+        "CRUX: calling process() on first 60s ({} samples)...",
+        probe_samples.len()
+    );
+    let t1 = std::time::Instant::now();
+    let result = match diarizer.process(probe_samples) {
+        Some(r) => {
+            eprintln!(
+                "CRUX PASS: process() returned in {:.1}s — full diarization pipeline ran",
+                t1.elapsed().as_secs_f64()
+            );
+            r
+        }
+        None => {
+            eprintln!("CRUX FAIL: process() returned None — pipeline ran but produced nothing");
+            panic!("sherpa process() returned None");
+        }
+    };
+
+    let segments = result.sort_by_start_time();
+    eprintln!("CRUX: {} segments from 60s of audio:", segments.len());
+    let mut distinct_speakers = std::collections::HashSet::new();
+    for seg in segments.iter().take(40) {
+        eprintln!(
+            "  {:.2}-{:.2}s speaker={}",
+            seg.start, seg.end, seg.speaker
+        );
+        distinct_speakers.insert(seg.speaker);
+    }
+    eprintln!(
+        "CRUX: {} distinct speakers in first 60s (banter window 5.7-32.5s should be multi-speaker)",
+        distinct_speakers.len()
+    );
+
+    // Sanity: in-range, non-empty.
+    assert!(!segments.is_empty(), "expected non-empty diarization");
+    for seg in &segments {
+        assert!(seg.start >= 0.0 && seg.end <= 60.5, "segment out of range: {:?}", seg);
+        assert!(seg.end > seg.start, "non-positive-duration segment: {:?}", seg);
+    }
+
+    let banter_speakers: std::collections::HashSet<i32> = segments
+        .iter()
+        .filter(|s| s.start >= 5.7 && s.start <= 32.5)
+        .map(|s| s.speaker)
+        .collect();
+    eprintln!(
+        "CRUX VERDICT: {} distinct speakers in banter 5.7-32.5s (current pipeline: 1)",
+        banter_speakers.len()
+    );
+
+    let out = std::env::temp_dir().join("cde5c264_pyannote_sherpa_crux.txt");
+    let mut report = String::new();
+    report.push_str("# cde5c264 sherpa OfflineSpeakerDiarization crux probe\n\n");
+    report.push_str(&format!(
+        "## create() + process() on 60s: PASS\n- segments: {}\n- distinct speakers (60s): {}\n- banter 5.7-32.5s speakers: {} (baseline: 1)\n\n",
+        segments.len(), distinct_speakers.len(), banter_speakers.len()
+    ));
+    report.push_str("## Segments\n\n");
+    for seg in &segments {
+        report.push_str(&format!("- {:.2}-{:.2}s speaker={}\n", seg.start, seg.end, seg.speaker));
+    }
+    std::fs::write(&out, &report).expect("write report");
+    eprintln!("\nCRUX: full report at {}", out.display());
+}
+

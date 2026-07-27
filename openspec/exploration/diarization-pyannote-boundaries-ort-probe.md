@@ -89,3 +89,53 @@ Don't re-convene a shark-tank on the current proposal — its design premise (sh
 3. *Then* convene a panel on the rewritten design.
 
 The empirical data (Phase 1/2/2b) transfers to any of the 3 paths — it answers "does pyannote give usable boundaries?" (yes) regardless of which runtime delivers them.
+
+---
+
+## Update (2026-07-27): adversarial panel verdict
+
+A 3-way adversarial panel (one champion per path, two rounds) ran against the 3 design paths above. Round 1 surfaced a decisive crux; Round 2 resolved it empirically.
+
+### The crux probe (`pyannote_sherpa_load_crux`)
+Does sherpa's `OfflineSpeakerDiarization` load pyannote if the diarization code uses only sherpa (no `use ort::*`)? This would dissolve the two-ORT conflict by routing pyannote through sherpa alone.
+
+**Result:** STATUS_ACCESS_VIOLATION (0xc0000005):
+```
+The requested API version [27] is not available, only API versions [1, 17]
+   are supported in this build. Current ORT Version is: 1.17.1
+```
+The crash fires the moment sherpa's ORT initializes — even though the test imports only `sherpa_onnx`. Why: `ort = "2.0.0-rc.10"` is a dep of the `meetily-flash` lib crate for Parakeet transcription (Cargo.toml:113). Merely linking it loads `onnxruntime.dll` (C-API 27) into the process at startup. sherpa's bundled ORT 1.17.1 then collides on the global C-API symbol table.
+
+### Option 2 (all-sherpa): FALSIFIED
+The champion's model-opset analysis was technically correct (pyannote IS opset 13/IR 7, standard-domain node ops — verified via `onnx.load`). But it checked the wrong layer: the conflict is at runtime-binary linkage, not model compatibility. "Route pyannote through sherpa, remove `ort` from the diarization path" is incoherent — `ort` stays linked for transcription regardless. Option 2 only works if `ort` is removed entirely, which breaks Parakeet. The champion conceded formally.
+
+### Option 1 (all-ort) vs Option 3 (process-boundary): 2-1 split
+
+The panel split on the two survivors. The disagreement is failure philosophy, not engineering:
+
+| | Option 1 (all-ort port) | Option 3 (process boundary) |
+|---|---|---|
+| **What** | Port nemo_titanet embedding extraction from sherpa to `ort`; whole app on one ORT | Standalone `[[bin]]` linking only `ort`; main app stays sherpa-based; IPC boundaries |
+| **Gate** | `cosine(emb_sherpa, emb_port) > 0.99` on N≥10 clips | Subprocess spawn + file-path IPC + crash propagation on Windows |
+| **Gate cost** | ~2 days (must port librosa-mel + CMVN + pad-16 + transpose *before* first cosine) | ~1 day (plumbing) |
+| **Residual risk** | **Silent:** embedding drift → AHC threshold (0.40) and cross-meeting registry silently degrade; discovered months later | **Loud:** AV quarantine, broken pipe, per-release signing tax on a 2nd binary |
+| **End state** | One runtime, cleaner codebase, sherpa removed entirely | Two processes forever; `refine_pass2` constrained by IPC |
+| **Votes** | Option 1 champ + Option 3 champ (flipped) | Option 2 champ (neutral arbiter) |
+
+**Key finding:** the downstream pipeline (`cluster_by_centroids`, `smooth_to_fixed_point`, `refine_pass2`, the cap, the registry) is already pure Rust over `Vec<f32>` — only the embedding extraction itself touches sherpa types. The Option 1 port surface is smaller than the "highest effort" framing implied.
+
+**The Option 3 champion's flip** was the load-bearing moment: they conceded that the recurring per-release signing/AV tax on a single-maintainer desktop app outweighs the silent-drift risk, *provided the Option 1 cosine gate holds*.
+
+**The Option 2 champion (neutral arbiter) voted Option 3** on recoverability grounds: Option 1's silent registry corruption is the worst failure class (slow, accumulates in persisted state, discovered months later); Option 3's risks are loud and operational.
+
+### Panel's strongest convergence point
+Whichever path is chosen, run the **Option 1 cosine-equivalence probe first**. It's the cheaper information-gathering step either way: if it passes easily, Option 1 is clearly viable; if it fails fast, Option 3 is the fallback without sunk cost. Both surviving champions agreed on this sequencing.
+
+### Crux probe artifact
+`pyannote_sherpa_load_crux` test in `frontend/src-tauri/tests/pyannote_ort_probe.rs` — the empirical arbiter that falsified Option 2.
+
+## Updated recommendation when resuming
+1. Run the Option 1 cosine-equivalence probe (port nemo_titanet's librosa-mel + CMVN + pad-16 + transpose frontend to Rust; assert `cosine(emb_sherpa, emb_port) > 0.99` on N≥10 clips spanning silence/short/overlap/clean cases). ~2 day gate.
+2. If it passes: commit to Option 1. Port the extractor, remove sherpa, unify on one `ort` runtime. The AHC/cap/smoothing pipeline is already runtime-agnostic — only the embedding call changes.
+3. If it fails or doesn't converge in ~2 days: fall back to Option 3 (subprocess + IPC). Build the `[[bin]]`, wire IPC, gate on Windows spawn + signing + crash propagation.
+4. Either way: rewrite the proposal's D1–D4 around the chosen path before any `/opsx:apply`.
