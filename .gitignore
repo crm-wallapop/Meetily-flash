@@ -81,3 +81,5 @@ Cargo.lock
 .worktrees/
 .claude/scheduled_tasks.lock
 .zcode/
+__pycache__/
+*.pyc

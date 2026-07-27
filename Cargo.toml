@@ -2,7 +2,14 @@
 resolver = "2"
 members = [
     "frontend/src-tauri",
-    "llama-helper"
+    "llama-helper",
+    # Dev-only cosine-equivalence harness. NOT part of any production build path.
+    # sherpa-onnx (bundled ORT 1.17.1, C-API 17) and the `ort` crate (C-API 27)
+    # cannot coexist in one process, so each probe crate is a standalone binary
+    # that a parent process shells out to. See embed-probe-sherpa/src/main.rs
+    # header for the full rationale.
+    "embed-probe-sherpa",
+    "embed-probe-ort",
 ]
 
 # Shared workspace settings

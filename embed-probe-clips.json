@@ -1,0 +1,92 @@
+[
+  {
+    "id": "silence-1",
+    "path": "C:\\Users\\CarlosRuizMart\u00ednez\\Music\\meetily-recordings\\Meeting 2026-06-22_16-04-01_2026-06-22_14-04\\audio.mp4",
+    "start_sample": 46484800,
+    "end_sample": 46532800,
+    "start_seconds": 2905.3,
+    "end_seconds": 2908.3,
+    "label": "silence-1 (inside 13.9s gap 2905.3-2919.2)"
+  },
+  {
+    "id": "silence-2",
+    "path": "C:\\Users\\CarlosRuizMart\u00ednez\\Music\\meetily-recordings\\Meeting 2026-06-22_16-04-01_2026-06-22_14-04\\audio.mp4",
+    "start_sample": 30057280,
+    "end_sample": 30105280,
+    "start_seconds": 1878.58,
+    "end_seconds": 1881.58,
+    "label": "silence-2 (inside 10.1s gap 1878.6-1888.7)"
+  },
+  {
+    "id": "short-1",
+    "path": "C:\\Users\\CarlosRuizMart\u00ednez\\Music\\meetily-recordings\\Meeting 2026-06-22_16-04-01_2026-06-22_14-04\\audio.mp4",
+    "start_sample": 96000,
+    "end_sample": 107200,
+    "start_seconds": 6.0,
+    "end_seconds": 6.7,
+    "label": "short-1 0.7s (banter onset)"
+  },
+  {
+    "id": "short-2",
+    "path": "C:\\Users\\CarlosRuizMart\u00ednez\\Music\\meetily-recordings\\Meeting 2026-06-22_16-04-01_2026-06-22_14-04\\audio.mp4",
+    "start_sample": 30682080,
+    "end_sample": 30693280,
+    "start_seconds": 1917.63,
+    "end_seconds": 1918.33,
+    "label": "short-2 0.7s (inside 3.1s seg 1917.6-1920.7)"
+  },
+  {
+    "id": "overlap-1",
+    "path": "C:\\Users\\CarlosRuizMart\u00ednez\\Music\\meetily-recordings\\Meeting 2026-06-22_16-04-01_2026-06-22_14-04\\audio.mp4",
+    "start_sample": 90720,
+    "end_sample": 138720,
+    "start_seconds": 5.67,
+    "end_seconds": 8.67,
+    "label": "overlap-1 (banter rapid multi-turn)"
+  },
+  {
+    "id": "overlap-2",
+    "path": "C:\\Users\\CarlosRuizMart\u00ednez\\Music\\meetily-recordings\\Meeting 2026-06-22_16-04-01_2026-06-22_14-04\\audio.mp4",
+    "start_sample": 160000,
+    "end_sample": 208000,
+    "start_seconds": 10.0,
+    "end_seconds": 13.0,
+    "label": "overlap-2 (banter rapid multi-turn)"
+  },
+  {
+    "id": "clean-1",
+    "path": "C:\\Users\\CarlosRuizMart\u00ednez\\Music\\meetily-recordings\\Meeting 2026-06-22_16-04-01_2026-06-22_14-04\\audio.mp4",
+    "start_sample": 924480,
+    "end_sample": 988480,
+    "start_seconds": 57.78,
+    "end_seconds": 61.78,
+    "label": "clean-1 (22s monologue 57.8-80.1)"
+  },
+  {
+    "id": "clean-2",
+    "path": "C:\\Users\\CarlosRuizMart\u00ednez\\Music\\meetily-recordings\\Meeting 2026-06-22_16-04-01_2026-06-22_14-04\\audio.mp4",
+    "start_sample": 1280800,
+    "end_sample": 1344800,
+    "start_seconds": 80.05,
+    "end_seconds": 84.05,
+    "label": "clean-2 (23s monologue 80.1-103.5)"
+  },
+  {
+    "id": "clean-3",
+    "path": "C:\\Users\\CarlosRuizMart\u00ednez\\Music\\meetily-recordings\\Meeting 2026-06-22_16-04-01_2026-06-22_14-04\\audio.mp4",
+    "start_sample": 16912000,
+    "end_sample": 16976000,
+    "start_seconds": 1057.0,
+    "end_seconds": 1061.0,
+    "label": "clean-3 (Ricardo join region 17:37)"
+  },
+  {
+    "id": "clean-4",
+    "path": "C:\\Users\\CarlosRuizMart\u00ednez\\Music\\meetily-recordings\\Meeting 2026-06-22_16-04-01_2026-06-22_14-04\\audio.mp4",
+    "start_sample": 30936960,
+    "end_sample": 31016320,
+    "start_seconds": 1933.56,
+    "end_seconds": 1938.52,
+    "label": "clean-4 (4.96s seg 1933.6-1938.5)"
+  }
+]

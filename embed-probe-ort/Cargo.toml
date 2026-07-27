@@ -1,0 +1,25 @@
+[package]
+name = "embed-probe-ort"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Candidate (ort) path of the cosine-equivalence subprocess harness"
+
+[[bin]]
+name = "embed-probe-ort"
+path = "src/main.rs"
+
+[dependencies]
+# Standalone dev-only probe: deliberately does NOT depend on app_lib.
+# ort 2.0.0-rc.10 ships ORT with C-API 27; sherpa-onnx 1.13 ships C-API 17.
+# The two cannot coexist in one process, so this crate and embed-probe-sherpa
+# live in separate binaries shelled out to by a parent process.
+ort = "2.0.0-rc.10"
+symphonia = { version = "0.5.4", features = ["aac", "isomp4", "mp3", "flac", "ogg", "vorbis", "pcm", "wav", "opt-simd"] }
+serde_json = "1.0"
+anyhow = "1.0"
+ndarray = "0.16"
+realfft = "3.4"
+# Resample native-rate audio (e.g. 48kHz) → 16kHz mono so the sherpa and ort
+# probes consume byte-identical input. Pure-Rust, no native deps (Windows-safe).
+rubato = "0.15"
