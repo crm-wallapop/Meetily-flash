@@ -250,7 +250,14 @@ fn nemo_log_mel_fbank(samples: &[f32], params: &NemoFbankParams) -> Option<Vec<f
 
     let num_fft_bins = fft_size / 2; // 256
     let mut features = vec![0.0f32; num_frames * feat_dim];
-    let eps: f32 = f32::MIN_POSITIVE;
+    // Match knf FbankComputer::Compute (feature-fbank.cc): the log floor is
+    // std::numeric_limits<float>::epsilon() (≈1.192e-7), NOT FLT_MIN. This
+    // matters on near-zero-energy mel bins: knf floors them to log(1.192e-7)
+    // ≈ -15.93, while a FLT_MIN floor (≈1.175e-38) would give ≈ -87.1. On
+    // silence every bin hits this floor (causing a large systematic divergence);
+    // on speech the quiet high-frequency bins do. f32::EPSILON ==
+    // std::numeric_limits<float>::epsilon() exactly.
+    let eps: f32 = f32::EPSILON;
 
     let mut frame_buf = vec![0.0f32; fft_size];
     for f in 0..num_frames {
