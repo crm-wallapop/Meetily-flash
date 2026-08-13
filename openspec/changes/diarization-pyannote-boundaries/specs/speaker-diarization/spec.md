@@ -6,6 +6,10 @@ This requirement amends the canonical requirement of the same name. The canonica
 
 The canonical "Short meeting is unaffected by the chunk cap" scenario asserts `effective granularity equals SPLIT_TARGET_SECS (3.0 s) — unchanged from before this change`. That assertion is RE-POINTED to the in-process pyannote boundary source: on a short (~10 min) meeting the pyannote model is present (the cap is not hit), and the per-region granularity is set by the pyannote change-points inside each Whisper segment — NOT by a fixed `SPLIT_TARGET_SECS` grid. The "chunk count is identical to a fixed-3 s chunker" clause no longer holds on the success path; the chunk count on the success path equals the count of pyannote change-points (capped). On the pyannote-model-missing fallback path the canonical assertion holds unchanged.
 
+The canonical "Long meeting does not stall in clustering" scenario asserts "the effective split granularity is coarsened so the chunk count is at or below `MAX_DIARIZATION_CHUNKS`." That cap-enforcement mechanism is RE-POINTED to pyannote-boundary shedding: on a long meeting the cap is enforced once at the pyannote-boundary layer (uniform shed every k-th candidate by position, then merge sub-`MIN_SPEECH_SECS` survivors — see the "Uniform shed-to-cap" scenario below), NOT by coarsening `effective_split`. `effective_split` no longer exists on the success path; the chunk count is bounded by shedding the pyannote candidate set. The canonical scenario's "bounded wall-clock time" and "clustering produced N speakers from M chunks" assertions hold unchanged. On the pyannote-model-missing/corrupt fallback path the canonical `effective_split` coarsening holds unchanged.
+
+`FINE_SPLIT_SECS` (canonical default 2.0s) is referenced by the canonical "Diarization segment granularity resolves speaker turns within Whisper segments" requirement as the turn-granularity source ("A turn of approximately 2 seconds (the fine-split granularity `FINE_SPLIT_SECS`)..."). That role is STRUCK on the success path: turn granularity is now set by the pyannote change-points, NOT by `FINE_SPLIT_SECS`. `FINE_SPLIT_SECS` SURVIVES as the `refine_pass2` re-embedding window (`build_fine_chunks` re-chunks the full recording at `FINE_SPLIT_SECS` to assign each fine chunk to its nearest Pass-1 centroid) — it is no longer the granularity-defining constant but remains the Pass-2 re-chunk cadence. (A delta that left `FINE_SPLIT_SECS` mandated as the turn-granularity source alongside a pyannote-boundary requirement would self-contradict; this note reconciles the canonical reference.)
+
 (A delta that leaves the canonical item 3 `effective_split` mandate in place alongside a pyannote pre-splitter requirement would make the canonical spec self-contradict — both cannot be the chunk-layout source simultaneously. This amendment removes that contradiction.)
 
 #### Scenario: Short meeting succeeds via the in-process pyannote boundary source (re-points the canonical "Short meeting" scenario)
@@ -23,6 +27,15 @@ The canonical "Short meeting is unaffected by the chunk cap" scenario asserts `e
 - **THEN** `build_chunks` applies the canonical effective-split grid (`SPLIT_TARGET_SECS = 3.0 s` for a short meeting) exactly as the canonical item 3 states
 - **AND** the effective granularity equals `SPLIT_TARGET_SECS` (3.0 s) — the canonical assertion holds on the fallback path
 - **AND** no panic propagates to the user-facing diarization flow
+
+#### Scenario: Long meeting cap is enforced by pyannote-boundary shedding (re-points the canonical "Long meeting does not stall in clustering" scenario)
+
+- **GIVEN** a meeting with ~83 minutes of speech whose pyannote candidate-boundary count exceeds `MAX_DIARIZATION_CHUNKS`
+- **WHEN** diarization runs with the in-process pyannote boundary source
+- **THEN** the cap is enforced at the pyannote-boundary layer (uniform shed every k-th candidate by position, then merge sub-`MIN_SPEECH_SECS` survivors into their time-neighbor) — NOT by coarsening `effective_split` (which no longer exists on the success path)
+- **AND** the chunk count passed to `adapter.process()` is at or below `MAX_DIARIZATION_CHUNKS`
+- **AND** the clustering step completes in bounded wall-clock time (seconds, not minutes)
+- **AND** a `clustering produced N speakers from M chunks` log line is emitted (the prior failure mode where this line never appeared is gone)
 
 ### Requirement: Diarization segment granularity resolves speaker turns within Whisper segments
 
@@ -77,6 +90,36 @@ The pyannote `ort::Session` emits boundaries only — no speaker labels, no embe
 - **WHEN** the in-process pyannote session runs and yields an empty boundary set
 - **THEN** the diarization proceeds (with an empty intersected set or the effective-split fallback) without panicking
 
+#### Scenario: Corrupt-but-present pyannote model falls back to the effective-split grid
+
+- **GIVEN** the pyannote segmentation model file is PRESENT on disk but corrupt (truncated, bad magic, or yields non-finite output mid-decode)
+- **WHEN** the in-process pyannote `ort::Session` construction errors OR inference produces NaN/Inf
+- **THEN** the diarization falls back to the canonical effective-split grid (the same fallback path as model-missing)
+- **AND** the meeting still diarizes at coarse resolution (≥1 labeled `SpeakerSegment`)
+- **AND** no panic propagates to the user-facing diarization flow
+
+#### Scenario: A pyannote change-point exactly on a Whisper segment edge produces no zero-length split
+
+- **GIVEN** a pyannote change-point whose timestamp coincides exactly with a Whisper `transcript_segment` start or end
+- **WHEN** the intersect step runs
+- **THEN** no zero-length split is emitted (the intersect SHALL deduplicate/clamp so every intra-region split has positive duration ≥ `MIN_SPEECH_SECS`, or is dropped)
+- **AND** no `Chunk` with `duration_secs < MIN_SPEECH_SECS` reaches `adapter.process()`
+
+#### Scenario: ort::Session wrapping preserves Send+Sync and clustering runs off the async executor
+
+- **GIVEN** `ort::Session` is `Send + Sync` (ort 2.0.0-rc.10) and the port wraps it in `Mutex<Session>` (design D1) or a session-pool fallback
+- **WHEN** the diarization `process()` runs
+- **THEN** the wrapping remains `Send + Sync` so extraction + clustering execute on a blocking thread (per the canonical "Clustering does not freeze the UI" requirement), NOT on the async executor
+- **AND** the async runtime and UI remain responsive during the diarization pass
+
+#### Scenario: Concurrent multi-meeting diarization is isolated
+
+- **GIVEN** N (≥2) meetings diarized concurrently, sharing the process's ort sessions (Parakeet + nemo_titanet + pyannote)
+- **WHEN** their diarization passes interleave on the shared sessions
+- **THEN** each meeting produces correct per-meeting results with no cross-meeting state leakage
+- **AND** the shared-session contract is documented: either meetings serialize on the `Mutex<Session>` lock (no extraction interleaving across meetings) or each meeting gets an isolated session clone (memory cost)
+- **AND** the shared registry (`HashMap<String, Vec<Vec<f32>>>`) does not corrupt under concurrent append (no panic, no wrong-label bleed across meetings)
+
 ## ADDED Requirements
 
 ### Requirement: The pyannote segmentation model is actually consumed by the in-process ort::Session
@@ -92,25 +135,36 @@ The pyannote-segmentation ONNX model SHALL be loaded and run by an in-process `o
 
 ### Requirement: nemo_titanet embedding extraction is ported to ort and sherpa-onnx is removed
 
-The nemo_titanet embedding extraction SHALL be performed by an in-process `ort::Session` (the ported `NemoEmbeddingExtractor`, lifting the validated `embed-probe-ort` fbank + CMVN + pad-16 + transpose + session-builder pipeline) — NOT by sherpa-onnx's `SpeakerEmbeddingExtractor`. The `SpeakerEmbeddingManager` SHALL be replaced by a pure-Rust in-memory cosine store (`HashMap<String, Vec<Vec<f32>>>` + cosine search; sherpa's manager was a convenience wrapper, not a model). sherpa-onnx and sherpa-onnx-sys SHALL be removed from `Cargo.toml`, so the whole app links exactly one ORT runtime (the `ort` crate) and the C-API 17-vs-27 collision that motivated this change cannot occur by construction. The stored `speaker_embeddings` vectors remain nemo_titanet 192-dim — no schema migration.
+The nemo_titanet embedding extraction SHALL be performed by an in-process `ort::Session` (the ported `NemoEmbeddingExtractor`, lifting the validated `embed-probe-ort` fbank + CMVN + pad-16 + transpose + session-builder pipeline) — NOT by sherpa-onnx's `SpeakerEmbeddingExtractor`. The `SpeakerEmbeddingManager` SHALL be replaced by a pure-Rust in-memory cosine store (`HashMap<String, Vec<Vec<f32>>>` + cosine search; sherpa's manager was a convenience wrapper, not a model). The `search` operation SHALL be a per-vector best-score scan — iterate every stored vector across all names and return the name of the single highest-cosine vector ≥ threshold — matching sherpa's `SpeakerEmbeddingManager::search` semantics exactly, NOT a per-speaker-centroid search (a centroid search would diverge when a speaker has one near-query vector and one far vector; the per-vector scan lets the near vector win). sherpa-onnx and sherpa-onnx-sys SHALL be removed from `Cargo.toml`, so the whole app links exactly one ORT runtime (the `ort` crate) and the C-API 17-vs-27 collision that motivated this change cannot occur by construction. The stored `speaker_embeddings` vectors remain nemo_titanet 192-dim — no schema migration. Registry hydration (`database/setup.rs`) SHALL construct the store at `dim = 192` (or read `dim()` from the extractor) — NOT the hardcoded `dim = 256` that silently loads zero speakers today (pre-existing bug fixed by this change).
 
-#### Scenario: sherpa-onnx is no longer in the dependency graph
+#### Scenario: sherpa-onnx is no longer in the production dependency graph
 
 - **GIVEN** the port is complete and `Cargo.toml` no longer declares `sherpa-onnx`
-- **WHEN** `cargo tree` is run on the workspace
-- **THEN** neither `sherpa-onnx` nor `sherpa-onnx-sys` appears in the dependency graph
-- **AND** a grep for `sherpa_onnx::` in `frontend/src-tauri/src/` returns zero hits (the port replaced every sherpa reference in the speaker module)
+- **WHEN** `cargo tree -p meetily-flash` is run (scoped to the `meetily-flash` crate — NOT workspace root, because `embed-probe-sherpa` remains a workspace member as the cosine-gate reference binary, so workspace-root `cargo tree` still transitively shows sherpa)
+- **THEN** neither `sherpa-onnx` nor `sherpa-onnx-sys` appears in the `meetily-flash` dependency graph
+- **AND** a grep for `sherpa_onnx::` AND `SherpaOnnx` across BOTH `frontend/src-tauri/src/` AND `frontend/src-tauri/tests/` returns zero hits (the port replaced every sherpa reference in the speaker module, commands, state, database setup, smoke test, and the integration/probe tests)
 
 #### Scenario: The port reproduces sherpa's embeddings within the AHC operating margin
 
-- **GIVEN** the fixed 10-clip gate set plus production-representative additions, each clip ≥ 1.5s and passing `is_effectively_silent`
+- **GIVEN** the fixed 10-clip gate set plus production-representative additions, each clip ≥ 1.5s and passing `is_effectively_silent`, INCLUDING ≥4 clips uniformly distributed in [1.5, 3.0]s (the production pyannote-chunk regime) AND ≥2 clips at exactly 2.0s (the `refine_pass2` / `FINE_SPLIT_SECS` re-embedding window) — regimes that reach clustering, NOT dropped inputs
 - **WHEN** the ported `NemoEmbeddingExtractor` and the sherpa reference extract embeddings from the same 16kHz mono clip
 - **THEN** the cosine similarity between the two embeddings is ≥ 0.99 on every such clip
-- **AND** filter parity holds — the port drops (via `is_effectively_silent` and `MIN_SPEECH_SECS`) exactly the clips sherpa drops
+- **AND** the per-clip cosine is reported (not just an aggregate pass/fail), so a regression in the 1.5–3s or 2.0s regime is visible
+- **AND** filter parity holds — the port drops (via `is_effectively_silent`, `is_ready` / the minimum-frame gate, and `MIN_SPEECH_SECS`) exactly the clips sherpa drops, verified on a 25ms→2s sweep (not just the known cases)
 
-#### Scenario: End-to-end AHC parity vs the sherpa reference
+**Speaker-attributed segment overlap (the parity metric).** For a reference labeling `ref` and a new labeling `new` over the same recording, for each speaker label `L` present in `ref`: `overlap(L) = |ref_segments(L) ∩ new_segments_same_speaker(L)| / |ref_segments(L)|`, where `ref_segments(L)` is the set of reference segments labeled `L` measured in seconds of audio, `new_segments_same_speaker(L)` is the set of new-run segments labeled with `L`'s corresponding label (labels matched across the two runs by Hungarian assignment on per-label segment-time overlap, to handle renumbering), and `∩` is temporal intersection in seconds. The score is the unweighted mean of `overlap(L)` over all labels `L` in `ref`. The per-label `overlap(L)` SHALL be reported (not just the mean), so a single collapsed speaker is visible rather than hidden in an aggregate.
 
-- **GIVEN** ≥10 labeled multi-speaker recordings
-- **WHEN** the full diarization pipeline (ported nemo_titanet extractor + in-process pyannote boundaries + the unchanged AHC + cap + smoothing + refine_pass2 + registry) runs on each
-- **THEN** the resulting cluster counts are identical to the pre-change sherpa reference
-- **AND** speaker-attributed segment overlap vs the reference is ≥ 95% (this is the gate cosine was always a proxy for)
+#### Scenario: Extractor-only parity vs the sherpa reference (load-bearing)
+
+- **GIVEN** committed multi-speaker fixtures
+- **WHEN** the diarization runs TWICE with the SAME boundary source (`effective_split` grid — the pre-boundary-change chunk layout) but DIFFERENT extractors: once with the ported `NemoEmbeddingExtractor`, once with the sherpa extractor
+- **THEN** the resulting cluster counts are identical
+- **AND** speaker-attributed segment overlap (per the metric above) is ≥ 0.95, reported per-label
+- **AND** this gate runs UNCONDITIONALLY on committed fixtures (NOT `#[ignore]`) — it isolates the extractor port (the change cosine was always a proxy for) from the boundary change
+
+#### Scenario: Boundary-acceptance parity (confirmation)
+
+- **GIVEN** ≥10 labeled multi-speaker recordings AND the pyannote model present
+- **WHEN** the diarization runs TWICE with the SAME (ported) extractor but DIFFERENT boundary sources: once with pyannote boundaries, once with the `effective_split` grid
+- **THEN** the resulting cluster counts are identical (the boundary change re-segments but AHC + smoothing recover the same speakers)
+- **AND** speaker-attributed segment overlap (per the metric above) is ≥ 0.95, reported per-label (pyannote boundaries should match or improve overlap, not regress it)
