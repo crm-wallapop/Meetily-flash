@@ -1,0 +1,517 @@
+//! nemo_titanet embedding extraction via the `ort` crate (replaces sherpa-onnx's
+//! `SpeakerEmbeddingExtractor`).
+//!
+//! WHY this exists: sherpa-onnx-sys 1.13.4 statically bundles ONNX Runtime 1.17.1
+//! (C-API ≤17) while the project's `ort = "2.0.0-rc.10"` dep (needed for Parakeet
+//! AND pyannote) brings C-API 27 — the two runtimes cannot coexist in one process
+//! (STATUS_ACCESS_VIOLATION on the global C-API symbol table; verified by the
+//! `pyannote_sherpa_load_crux` probe). Part B therefore ports nemo_titanet
+//! extraction to `ort` and removes sherpa-onnx entirely: one runtime for the
+//! whole app.
+//!
+//! FIDELITY: the fbank/CMVN pipeline below is LIFTED VERBATIM from
+//! `embed-probe-ort/src/main.rs`, which was diffed constant-by-constant against
+//! sherpa-onnx v1.13.4 + kaldi-native-fbank v1.22.3 C++ source and validated by
+//! the subprocess cosine gate: cosine(emb_sherpa, emb_port) = 0.9946–0.9989 on
+//! production-relevant clips (≥1.5s, non-silent) after the `f32::EPSILON` log-floor
+//! fix. Do NOT re-tune the constants. See
+//! `openspec/exploration/diarization-pyannote-boundaries-ort-probe.md`
+//! §"ARCHITECTURE LOOP CLOSED" for the validation record.
+//!
+//! Concurrency (design D1): `ort::Session::run` takes `&mut self` in
+//! 2.0.0-rc.10, so the session is wrapped in a `Mutex`. The fbank/CMVN work
+//! (most of the wall-clock) happens OUTSIDE the lock and stays rayon-parallel;
+//! only the model forward is serialized. Task 6.2 re-benchmarks
+//! `build_fine_chunks`/`refine_pass2` post-port; the documented fallback is a
+//! pool of N cloned sessions if Pass-2 busts its budget.
+
+use anyhow::{anyhow, Result};
+use ndarray::{Array1, Array3};
+use ort::execution_providers::CPUExecutionProvider;
+use ort::session::builder::GraphOptimizationLevel;
+use ort::session::Session;
+use ort::value::TensorRef;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use super::embedding::SpeakerEmbeddingPort;
+use super::types::EmbeddingVector;
+
+/// Mean-square energy below this → treat as silence, no embedding.
+/// (Verbatim port of the production gate at sherpa_adapter.rs `is_effectively_silent`.)
+const SILENCE_MS_ENERGY: f32 = 1e-10;
+
+/// nemo_titanet output dimension (verified model contract: `embs float32[N,192]`).
+pub const NEMO_EMBEDDING_DIM: usize = 192;
+
+// ============================================================================
+// nemo_titanet preprocessing pipeline — LIFTED VERBATIM from embed-probe-ort
+// (validated against sherpa-onnx v1.13.4 / kaldi-native-fbank v1.22.3 source).
+// Do NOT modify the constants; they were verified against sherpa/knf source.
+// ============================================================================
+
+/// Parameters of the nemo_titanet preprocessing pipeline, derived from the
+/// sherpa/knf source analysis. Grouped as a struct so the fbank functions are
+/// parameterized and the constants testable.
+#[derive(Clone, Debug)]
+pub(crate) struct NemoFbankParams {
+    sample_rate: usize,
+    feat_dim: usize,
+    frame_length_ms: f32,
+    frame_shift_ms: f32,
+    window_size: usize, // samples = int(sr*0.001*frame_length_ms)
+    window_shift: usize, // samples = int(sr*0.001*frame_shift_ms)
+    fft_size: usize,    // next_pow2(window_size)
+    preemph_coeff: f32,
+    low_freq: f32,
+    high_freq: f32, // raw config value; effective = nyquist + high_freq if <=0
+    use_power: bool,
+    use_log_fbank: bool,
+}
+
+impl Default for NemoFbankParams {
+    fn default() -> Self {
+        // Verified against nemo-titanet-embedding.onnx metadata + sherpa defaults.
+        let sample_rate = 16000usize;
+        let frame_length_ms = 25.0f32;
+        let frame_shift_ms = 10.0f32;
+        let window_size = (sample_rate as f32 * 0.001 * frame_length_ms) as usize; // 400
+        let window_shift = (sample_rate as f32 * 0.001 * frame_shift_ms) as usize; // 160
+        // RoundUpToNearestPowerOfTwo(400) = 512.
+        let fft_size = window_size.next_power_of_two(); // 512
+        Self {
+            sample_rate,
+            feat_dim: 80,
+            frame_length_ms,
+            frame_shift_ms,
+            window_size,
+            window_shift,
+            fft_size,
+            preemph_coeff: 0.97,
+            low_freq: 0.0,
+            high_freq: -400.0,
+            use_power: true,
+            use_log_fbank: true,
+        }
+    }
+}
+
+/// Slaney Hz → mel. Matches knf MelScaleSlaney exactly (mel-computations.h:118).
+#[inline]
+fn mel_scale_slaney(freq: f32) -> f32 {
+    if freq <= 1000.0 {
+        freq * 3.0 / 200.0
+    } else {
+        15.0 + 14.545078505785561 * (freq / 1000.0).ln()
+    }
+}
+
+/// Slaney mel → Hz. Matches knf InverseMelScaleSlaney (mel-computations.h:105).
+#[inline]
+fn inverse_mel_scale_slaney(mel: f32) -> f32 {
+    if mel <= 15.0 {
+        200.0 / 3.0 * mel
+    } else {
+        1000.0 * ((mel - 15.0) * 0.06875177742094911f32).exp()
+    }
+}
+
+/// Build the librosa/slaney mel filterbank: sparse per-bin (first_index, weights)
+/// pairs, matching knf MelBanks::InitLibrosaMelBanks exactly.
+fn build_librosa_mel_filterbank(params: &NemoFbankParams) -> Vec<(usize, Vec<f32>)> {
+    let num_bins = params.feat_dim;
+    let window_length_padded = params.fft_size; // 512
+    let num_fft_bins = window_length_padded / 2; // 256
+    let sample_freq = params.sample_rate as f32;
+    let nyquist = 0.5 * sample_freq;
+
+    let low_freq = params.low_freq;
+    let high_freq = if params.high_freq > 0.0 {
+        params.high_freq
+    } else {
+        nyquist + params.high_freq
+    };
+    assert!(
+        low_freq >= 0.0 && low_freq < nyquist && high_freq > 0.0 && high_freq <= nyquist,
+        "bad mel range: low={} high={} nyquist={}",
+        low_freq,
+        high_freq,
+        nyquist
+    );
+
+    let fft_bin_width = sample_freq / window_length_padded as f32; // 31.25
+    let mel_low = mel_scale_slaney(low_freq);
+    let mel_high = mel_scale_slaney(high_freq);
+    let mel_freq_delta = (mel_high - mel_low) / (num_bins as f32 + 1.0);
+
+    let mut bins: Vec<(usize, Vec<f32>)> = Vec::with_capacity(num_bins);
+    for bin in 0..num_bins {
+        let left_mel = mel_low + bin as f32 * mel_freq_delta;
+        let center_mel = mel_low + (bin + 1) as f32 * mel_freq_delta;
+        let right_mel = mel_low + (bin + 2) as f32 * mel_freq_delta;
+
+        let left_hz = inverse_mel_scale_slaney(left_mel);
+        let center_hz = inverse_mel_scale_slaney(center_mel);
+        let right_hz = inverse_mel_scale_slaney(right_mel);
+
+        let mut this_bin = vec![0.0f32; num_fft_bins + 1];
+        let mut first_index: i32 = -1;
+        let mut last_index: i32 = -1;
+        for i in 0..(num_fft_bins + 1) {
+            let hz = fft_bin_width * i as f32;
+            if hz > left_hz && hz < right_hz {
+                let weight = if hz <= center_hz {
+                    (hz - left_hz) / (center_hz - left_hz)
+                } else {
+                    (right_hz - hz) / (right_hz - center_hz)
+                };
+                let weight = weight * 2.0 / (right_hz - left_hz);
+                this_bin[i] = weight;
+                if first_index == -1 {
+                    first_index = i as i32;
+                }
+                last_index = i as i32;
+            }
+        }
+        assert!(
+            first_index != -1 && last_index >= first_index,
+            "mel bin {} empty — num_bins too large?",
+            bin
+        );
+        let first = first_index as usize;
+        let last = last_index as usize;
+        bins.push((first, this_bin[first..last + 1].to_vec()));
+    }
+    bins
+}
+
+/// Periodic Hann window (pytorch convention), matching knf's "hann" branch.
+fn hann_window(frame_length: usize) -> Vec<f32> {
+    let a = 2.0f32 * std::f32::consts::PI / frame_length as f32;
+    (0..frame_length)
+        .map(|i| 0.5 - 0.5 * (a * i as f32).cos())
+        .collect()
+}
+
+/// Preemphasize in place, matching knf Preemphasize (descending sweep).
+fn preemphasize(d: &mut [f32], preemph_coeff: f32) {
+    if preemph_coeff == 0.0 {
+        return;
+    }
+    for i in (1..d.len()).rev() {
+        d[i] -= preemph_coeff * d[i - 1];
+    }
+    d[0] -= preemph_coeff * d[0];
+}
+
+/// Number of frames for snip_edges=true framing. Returns 0 if num_samples <
+/// window_size (matches knf NumFrames).
+fn num_frames_snip(num_samples: usize, window_size: usize, window_shift: usize) -> usize {
+    if num_samples < window_size {
+        0
+    } else {
+        1 + (num_samples - window_size) / window_shift
+    }
+}
+
+/// Compute the [T, feat_dim] log-mel filterbank matrix for `samples` using the
+/// nemo pipeline. Returns None if T==0 (too few samples for >=1 frame).
+fn nemo_log_mel_fbank(samples: &[f32], params: &NemoFbankParams) -> Option<Vec<f32>> {
+    use realfft::{num_complex::Complex, RealFftPlanner};
+
+    let window_size = params.window_size;
+    let window_shift = params.window_shift;
+    let fft_size = params.fft_size;
+    let feat_dim = params.feat_dim;
+    let num_frames = num_frames_snip(samples.len(), window_size, window_shift);
+    if num_frames == 0 {
+        return None;
+    }
+
+    let window = hann_window(window_size);
+    let mel_bins = build_librosa_mel_filterbank(params);
+    let mut fft_planner = RealFftPlanner::<f32>::new();
+    let r2c = fft_planner.plan_fft_forward(fft_size);
+    let mut fft_out: Vec<Complex<f32>> = r2c.make_output_vec();
+    let mut fft_scratch: Vec<Complex<f32>> = r2c.make_scratch_vec();
+
+    let num_fft_bins = fft_size / 2; // 256
+    let mut features = vec![0.0f32; num_frames * feat_dim];
+    // Match knf FbankComputer::Compute (feature-fbank.cc): the log floor is
+    // std::numeric_limits<float>::epsilon() (≈1.192e-7), NOT FLT_MIN. This
+    // matters on near-zero-energy mel bins: knf floors them to log(1.192e-7)
+    // ≈ -15.93, while a FLT_MIN floor (≈1.175e-38) would give ≈ -87.1. On
+    // silence every bin hits this floor (causing a large systematic divergence);
+    // on speech the quiet high-frequency bins do. f32::EPSILON ==
+    // std::numeric_limits<float>::epsilon() exactly.
+    let eps: f32 = f32::EPSILON;
+
+    let mut frame_buf = vec![0.0f32; fft_size];
+    for f in 0..num_frames {
+        let start = f * window_shift;
+        frame_buf[..window_size].copy_from_slice(&samples[start..start + window_size]);
+        preemphasize(&mut frame_buf[..window_size], params.preemph_coeff);
+        for i in 0..window_size {
+            frame_buf[i] *= window[i];
+        }
+        r2c.process_with_scratch(&mut frame_buf, &mut fft_out, &mut fft_scratch)
+            .expect("fft");
+        let mut power = [0.0f32; 257];
+        debug_assert_eq!(num_fft_bins + 1, 257);
+        for k in 0..=num_fft_bins {
+            let re = fft_out[k].re;
+            let im = fft_out[k].im;
+            power[k] = re * re + im * im;
+        }
+        let mel_row = &mut features[f * feat_dim..(f + 1) * feat_dim];
+        for (bin, (first, weights)) in mel_bins.iter().enumerate() {
+            let mut energy = 0.0f32;
+            for (w_idx, &w) in weights.iter().enumerate() {
+                energy += w * power[first + w_idx];
+            }
+            mel_row[bin] = if params.use_log_fbank {
+                energy.max(eps).ln()
+            } else {
+                energy
+            };
+        }
+        for v in frame_buf.iter_mut() {
+            *v = 0.0;
+        }
+    }
+    Some(features)
+}
+
+/// Per-feature CMVN (NormalizePerFeature) over the [T, feat_dim] row-major
+/// matrix, matching sherpa nemo-impl.h NormalizePerFeature exactly.
+fn normalize_per_feature(features: &mut [f32], num_frames: usize, feat_dim: usize) {
+    let mut ex = vec![0.0f32; feat_dim];
+    let mut ex2 = vec![0.0f32; feat_dim];
+    for f in 0..num_frames {
+        let row = &features[f * feat_dim..(f + 1) * feat_dim];
+        for j in 0..feat_dim {
+            ex[j] += row[j];
+            ex2[j] += row[j] * row[j];
+        }
+    }
+    let n = num_frames as f32;
+    for j in 0..feat_dim {
+        ex[j] /= n;
+        ex2[j] /= n;
+    }
+    let mut denom = vec![0.0f32; feat_dim];
+    for j in 0..feat_dim {
+        let variance = (ex2[j] - ex[j] * ex[j]).max(1e-5);
+        denom[j] = variance.sqrt() + 1e-5;
+    }
+    for f in 0..num_frames {
+        let row = &mut features[f * feat_dim..(f + 1) * feat_dim];
+        for j in 0..feat_dim {
+            row[j] = (row[j] - ex[j]) / denom[j];
+        }
+    }
+}
+
+/// Build the ort input tensors for nemo_titanet from raw samples:
+///   audio_signal : float32[1, 80, T_padded]
+///   length       : int64[1]
+/// Returns (audio_signal_flat in [80, T_padded] row-major, T_padded, T_unpadded, length).
+/// Returns None if the clip is too short to yield even one frame.
+fn nemo_build_model_inputs(
+    samples: &[f32],
+    params: &NemoFbankParams,
+) -> Option<(Vec<f32>, usize, usize, i64)> {
+    let feat_dim = params.feat_dim;
+    let mut features = nemo_log_mel_fbank(samples, params)?;
+    let num_frames = features.len() / feat_dim;
+    normalize_per_feature(&mut features, num_frames, feat_dim);
+    let pad = if num_frames % 16 != 0 {
+        16 - (num_frames % 16)
+    } else {
+        0
+    };
+    let num_frames_padded = num_frames + pad;
+    features.resize(num_frames_padded * feat_dim, 0.0);
+    let mut transposed = vec![0.0f32; feat_dim * num_frames_padded];
+    for t in 0..num_frames_padded {
+        for j in 0..feat_dim {
+            transposed[j * num_frames_padded + t] = features[t * feat_dim + j];
+        }
+    }
+    Some((transposed, num_frames_padded, num_frames, num_frames as i64))
+}
+
+// ============================================================================
+// END verbatim preprocessing pipeline.
+// ============================================================================
+
+/// Silence gate — verbatim port of the production `is_effectively_silent`
+/// (mean-square energy < 1e-10). Kept here so the extractor is self-contained;
+/// the adapter re-exports/reuses it.
+pub(crate) fn is_effectively_silent(audio: &[f32]) -> bool {
+    if audio.is_empty() {
+        return true;
+    }
+    let sum_sq: f32 = audio.iter().map(|&s| s * s).sum();
+    (sum_sq / audio.len() as f32) < SILENCE_MS_ENERGY
+}
+
+/// nemo_titanet embedding extractor backed by an `ort::Session`.
+///
+/// Replaces sherpa-onnx's `SpeakerEmbeddingExtractor`. The model file is the
+/// SAME on-disk `nemo-titanet-embedding.onnx` sherpa used — only the loader and
+/// preprocessing runtime changed (both validated to 0.9946+ cosine).
+pub struct NemoEmbeddingExtractor {
+    /// `Session::run` takes `&mut self` in ort 2.0.0-rc.10 — the Mutex lets the
+    /// extractor stay `Send + Sync` behind `&self` (design D1). Fbank/CMVN work
+    /// happens outside the lock; only the forward pass serializes.
+    session: Mutex<Session>,
+    audio_input_name: String,
+    length_input_name: String,
+    emb_output_name: String,
+    dim: usize,
+    params: NemoFbankParams,
+}
+
+impl NemoEmbeddingExtractor {
+    /// Build the extractor from the on-disk nemo_titanet model.
+    /// Session config mirrors the validated probe (Level3, CPU, 1 intra thread).
+    pub fn new(model_path: &str) -> Result<Self> {
+        let path = PathBuf::from(model_path);
+        if !path.exists() {
+            return Err(anyhow!("embedding model not found: {}", model_path));
+        }
+
+        let providers = vec![CPUExecutionProvider::default().build()];
+        let session = Session::builder()
+            .map_err(|e| anyhow!("session builder: {}", e))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow!("opt level: {}", e))?
+            .with_execution_providers(providers)
+            .map_err(|e| anyhow!("providers: {}", e))?
+            .with_intra_threads(2)
+            .map_err(|e| anyhow!("intra threads: {}", e))?
+            .commit_from_file(&path)
+            .map_err(|e| anyhow!("commit nemo_titanet session: {}", e))?;
+
+        let audio_input_name = session
+            .inputs
+            .iter()
+            .find(|i| i.name == "audio_signal")
+            .ok_or_else(|| anyhow!("model has no 'audio_signal' input"))?
+            .name
+            .to_string();
+        let length_input_name = session
+            .inputs
+            .iter()
+            .find(|i| i.name == "length")
+            .ok_or_else(|| anyhow!("model has no 'length' input"))?
+            .name
+            .to_string();
+        let emb_output_name = session
+            .outputs
+            .iter()
+            .find(|o| o.name == "embs")
+            .or_else(|| session.outputs.iter().find(|o| o.name == "embeddings"))
+            .ok_or_else(|| anyhow!("model has no 'embs'/'embeddings' output"))?
+            .name
+            .to_string();
+
+        Ok(Self {
+            session: Mutex::new(session),
+            audio_input_name,
+            length_input_name,
+            emb_output_name,
+            // nemo-titanet-embedding.onnx output is verified float32[N, 192]
+            // (matches sherpa's extractor.dim() == 192).
+            dim: NEMO_EMBEDDING_DIM,
+            params: NemoFbankParams::default(),
+        })
+    }
+
+    /// Embedding dimension (192).
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Raw extraction — the private-method equivalent the diarization pipeline
+    /// calls (the adapter's `extract_embedding` delegates here).
+    /// Returns None on silence or sub-minimum-frame audio, mirroring the
+    /// sherpa gates: `is_effectively_silent` → None; < 1 mel frame
+    /// (< 400 samples @16kHz, the frame window) → None.
+    pub fn extract_embedding(&self, audio: &[f32], sample_rate: u32) -> Option<Vec<f32>> {
+        if is_effectively_silent(audio) {
+            return None;
+        }
+        // The fbank constants are calibrated for 16kHz (window 400/shift 160).
+        // All production callers pass DIARIZATION_SAMPLE_RATE = 16000; sherpa
+        // resampled internally for other rates, but no production path does.
+        if sample_rate != 16000 {
+            log::warn!(
+                "nemo extractor: non-16kHz input ({}Hz) — fbank assumes 16kHz; \
+                 sherpa previously resampled internally. Skipping.",
+                sample_rate
+            );
+            return None;
+        }
+
+        let (audio_flat, t_padded, _t_unpadded, length_val) =
+            nemo_build_model_inputs(audio, &self.params)?;
+
+        let audio_3d: Array3<f32> = Array1::from(audio_flat)
+            .into_shape_with_order([1, self.params.feat_dim, t_padded])
+            .ok()?;
+        let length_arr: Array1<i64> = ndarray::arr1(&[length_val]);
+        let audio_ref = TensorRef::from_array_view(audio_3d.view()).ok()?;
+        let length_ref = TensorRef::from_array_view(length_arr.view()).ok()?;
+
+        let inputs = ort::inputs![
+            self.audio_input_name.as_str() => audio_ref,
+            self.length_input_name.as_str() => length_ref,
+        ];
+
+        // SessionOutputs borrows the session — extract the owned embedding
+        // inside the lock scope, then release.
+        let mut session = self.session.lock().ok()?;
+        let outputs = session.run(inputs).ok()?;
+        let out = outputs.get(self.emb_output_name.as_str())?;
+        let arr = out.try_extract_array::<f32>().ok()?;
+        let slice: &[f32] = arr
+            .as_slice()
+            .unwrap_or_else(|| arr.to_slice().unwrap());
+        if slice.len() < self.dim {
+            return None;
+        }
+        Some(slice[..self.dim].to_vec())
+    }
+}
+
+impl SpeakerEmbeddingPort for NemoEmbeddingExtractor {
+    fn extract(&self, audio: &[f32], sample_rate: u32) -> Result<EmbeddingVector> {
+        let min_samples = (sample_rate as usize) / 2;
+        if audio.len() < min_samples {
+            return Err(anyhow!(
+                "audio too short: {} samples (minimum ~{} for 0.5s at {}Hz)",
+                audio.len(),
+                min_samples,
+                sample_rate
+            ));
+        }
+        if is_effectively_silent(audio) {
+            return Err(anyhow!(
+                "audio is silent (near-zero energy); cannot extract a meaningful speaker embedding"
+            ));
+        }
+
+        let embedding = self
+            .extract_embedding(audio, sample_rate)
+            .ok_or_else(|| anyhow!("not enough audio to extract embedding"))?;
+
+        EmbeddingVector::from_slice(&embedding, self.dim)
+            .map_err(|e| anyhow!("embedding validation failed: {}", e))
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+}

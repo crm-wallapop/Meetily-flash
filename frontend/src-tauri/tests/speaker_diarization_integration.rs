@@ -6,7 +6,7 @@ use app_lib::audio::speaker::alignment::{
 };
 use app_lib::audio::speaker::commands::run_diarization_for_meeting;
 use app_lib::audio::speaker::diarization::DiarizationPort;
-use app_lib::audio::speaker::sherpa_adapter::SherpaOnnxDiarizationAdapter;
+use app_lib::audio::speaker::sherpa_adapter::OrtDiarizationAdapter;
 use app_lib::audio::decoder::decode_audio_file;
 use app_lib::database::repositories::speaker::SpeakerRepository;
 

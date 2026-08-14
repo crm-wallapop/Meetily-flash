@@ -1,92 +1,23 @@
 use anyhow::{anyhow, Result};
 use rayon::prelude::*;
-use sherpa_onnx::{
-    SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig,
-    SpeakerEmbeddingManager,
-};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::diarization::{DiarizationOutput, DiarizationPort};
-use super::embedding::SpeakerEmbeddingPort;
+use super::nemo_extractor::NemoEmbeddingExtractor;
 use super::registry::SpeakerIdentificationPort;
 use super::types::{EmbeddingVector, SpeakerSegment};
 
-pub struct SherpaOnnxEmbeddingAdapter {
-    extractor: SpeakerEmbeddingExtractor,
-    dim: usize,
-}
-
-impl SherpaOnnxEmbeddingAdapter {
-    pub fn new(model_path: &str) -> Result<Self> {
-        let path = PathBuf::from(model_path);
-        if !path.exists() {
-            return Err(anyhow!("embedding model not found: {}", model_path));
-        }
-
-        let config = SpeakerEmbeddingExtractorConfig {
-            model: Some(path.to_string_lossy().to_string()),
-            num_threads: 2,
-            debug: false,
-            provider: Some("cpu".to_string()),
-        };
-
-        let extractor = SpeakerEmbeddingExtractor::create(&config)
-            .ok_or_else(|| anyhow!("failed to create embedding extractor"))?;
-
-        Ok(Self {
-            dim: extractor.dim() as usize,
-            extractor,
-        })
-    }
-}
-
-impl SpeakerEmbeddingPort for SherpaOnnxEmbeddingAdapter {
-    fn extract(&self, audio: &[f32], sample_rate: u32) -> Result<EmbeddingVector> {
-        let min_samples = (sample_rate as usize) / 2;
-        if audio.len() < min_samples {
-            return Err(anyhow!(
-                "audio too short: {} samples (minimum ~{} for 0.5s at {}Hz)",
-                audio.len(),
-                min_samples,
-                sample_rate
-            ));
-        }
-        if is_effectively_silent(audio) {
-            return Err(anyhow!(
-                "audio is silent (near-zero energy); cannot extract a meaningful speaker embedding"
-            ));
-        }
-
-        let stream = self.extractor.create_stream()
-            .ok_or_else(|| anyhow!("failed to create online stream"))?;
-
-        stream.accept_waveform(sample_rate as i32, audio);
-
-        if !self.extractor.is_ready(&stream) {
-            return Err(anyhow!("not enough audio to extract embedding"));
-        }
-
-        let embedding = self.extractor.compute(&stream)
-            .ok_or_else(|| anyhow!("embedding extraction returned empty result"))?;
-
-        EmbeddingVector::from_slice(&embedding, self.dim)
-            .map_err(|e| anyhow!("embedding validation failed: {}", e))
-    }
-
-    fn dim(&self) -> usize {
-        self.dim
-    }
-}
-
-pub struct SherpaOnnxDiarizationAdapter {
-    extractor: SpeakerEmbeddingExtractor,
+/// nemo_titanet embedding extraction + AHC diarization pipeline, running
+/// entirely on the project's `ort` runtime (Part B: sherpa-onnx removed).
+pub struct OrtDiarizationAdapter {
+    extractor: NemoEmbeddingExtractor,
     merge_threshold_fp: Arc<AtomicU32>,
 }
 
-impl SherpaOnnxDiarizationAdapter {
+impl OrtDiarizationAdapter {
     pub fn new(model_path: &str, segmentation_model_path: &str) -> Result<Self> {
         Self::with_shared_threshold(model_path, segmentation_model_path, Arc::new(AtomicU32::new(to_fp(MERGE_SIMILARITY_DEFAULT))))
     }
@@ -105,14 +36,9 @@ impl SherpaOnnxDiarizationAdapter {
             return Err(anyhow!("segmentation model not found: {}", segmentation_model_path));
         }
 
-        let emb_config = SpeakerEmbeddingExtractorConfig {
-            model: Some(mp.to_string_lossy().to_string()),
-            num_threads: 2,
-            debug: false,
-            provider: Some("cpu".to_string()),
-        };
-        let extractor = SpeakerEmbeddingExtractor::create(&emb_config)
-            .ok_or_else(|| anyhow!("failed to create embedding extractor for diarization"))?;
+        // nemo_titanet via `ort` (Part B port — replaces sherpa's extractor;
+        // validated at 0.9946–0.9989 cosine on production-relevant clips).
+        let extractor = NemoEmbeddingExtractor::new(model_path)?;
 
         Ok(Self {
             extractor,
@@ -157,7 +83,7 @@ pub(crate) struct Chunk {
     pub(crate) embedding: Vec<f32>,
 }
 
-impl DiarizationPort for SherpaOnnxDiarizationAdapter {
+impl DiarizationPort for OrtDiarizationAdapter {
     fn process(&self, samples: &[f32], sample_rate: u32, segments: &[(f64, f64)]) -> Result<DiarizationOutput> {
         if samples.is_empty() {
             return Ok(DiarizationOutput { segments: vec![], centroids: HashMap::new() });
@@ -300,17 +226,9 @@ impl DiarizationPort for SherpaOnnxDiarizationAdapter {
     }
 }
 
-impl SherpaOnnxDiarizationAdapter {
+impl OrtDiarizationAdapter {
     fn extract_embedding(&self, audio: &[f32], sample_rate: u32) -> Option<Vec<f32>> {
-        if is_effectively_silent(audio) {
-            return None;
-        }
-        let stream = self.extractor.create_stream()?;
-        stream.accept_waveform(sample_rate as i32, audio);
-        if !self.extractor.is_ready(&stream) {
-            return None;
-        }
-        self.extractor.compute(&stream)
+        self.extractor.extract_embedding(audio, sample_rate)
     }
 
     pub(crate) fn build_chunks(
@@ -1294,20 +1212,34 @@ fn merge_nearby_segments(segments: Vec<(usize, usize)>, min_gap: usize) -> Vec<(
     merged
 }
 
-pub struct SherpaOnnxRegistryAdapter {
-    manager: SpeakerEmbeddingManager,
+/// Pure-Rust in-memory speaker registry (replaces sherpa's
+/// `SpeakerEmbeddingManager`). Same on-disk schema (`speaker_embeddings`
+/// table, nemo_titanet 192-dim vectors) — only the backing store changed.
+///
+/// `search` parity (load-bearing, design D3 + task 4.1): sherpa's manager
+/// scans EVERY stored vector and returns the name of the single
+/// highest-cosine vector ≥ threshold — a per-vector best-score scan, NOT a
+/// per-speaker centroid. This port matches that exactly.
+pub struct CosineRegistryAdapter {
+    /// name → all enrolled embedding vectors (multiple enrollments per
+    /// speaker). Mutex for interior mutability behind the trait's `&self`.
+    speakers: std::sync::Mutex<HashMap<String, Vec<Vec<f32>>>>,
     dim: usize,
 }
 
-impl SherpaOnnxRegistryAdapter {
+impl CosineRegistryAdapter {
     pub fn new(dim: usize) -> Result<Self> {
-        let manager = SpeakerEmbeddingManager::create(dim as i32)
-            .ok_or_else(|| anyhow!("failed to create speaker embedding manager"))?;
-        Ok(Self { manager, dim })
+        if dim == 0 {
+            return Err(anyhow!("registry dimension must be non-zero"));
+        }
+        Ok(Self {
+            speakers: std::sync::Mutex::new(HashMap::new()),
+            dim,
+        })
     }
 }
 
-impl SpeakerIdentificationPort for SherpaOnnxRegistryAdapter {
+impl SpeakerIdentificationPort for CosineRegistryAdapter {
     fn add(&self, name: &str, embedding: &EmbeddingVector) -> Result<()> {
         if embedding.dim() != self.dim {
             return Err(anyhow!(
@@ -1316,16 +1248,34 @@ impl SpeakerIdentificationPort for SherpaOnnxRegistryAdapter {
                 embedding.dim()
             ));
         }
-        if !self.manager.add(name, embedding.as_slice()) {
-            return Err(anyhow!("failed to add speaker: {}", name));
-        }
+        let mut guard = self
+            .speakers
+            .lock()
+            .map_err(|_| anyhow!("registry lock poisoned"))?;
+        guard
+            .entry(name.to_string())
+            .or_default()
+            .push(embedding.as_slice().to_vec());
         Ok(())
     }
 
     fn add_list(&self, name: &str, embeddings: &[EmbeddingVector]) -> Result<()> {
-        let vecs: Vec<Vec<f32>> = embeddings.iter().map(|e| e.as_slice().to_vec()).collect();
-        if !self.manager.add_list(name, &vecs) {
-            return Err(anyhow!("failed to add speaker list: {}", name));
+        for e in embeddings {
+            if e.dim() != self.dim {
+                return Err(anyhow!(
+                    "embedding dimension mismatch: expected {}, got {}",
+                    self.dim,
+                    e.dim()
+                ));
+            }
+        }
+        let mut guard = self
+            .speakers
+            .lock()
+            .map_err(|_| anyhow!("registry lock poisoned"))?;
+        let entry = guard.entry(name.to_string()).or_default();
+        for e in embeddings {
+            entry.push(e.as_slice().to_vec());
         }
         Ok(())
     }
@@ -1338,26 +1288,74 @@ impl SpeakerIdentificationPort for SherpaOnnxRegistryAdapter {
                 embedding.dim()
             ));
         }
-        Ok(self.manager.search(embedding.as_slice(), threshold))
+        let guard = self
+            .speakers
+            .lock()
+            .map_err(|_| anyhow!("registry lock poisoned"))?;
+        // Per-vector best-score scan (sherpa parity): iterate every stored
+        // vector across all names; the name owning the single highest-cosine
+        // vector ≥ threshold wins.
+        let mut best: Option<(String, f32)> = None;
+        for (name, vecs) in guard.iter() {
+            for v in vecs {
+                let score = cosine_similarity(embedding.as_slice(), v);
+                if score >= threshold {
+                    match &best {
+                        Some((_, s)) if *s >= score => {}
+                        _ => best = Some((name.clone(), score)),
+                    }
+                }
+            }
+        }
+        Ok(best.map(|(name, _)| name))
     }
 
     fn verify(&self, name: &str, embedding: &EmbeddingVector, threshold: f32) -> Result<bool> {
-        Ok(self.manager.verify(name, embedding.as_slice(), threshold))
+        if embedding.dim() != self.dim {
+            return Err(anyhow!(
+                "embedding dimension mismatch: expected {}, got {}",
+                self.dim,
+                embedding.dim()
+            ));
+        }
+        let guard = self
+            .speakers
+            .lock()
+            .map_err(|_| anyhow!("registry lock poisoned"))?;
+        let Some(vecs) = guard.get(name) else {
+            return Ok(false);
+        };
+        // sherpa's verify: any stored vector for `name` ≥ threshold.
+        Ok(vecs
+            .iter()
+            .any(|v| cosine_similarity(embedding.as_slice(), v) >= threshold))
     }
 
     fn remove(&self, name: &str) -> Result<()> {
-        if !self.manager.remove(name) {
+        let mut guard = self
+            .speakers
+            .lock()
+            .map_err(|_| anyhow!("registry lock poisoned"))?;
+        if guard.remove(name).is_none() {
             return Err(anyhow!("failed to remove speaker: {}", name));
         }
         Ok(())
     }
 
     fn list_speakers(&self) -> Result<Vec<String>> {
-        Ok(self.manager.get_all_speakers())
+        let guard = self
+            .speakers
+            .lock()
+            .map_err(|_| anyhow!("registry lock poisoned"))?;
+        Ok(guard.keys().cloned().collect())
     }
 
     fn contains(&self, name: &str) -> Result<bool> {
-        Ok(self.manager.contains(name))
+        let guard = self
+            .speakers
+            .lock()
+            .map_err(|_| anyhow!("registry lock poisoned"))?;
+        Ok(guard.contains_key(name))
     }
 }
 
@@ -1367,7 +1365,7 @@ mod tests {
 
     #[test]
     fn embedding_adapter_rejects_nonexistent_model_path() {
-        match SherpaOnnxEmbeddingAdapter::new("/nonexistent/model.onnx") {
+        match super::super::nemo_extractor::NemoEmbeddingExtractor::new("/nonexistent/model.onnx") {
             Err(e) => assert!(e.to_string().contains("embedding model not found"), "unexpected error: {}", e),
             Ok(_) => panic!("expected error for nonexistent model path"),
         }
@@ -1375,7 +1373,7 @@ mod tests {
 
     #[test]
     fn diarization_adapter_rejects_nonexistent_embedding_model() {
-        match SherpaOnnxDiarizationAdapter::new("/nonexistent/embedding.onnx", "/nonexistent/segmentation.onnx") {
+        match OrtDiarizationAdapter::new("/nonexistent/embedding.onnx", "/nonexistent/segmentation.onnx") {
             Err(e) => assert!(e.to_string().contains("diarization model not found"), "unexpected error: {}", e),
             Ok(_) => panic!("expected error for nonexistent model path"),
         }
@@ -1385,7 +1383,7 @@ mod tests {
     fn diarization_adapter_rejects_nonexistent_segmentation_model() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_str().unwrap();
-        match SherpaOnnxDiarizationAdapter::new(path, "/nonexistent/segmentation.onnx") {
+        match OrtDiarizationAdapter::new(path, "/nonexistent/segmentation.onnx") {
             Err(e) => assert!(e.to_string().contains("segmentation model not found"), "unexpected error: {}", e),
             Ok(_) => panic!("expected error for nonexistent model path"),
         }
@@ -1393,7 +1391,7 @@ mod tests {
 
     #[test]
     fn registry_search_empty_returns_none() {
-        let registry = SherpaOnnxRegistryAdapter::new(256).unwrap();
+        let registry = CosineRegistryAdapter::new(256).unwrap();
         let embedding = EmbeddingVector::from_slice(&vec![0.1f32; 256], 256).unwrap();
         let result = registry.search(&embedding, 0.5).unwrap();
         assert!(result.is_none());
@@ -1401,7 +1399,7 @@ mod tests {
 
     #[test]
     fn registry_search_below_threshold_returns_none() {
-        let registry = SherpaOnnxRegistryAdapter::new(4).unwrap();
+        let registry = CosineRegistryAdapter::new(4).unwrap();
         let alice_embedding = EmbeddingVector::from_slice(&vec![1.0, 0.0, 0.0, 0.0], 4).unwrap();
         registry.add("Alice", &alice_embedding).unwrap();
 
@@ -1412,7 +1410,7 @@ mod tests {
 
     #[test]
     fn registry_add_and_search_match() {
-        let registry = SherpaOnnxRegistryAdapter::new(4).unwrap();
+        let registry = CosineRegistryAdapter::new(4).unwrap();
         let alice = EmbeddingVector::from_slice(&vec![1.0, 0.0, 0.0, 0.0], 4).unwrap();
         registry.add("Alice", &alice).unwrap();
 
@@ -1423,7 +1421,7 @@ mod tests {
 
     #[test]
     fn registry_dimension_mismatch_rejected() {
-        let registry = SherpaOnnxRegistryAdapter::new(4).unwrap();
+        let registry = CosineRegistryAdapter::new(4).unwrap();
         let wrong_dim = EmbeddingVector::from_slice(&vec![1.0, 0.0, 0.0, 0.0, 0.0], 5).unwrap();
         let result = registry.add("Alice", &wrong_dim);
         assert!(result.is_err());
@@ -1432,7 +1430,7 @@ mod tests {
 
     #[test]
     fn registry_search_dimension_mismatch_rejected() {
-        let registry = SherpaOnnxRegistryAdapter::new(4).unwrap();
+        let registry = CosineRegistryAdapter::new(4).unwrap();
         let wrong_dim = EmbeddingVector::from_slice(&vec![1.0, 0.0, 0.0, 0.0, 0.0], 5).unwrap();
         let result = registry.search(&wrong_dim, 0.5);
         assert!(result.is_err());
@@ -1440,19 +1438,19 @@ mod tests {
 
     #[test]
     fn registry_list_speakers_empty() {
-        let registry = SherpaOnnxRegistryAdapter::new(4).unwrap();
+        let registry = CosineRegistryAdapter::new(4).unwrap();
         assert!(registry.list_speakers().unwrap().is_empty());
     }
 
     #[test]
     fn registry_remove_nonexistent_fails() {
-        let registry = SherpaOnnxRegistryAdapter::new(4).unwrap();
+        let registry = CosineRegistryAdapter::new(4).unwrap();
         assert!(registry.remove("ghost").is_err());
     }
 
     #[test]
     fn registry_add_remove_lifecycle() {
-        let registry = SherpaOnnxRegistryAdapter::new(4).unwrap();
+        let registry = CosineRegistryAdapter::new(4).unwrap();
         let emb = EmbeddingVector::from_slice(&vec![1.0, 0.0, 0.0, 0.0], 4).unwrap();
         registry.add("Alice", &emb).unwrap();
         assert!(registry.contains("Alice").unwrap());

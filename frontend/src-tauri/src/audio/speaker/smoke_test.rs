@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use super::diarization::DiarizationPort; // trait in scope for .process()
-use super::sherpa_adapter::SherpaOnnxDiarizationAdapter;
+use super::sherpa_adapter::OrtDiarizationAdapter;
 use crate::audio::decoder::decode_audio_file;
 
 fn models_dir() -> String {
@@ -78,7 +78,7 @@ fn diarization_smoke_test() -> Result<()> {
 
     // 3. Create diarization adapter
     println!("\nLoading diarization models...");
-    let adapter = SherpaOnnxDiarizationAdapter::new(&embedding_path, &segmentation_path)?;
+    let adapter = OrtDiarizationAdapter::new(&embedding_path, &segmentation_path)?;
 
     // 4. Run diarization
     println!("Running diarization on {:.0}s of audio...", decoded.duration_seconds);

@@ -3,7 +3,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::manager::DatabaseManager;
 use crate::audio::speaker::registry::SpeakerIdentificationPort;
-use crate::audio::speaker::sherpa_adapter::SherpaOnnxRegistryAdapter;
+use crate::audio::speaker::sherpa_adapter::CosineRegistryAdapter;
 use crate::audio::speaker::types::EmbeddingVector;
 use crate::database::repositories::speaker::SpeakerRepository;
 use crate::state::AppState;
@@ -46,7 +46,7 @@ pub async fn initialize_database_on_startup(app: &AppHandle) -> Result<(), Strin
 
 async fn hydrate_speaker_registry(
     pool: &sqlx::SqlitePool,
-    registry: &std::sync::Mutex<Option<SherpaOnnxRegistryAdapter>>,
+    registry: &std::sync::Mutex<Option<CosineRegistryAdapter>>,
 ) {
     let embeddings = match SpeakerRepository::list_all_embeddings(pool).await {
         Ok(e) => e,
@@ -67,8 +67,13 @@ async fn hydrate_speaker_registry(
         per_speaker.entry(name).or_default().push(embedding);
     }
 
-    let dim = 256;
-    let adapter = match SherpaOnnxRegistryAdapter::new(dim) {
+    // nemo_titanet embeddings are 192-dim. (This was previously hardcoded to
+    // 256 — a pre-existing bug: `EmbeddingVector::from_slice(v, 256)` rejected
+    // every stored 192-dim vector, so hydration silently loaded ZERO speakers
+    // and cross-meeting matching was dead. Fixed by the Part B port; task 4.4
+    // asserts hydration loads N>0 at dim 192.)
+    let dim = 192;
+    let adapter = match CosineRegistryAdapter::new(dim) {
         Ok(a) => a,
         Err(e) => {
             warn!("Speaker registry hydration failed (create adapter): {}", e);

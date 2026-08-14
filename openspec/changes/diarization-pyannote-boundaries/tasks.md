@@ -1,6 +1,8 @@
 ## Prerequisite
 
-- [ ] 0.1 Confirm `diarization-speaker-split-persistence` is archived and the split-and-persist path is on `main`. This change's finer boundaries produce extra N>1 splits that depend on that path.
+- [x] 0.1 Confirm `diarization-speaker-split-persistence` is archived and the split-and-persist path is on `main`. This change's finer boundaries produce extra N>1 splits that depend on that path. — Verified 2026-07-27: archived at `openspec/changes/archive/2026-07-25-diarization-speaker-split-persistence/`; on main per commit `7a599d8`.
+
+> **IMPLEMENTATION ORDER NOTE (2026-07-27, apply-phase):** The sections below are numbered in dependency order, but the two-ORT conflict forces an execution reorder. While `meetily-flash` still depends on `sherpa-onnx` (removed only in §4), any test binary that instantiates `NemoEmbeddingExtractor` (which initializes `ort`'s ORT) links both runtimes — the exact STATUS_ACCESS_VIOLATION the architecture loop documented. **Execution order is therefore: §1.5 (lift the extractor, no tests yet) → §4 (switch the adapter to it + registry port + remove sherpa) → THEN §1.1–1.4 and §2–§3 in-process tests run green.** The §1.1 cosine gate's reference side stays out-of-process (`embed-probe-sherpa` binary → committed fixture) regardless. Task numbering below is unchanged (checkboxes are the record); only execution sequence changes.
 
 ## 1. Port nemo_titanet embedding extraction to ort (red→green)
 

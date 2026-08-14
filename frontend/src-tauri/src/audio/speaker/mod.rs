@@ -4,6 +4,7 @@ pub mod diarization;
 pub mod registry;
 pub mod alignment;
 pub mod sherpa_adapter;
+pub mod nemo_extractor;
 pub mod token_timestamps;
 pub mod commands;
 pub mod model_download;

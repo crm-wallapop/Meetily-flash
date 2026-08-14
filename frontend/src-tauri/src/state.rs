@@ -1,4 +1,4 @@
-use crate::audio::speaker::sherpa_adapter::SherpaOnnxRegistryAdapter;
+use crate::audio::speaker::sherpa_adapter::CosineRegistryAdapter;
 use crate::database::manager::DatabaseManager;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -9,7 +9,7 @@ pub struct AppState {
     pub speaker_merge_threshold_fp: AtomicU32,
     /// In-memory speaker registry for cross-meeting matching.
     /// Hydrated from speaker_embeddings table on startup.
-    pub speaker_registry: Arc<Mutex<Option<SherpaOnnxRegistryAdapter>>>,
+    pub speaker_registry: Arc<Mutex<Option<CosineRegistryAdapter>>>,
 }
 
 impl AppState {
