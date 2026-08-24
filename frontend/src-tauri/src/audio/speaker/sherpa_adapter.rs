@@ -63,7 +63,7 @@ const MAX_DIARIZATION_CHUNKS: usize = 600;
 
 /// The diarization chunk cap (Part B: enforced at the pyannote-boundary layer,
 /// design D4 — see `pyannote_segmentation::shed_boundaries_to_cap`).
-pub(crate) fn max_diarization_chunks() -> usize {
+pub fn max_diarization_chunks() -> usize {
     MAX_DIARIZATION_CHUNKS
 }
 const MIN_CLUSTER_FRAC: f64 = 0.02;

@@ -376,13 +376,21 @@ impl PyannoteSegmentation {
             .commit_from_file(&path)
             .map_err(|e| anyhow!("commit pyannote session: {}", e))?;
 
+        // pyannote-segmentation-3.0 (sherpa export): input 'x' float32[N,1,T],
+        // output 'y'. Match by position/name defensively.
         let audio_input_name = session
             .inputs
-            .iter()
-            .find(|i| i.name == "input" || i.name == "audio_signal")
-            .ok_or_else(|| anyhow!("model has no 'input'/'audio_signal' input"))?
-            .name
-            .to_string();
+            .first()
+            .map(|i| i.name.to_string())
+            .filter(|n| n == "x" || n == "input" || n == "audio_signal")
+            .or_else(|| {
+                session
+                    .inputs
+                    .iter()
+                    .find(|i| i.name == "x" || i.name == "input" || i.name == "audio_signal")
+                    .map(|i| i.name.to_string())
+            })
+            .ok_or_else(|| anyhow!("model has no recognized waveform input"))?;
         let output_name = session
             .outputs
             .first()

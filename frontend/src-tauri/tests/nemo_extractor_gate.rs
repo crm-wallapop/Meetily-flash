@@ -365,3 +365,125 @@ async fn nemo_extractor_cosine_gate() {
     );
     eprintln!("GATE: PASS — margin-derived tiered threshold met on all clips");
 }
+
+/// Task 2.6 — cde5c264 boundary oracle THROUGH THE PRODUCTION MODULE.
+///
+/// Runs `PyannoteSegmentation::boundary_segments` (the exact code path the
+/// diarization command uses) over two known-turn windows and asserts SPECIFIC
+/// boundaries exist that the chunk-grid baseline cannot produce:
+///   (a) the banter window 5.7–32.5s — chunk grid yields ONE boundary at
+///       21.36s; pyannote+smoothing yields ~24 turns;
+///   (b) the Ricardo interjection at ≈46:58 — collapsed to one run today.
+/// Also asserts cap-shedding leaves the count ≤ MAX_DIARIZATION_CHUNKS.
+///
+/// Run:
+///   cargo test --release --test nemo_extractor_gate -- --ignored --nocapture pyannote_boundary_oracle_cde5c264
+#[tokio::test]
+#[ignore]
+async fn pyannote_boundary_oracle_cde5c264() {
+    use app_lib::audio::speaker::pyannote_segmentation::PyannoteSegmentation;
+
+    let models = dirs::home_dir()
+        .expect("home")
+        .join(".meetily-models")
+        .join("pyannote-segmentation.onnx");
+    assert!(models.exists(), "pyannote model missing");
+
+    let audio = resolve_audio().await.expect("cde5c264 recording");
+    let (native_sr, native_samples) = decode_mono_native(&audio).expect("decode");
+    // Production feeds to_whisper_format output (16kHz mono whole-file resample).
+    let decoded = app_lib::audio::decoder::decode_audio_file(&audio).expect("decode prod");
+    let samples = decoded.to_whisper_format();
+    let duration = samples.len() as f64 / 16000.0;
+    eprintln!(
+        "ORACLE: {} samples ({:.1}s @16k); native {}Hz",
+        samples.len(), duration, native_sr
+    );
+    drop(native_samples);
+
+    let seg = PyannoteSegmentation::new(models.to_str().unwrap()).expect("pyannote session");
+    let t0 = std::time::Instant::now();
+    let cps = seg.change_points(&samples).expect("change_points");
+    eprintln!(
+        "ORACLE: {} smoothed change-points in {:.1}s",
+        cps.len(),
+        t0.elapsed().as_secs_f64()
+    );
+
+    // Whisper-style speech regions for the two windows under test: synthesize
+    // one region spanning each window (the oracle isolates BOUNDARY PLACEMENT,
+    // not VAD behavior — the intersect seam is unit-tested separately).
+    let windows: &[(f64, f64, &str)] = &[
+        (5.7, 32.5, "banter (rapid multi-turn)"),
+        (46.0 * 60.0 + 42.0, 47.0 * 60.0 + 2.0, "Ricardo interjection ≈46:58"),
+    ];
+    let mut report = String::new();
+    let mut failed = Vec::new();
+
+    for &(ws, we, label) in windows {
+        let in_window: Vec<f64> = cps
+            .iter()
+            .filter(|&&t| t >= ws && t <= we)
+            .copied()
+            .collect();
+        eprintln!(
+            "\nORACLE {}: {} pyannote change-points (chunk-grid baseline: 1)",
+            label,
+            in_window.len()
+        );
+        report.push_str(&format!(
+            "## {} [{:.1}-{:.1}s]: {} change-points\n",
+            label, ws, we,
+            in_window.len()
+        ));
+        for &t in &in_window {
+            report.push_str(&format!("- {:.3}s\n", t));
+        }
+
+        // Chunk-grid baseline produces exactly ONE boundary per window (the
+        // uniform grid changes label once). The oracle requires strictly more.
+        if in_window.len() <= 1 {
+            failed.push(format!("{}: only {} boundaries (need >1)", label, in_window.len()));
+        }
+        // Known-anchor hit: Ricardo join/interjection timestamps must have a
+        // boundary within ±2s.
+        let anchor = if label.contains("join") { 17.0 * 60.0 + 37.0 } else { 46.0 * 60.0 + 58.0 };
+        let _ = anchor; // anchors checked via the window presence below
+    }
+
+    // Anchor precision: the interjection at 2818s ±2s must have ≥1 boundary.
+    let anchor_hits = cps.iter().filter(|&&t| (t - 2818.0).abs() <= 2.0).count();
+    eprintln!("ORACLE: interjection anchor 2818s±2s hits: {}", anchor_hits);
+    report.push_str(&format!("\nanchor 2818s±2s: {} hits\n", anchor_hits));
+    if anchor_hits == 0 {
+        failed.push("interjection anchor 2818s has no boundary within ±2s".into());
+    }
+    // Ricardo join anchor 1057s ±2s.
+    let join_hits = cps.iter().filter(|&&t| (t - 1057.0).abs() <= 2.0).count();
+    eprintln!("ORACLE: Ricardo-join anchor 1057s±2s hits: {}", join_hits);
+    if join_hits == 0 {
+        failed.push("Ricardo join anchor 1057s has no boundary within ±2s".into());
+    }
+
+    // Cap shedding sanity through the public API.
+    let whisper_regions: Vec<(f64, f64)> = vec![(5.7, 32.5), (1057.0, 1087.0), (2810.0, 2830.0)];
+    let bounded = seg
+        .boundary_segments(&samples, &whisper_regions, app_lib::audio::speaker::sherpa_adapter::max_diarization_chunks())
+        .expect("boundary_segments");
+    eprintln!("ORACLE: boundary_segments → {} segments (cap 600)", bounded.len());
+    assert!(
+        bounded.len() <= app_lib::audio::speaker::sherpa_adapter::max_diarization_chunks(),
+        "cap exceeded"
+    );
+
+    let out = std::env::temp_dir().join("pyannote_boundary_oracle_report.txt");
+    std::fs::write(&out, &report).expect("write report");
+    eprintln!("ORACLE: report at {}", out.display());
+
+    assert!(
+        failed.is_empty(),
+        "boundary oracle FAILED:\n  {}",
+        failed.join("\n  ")
+    );
+    eprintln!("ORACLE: PASS — pyannote boundaries resolve turns the chunk grid collapses");
+}
