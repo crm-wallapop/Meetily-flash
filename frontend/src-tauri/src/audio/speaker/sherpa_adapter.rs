@@ -56,9 +56,11 @@ const MERGE_SIMILARITY_DEFAULT: f32 = 0.40;
 const MIN_SPEECH_SECS: f64 = 1.5;
 const MAX_CHUNK_SECS: f64 = 10.0;
 const SPLIT_TARGET_SECS: f64 = 3.0;
-// Ceiling on chunk count for long meetings. The split granularity coarsens
-// above 3 s once total speech exceeds 600 × 3 s = 30 min, keeping n bounded so
-// the O(n²) clustering stays sub-second (design D2).
+// Ceiling on chunk count for long meetings, enforced ONCE at the
+// pyannote-boundary layer (design D4 — see
+// `pyannote_segmentation::shed_boundaries_to_cap`). `build_chunks` may still
+// sub-divide surviving segments longer than MAX_CHUNK_SECS, so the chunk count
+// reaching clustering can modestly exceed this cap (bounded ~2× in practice).
 const MAX_DIARIZATION_CHUNKS: usize = 600;
 
 /// The diarization chunk cap (Part B: enforced at the pyannote-boundary layer,
@@ -1122,17 +1124,11 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a * norm_b)
 }
 
-// The diarization pipeline strips silence earlier via energy VAD, but the
-// extractor guards again: a direct caller must not feed the model silence and
-// get back a degenerate vector that corrupts centroid clustering. Threshold is
-// mean-square energy; RMS < 1e-5 is ~-100 dBFS, far below any real speech.
-fn is_effectively_silent(audio: &[f32]) -> bool {
-    if audio.is_empty() {
-        return true;
-    }
-    let sum_sq: f32 = audio.iter().map(|&s| s * s).sum();
-    (sum_sq / audio.len() as f32) < 1e-10
-}
+// Silence gate lives in ONE place (`nemo_extractor::is_effectively_silent`,
+// verbatim sherpa port, mean-square < 1e-10 ≈ -100 dBFS) — the adapter tests
+// it through that single definition to prevent drift.
+#[cfg(test)]
+use super::nemo_extractor::is_effectively_silent;
 
 fn renumber_speakers(segments: Vec<SpeakerSegment>) -> (Vec<SpeakerSegment>, HashMap<u32, u32>) {
     let mut mapping: HashMap<u32, u32> = HashMap::new();
@@ -1552,9 +1548,12 @@ mod tests {
             total_dur
         );
 
-        // Shed to the cap (the production path).
+        // Shed to the cap (the production path). Regions here are the
+        // per-fragment synthetic spans — each fragment is its own region, so
+        // the region-scoped merge degenerates to identity on this fixture.
         const CAP: usize = 600;
-        let shed = shed_boundaries_to_cap(segments.clone(), CAP, 1.5);
+        let regions: Vec<(f64, f64)> = segments.iter().map(|&(s, e)| (s, e)).collect();
+        let shed = shed_boundaries_to_cap(segments.clone(), &regions, CAP, 1.5);
         assert!(shed.len() <= CAP, "shed respects cap: {}", shed.len());
 
         // Build chunks from survivors with synthetic embeddings.

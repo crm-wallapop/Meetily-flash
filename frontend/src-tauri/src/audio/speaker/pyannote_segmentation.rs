@@ -118,9 +118,10 @@ fn median_filter_per_speaker(activity: &[[bool; 3]], rad: usize) -> Vec<[bool; 3
     out
 }
 
-/// Min-on / max-off duration gates per pyannote-audio's `clamp`: collapse OFF
-/// runs shorter than `max_off_frames` that are bounded by ON on both sides
-/// (fill gaps); drop ON runs shorter than `min_on_frames`. LIFTED VERBATIM.
+/// Min-on / max-off duration gates per pyannote-audio's `clamp`: fill OFF
+/// runs of length ≤ `max_off_frames` bounded by ON on both sides; drop ON
+/// runs of length < `min_on_frames`. (The asymmetric ≤/< split matches the
+/// probe's validated behavior — pinned, not a bug.) LIFTED VERBATIM.
 fn duration_gates_per_speaker(
     activity: &[[bool; 3]],
     min_on_frames: usize,
@@ -251,8 +252,15 @@ pub(crate) fn intersect_pyannote_with_whisper(
 /// Because boundaries are candidate splits (not turns), shedding lowers
 /// per-region resolution uniformly without destroying turns — turns are
 /// re-derived downstream by AHC + smoothing.
+///
+/// `regions` (the Whisper speech segments) scope the post-shed merge:
+/// sub-minimum survivors merge only within their own region, NEVER across a
+/// silence gap (design D2 — silence is preserved as silence). A survivor with
+/// no in-region neighbor is kept as-is; `build_chunks` drops sub-`min_secs`
+/// pieces anyway, so at worst a <1.5s sliver of speech goes unembedded.
 pub(crate) fn shed_boundaries_to_cap(
     segments: Vec<(f64, f64)>,
+    regions: &[(f64, f64)],
     cap: usize,
     min_secs: f64,
 ) -> Vec<(f64, f64)> {
@@ -299,7 +307,22 @@ pub(crate) fn shed_boundaries_to_cap(
         .zip(keep)
         .filter_map(|(seg, k)| k.then_some(seg))
         .collect();
-    merge_sub_minimum(kept, min_secs)
+    // Merge sub-minimum survivors per Whisper region. Every kept segment lies
+    // inside exactly one region (intersect never spans regions), so matching
+    // by start point is exact; iterating regions in order preserves time order.
+    let mut out = Vec::with_capacity(kept.len());
+    for &(ws, we) in regions {
+        let in_region: Vec<(f64, f64)> = kept
+            .iter()
+            .copied()
+            .filter(|&(s, _)| s >= ws && s < we)
+            .collect();
+        if in_region.is_empty() {
+            continue;
+        }
+        out.extend(merge_sub_minimum(in_region, min_secs));
+    }
+    out
 }
 
 fn merge_sub_minimum(mut segs: Vec<(f64, f64)>, min_secs: f64) -> Vec<(f64, f64)> {
@@ -453,10 +476,20 @@ impl PyannoteSegmentation {
                 let shape = arr.shape();
                 let num_frames = shape[1];
                 let num_classes = shape[2];
+                // Onset passed as BOTH thresholds: probe parity — the probe
+                // ran plain thresholding (no hysteresis band), and this exact
+                // behavior is what hit both anchor regions on cde5c264. The
+                // `offset` parameter exists for future band tuning; do not
+                // "fix" this to a band without re-running the anchors.
                 decode_multilabel_with_hysteresis(slice, num_frames, num_classes, params.onset, params.onset)
             };
 
             // Map window-local frames → absolute frame indices (last-writer-wins).
+            // NOTE: 16000/270 frames-per-1s-step is non-integer, so overlapping
+            // windows decode on slightly different phase grids; the merge is
+            // last-writer-wins (probe parity). Jitter is ≤~8ms per boundary —
+            // two orders below the 0.3s duration gates, so harmless, but this
+            // is NOT an off-by-one.
             let win_start_secs = start as f64 / SAMPLE_RATE as f64;
             let first_frame = (win_start_secs / FRAME_SHIFT_SECS).round() as usize;
             for (i, act) in decoded.iter().enumerate() {
@@ -486,7 +519,12 @@ impl PyannoteSegmentation {
     ) -> Result<Vec<(f64, f64)>> {
         let cps = self.change_points(samples)?;
         let intersected = intersect_pyannote_with_whisper(&cps, whisper_segments);
-        Ok(shed_boundaries_to_cap(intersected, cap, MIN_SEGMENT_SECS))
+        Ok(shed_boundaries_to_cap(
+            intersected,
+            whisper_segments,
+            cap,
+            MIN_SEGMENT_SECS,
+        ))
     }
 }
 
@@ -680,13 +718,45 @@ mod tests {
     fn shed_to_cap_keeps_positional_coverage() {
         // 120 segments of 2s each; cap 60 → shed half positionally.
         let segs: Vec<(f64, f64)> = (0..120).map(|i| (i as f64 * 2.0, i as f64 * 2.0 + 2.0)).collect();
-        let shed = shed_boundaries_to_cap(segs.clone(), 60, 1.5);
+        let regions: Vec<(f64, f64)> = (0..120).map(|i| (i as f64 * 2.0, i as f64 * 2.0 + 2.0)).collect();
+        let shed = shed_boundaries_to_cap(segs.clone(), &regions, 60, 1.5);
         assert!(shed.len() <= 60, "shed respects the cap (len={})", shed.len());
         // Coverage: first and last spans preserved.
         assert!((shed[0].0 - 0.0).abs() < 1e-9);
         assert!((shed.last().unwrap().1 - 240.0).abs() < 1e-9);
         // No sub-minimum survivors after merge.
         assert!(shed.windows(2).all(|w| w[0].1 <= w[1].1 + 1e-9), "monotonic");
+    }
+
+    #[test]
+    fn shed_merge_never_crosses_silence_gap() {
+        // Code-review regression: sub-minimum survivors must merge only within
+        // their own Whisper region — never across a silence gap into another
+        // region's speech (design D2: silence is preserved as silence).
+        // Region A = [0,100] with a change-point every 2s → 50 pieces (2s
+        // pieces survive the per-region MIN_SEGMENT_SECS merge).
+        // Region B = [101,102] — a single-piece region SHORTER than
+        // MIN_SEGMENT_SECS, which intersect emits unmerged (single-piece
+        // regions bypass both per-region merge guards).
+        let mut cps = Vec::new();
+        for t in 1..50 {
+            cps.push(t as f64 * 2.0);
+        }
+        let regions = vec![(0.0, 100.0), (101.0, 102.0)];
+        let flat = intersect_pyannote_with_whisper(&cps, &regions);
+        assert_eq!(flat.len(), 51, "50 split pieces + 1 short single-piece region");
+        assert_eq!(*flat.last().unwrap(), (101.0, 102.0));
+
+        const CAP: usize = 25;
+        let shed = shed_boundaries_to_cap(flat, &regions, CAP, 1.5);
+        assert!(shed.len() <= CAP);
+        // EVERY output segment lies fully inside ONE Whisper region — nothing
+        // bridges the silent gap (100,101). The old flat merge produced e.g.
+        // (…,100) extended to end at 102.0.
+        for &(s, e) in &shed {
+            let contained = regions.iter().any(|&(ws, we)| s >= ws && e <= we);
+            assert!(contained, "segment ({s},{e}) crosses a region/silence boundary");
+        }
     }
 
     #[test]

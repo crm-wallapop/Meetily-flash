@@ -56,9 +56,24 @@ async fn hydrate_speaker_registry(
         }
     };
 
+    match build_hydrated_registry(embeddings) {
+        Some((adapter, speaker_count)) => {
+            let mut guard = registry.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(adapter);
+            info!("Speaker registry hydrated: {} speakers loaded", speaker_count);
+        }
+        None => info!("No stored speaker embeddings — registry empty"),
+    }
+}
+
+/// Pure core of hydration, split out so the dim-192 regression (task 4.4) is
+/// testable without a database fixture. Returns None when there is nothing to
+/// load.
+fn build_hydrated_registry(
+    embeddings: Vec<(String, Vec<f32>)>,
+) -> Option<(CosineRegistryAdapter, usize)> {
     if embeddings.is_empty() {
-        info!("No stored speaker embeddings — registry empty");
-        return;
+        return None;
     }
 
     let mut per_speaker: std::collections::HashMap<String, Vec<Vec<f32>>> =
@@ -72,14 +87,8 @@ async fn hydrate_speaker_registry(
     // every stored 192-dim vector, so hydration silently loaded ZERO speakers
     // and cross-meeting matching was dead. Fixed by the Part B port; task 4.4
     // asserts hydration loads N>0 at dim 192.)
-    let dim = 192;
-    let adapter = match CosineRegistryAdapter::new(dim) {
-        Ok(a) => a,
-        Err(e) => {
-            warn!("Speaker registry hydration failed (create adapter): {}", e);
-            return;
-        }
-    };
+    let dim = crate::audio::speaker::nemo_extractor::NEMO_EMBEDDING_DIM;
+    let adapter = CosineRegistryAdapter::new(dim).ok()?;
 
     for (name, vecs) in &per_speaker {
         let emb_vectors: Vec<EmbeddingVector> = vecs
@@ -94,8 +103,47 @@ async fn hydrate_speaker_registry(
         }
     }
 
-    let speaker_count = per_speaker.len();
-    let mut guard = registry.lock().unwrap_or_else(|e| e.into_inner());
-    *guard = Some(adapter);
-    info!("Speaker registry hydrated: {} speakers loaded", speaker_count);
+    Some((adapter, per_speaker.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Task 4.4 regression: stored 192-dim vectors must ALL hydrate. The old
+    /// hardcoded `dim = 256` rejected every stored vector, silently loading
+    /// zero speakers and killing cross-meeting matching.
+    #[test]
+    fn registry_hydration_loads_speakers_at_192_dim() {
+        let dim = crate::audio::speaker::nemo_extractor::NEMO_EMBEDDING_DIM;
+        assert_eq!(dim, 192, "nemo_titanet output dim");
+        // Distinct DIRECTIONS (constant-filled vectors would be mutually
+        // parallel under cosine and tie). Alice spans e0, Bob spans e1.
+        let mk_alice = |e0: f32| {
+            let mut v = vec![0.0f32; dim];
+            v[0] = e0;
+            v[1] = (1.0 - e0) * 0.5;
+            v
+        };
+        let mut bob = vec![0.0f32; dim];
+        bob[1] = 1.0;
+        let embeddings = vec![
+            ("Alice".to_string(), mk_alice(1.0)),
+            ("Alice".to_string(), mk_alice(0.95)),
+            ("Bob".to_string(), bob),
+        ];
+        let (adapter, count) = build_hydrated_registry(embeddings).expect("non-empty input loads");
+        assert_eq!(count, 2, "two distinct speakers");
+        assert_eq!(adapter.list_speakers().unwrap().len(), 2);
+
+        // A query along Alice's direction matches her through the hydrated
+        // registry (per-vector scan over the loaded vectors).
+        let query = crate::audio::speaker::types::EmbeddingVector::from_slice(&mk_alice(1.0), dim).unwrap();
+        assert_eq!(adapter.search(&query, 0.5).unwrap().as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn registry_hydration_empty_input_is_none() {
+        assert!(build_hydrated_registry(Vec::new()).is_none());
+    }
 }

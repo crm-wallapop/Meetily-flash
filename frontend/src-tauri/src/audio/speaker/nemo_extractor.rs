@@ -379,7 +379,12 @@ pub struct NemoEmbeddingExtractor {
 
 impl NemoEmbeddingExtractor {
     /// Build the extractor from the on-disk nemo_titanet model.
-    /// Session config mirrors the validated probe (Level3, CPU, 1 intra thread).
+    ///
+    /// Session config: Level3, CPU, intra_threads=2. DEVIATION from design
+    /// D1's "1 intra thread" (which mirrored the probe): with the session
+    /// pool feeding rayon's par_iter, 2 intra threads per session measured
+    /// within the Pass-2 budget (40.19s vs 60s on cde5c264) while keeping
+    /// total ORT threads bounded at pool_size × 2.
     pub fn new(model_path: &str) -> Result<Self> {
         let path = PathBuf::from(model_path);
         if !path.exists() {
@@ -497,7 +502,14 @@ impl NemoEmbeddingExtractor {
             .next
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             % self.sessions.len();
-        let mut session = self.sessions[idx].lock().ok()?;
+        // Poison recovery (into_inner): a panic in another thread while
+        // holding the lock must not permanently kill this session — the ORT
+        // session itself has no corruptable invariants. A silent permanent
+        // `None` here would degrade every later extraction.
+        let mut session = match self.sessions[idx].lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let outputs = session.run(inputs).ok()?;
         let out = outputs.get(self.emb_output_name.as_str())?;
         let arr = out.try_extract_array::<f32>().ok()?;
@@ -573,24 +585,17 @@ mod tests {
     }
 
     /// Task 1.2 (filter parity, unit level) — the silence gate: zero-energy
-    /// audio returns None from extract_embedding; non-silent passes the gate.
-    /// (The full sherpa-parity sweep on real clips is the #[ignore] fixture
-    /// test in tests/pyannote_ort_probe.rs.)
+    /// audio is silent, non-silent passes. (The full sherpa-parity sweep on
+    /// real clips is the cosine-gate fixture test in tests/.)
     #[test]
     fn nemo_extractor_silence_gate() {
         assert!(is_effectively_silent(&vec![0.0f32; 16000]));
+        assert!(is_effectively_silent(&[]));
         assert!(!is_effectively_silent(&vec![0.5f32; 16000]));
-        // The trait extract() rejects silence with a structured error.
-        // (No model needed for the gate-path check: silence is rejected before
-        // the session is ever touched.)
-        let port_result = (|| {
-            let silent = vec![0.0f32; 16000];
-            if is_effectively_silent(&silent) {
-                return Err(anyhow!("audio is silent"));
-            }
-            Ok(())
-        })();
-        assert!(port_result.is_err());
+        // Just-below-threshold energy stays silent (mean-square < 1e-10).
+        let quiet = vec![1e-6f32; 16000];
+        let mean_sq: f32 = quiet.iter().map(|&s| s * s).sum::<f32>() / quiet.len() as f32;
+        assert_eq!(is_effectively_silent(&quiet), mean_sq < 1e-10);
     }
 
     /// Fbank param sanity (guards against accidental constant drift — the
