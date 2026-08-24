@@ -584,6 +584,86 @@ mod tests {
         assert!(p.use_log_fbank);
         assert!(p.use_power);
     }
+
+    /// Task 1.3 — is_ready parity sweep (25 ms → 2 s).
+    ///
+    /// SOURCE FINDING (speaker-embedding-extractor-nemo-impl.h, v1.13.4):
+    /// `IsReady(OnlineStream *s)` is exactly
+    ///   `return s->GetNumProcessedFrames() < s->NumFramesReady();`
+    /// For a fresh stream (0 processed frames) this reduces to "at least ONE
+    /// complete frame is available" — there is NO hidden minimum-frame or
+    /// minimum-sample constant. knf NumFramesReady (snip_edges=true) counts
+    /// complete windows: `1 + (N - window_size)/window_shift` for N ≥ 400,
+    /// else 0 — identical to the port's `num_frames_snip`. Therefore the
+    /// port's `< 400 samples → None` gate IS sherpa-parity by construction;
+    /// this sweep locks the boundary in across the 25ms→2s range.
+    #[test]
+    fn nemo_is_ready_parity_sweep_25ms_to_2s() {
+        let params = NemoFbankParams::default();
+
+        // Sweep sample counts spanning 25ms→2s plus the exact boundaries.
+        // 25ms=400, 50ms=800, 100ms=1600, 250ms=4000, 500ms=8000,
+        // 700ms=11200 (short-1/2 fixtures), 1s=16000, 1.5s=24000, 2s=32000,
+        // and the off-by-ones around the frame boundary.
+        for &n in &[
+            1usize,
+            399,
+            400,
+            401,
+            800,
+            1600,
+            4000,
+            8000,
+            11200,
+            15999,
+            16000,
+            23999,
+            24000,
+            31999,
+            32000,
+        ] {
+            let samples: Vec<f32> = (0..n)
+                .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 300.0 / 16000.0).sin() * 0.2)
+                .collect();
+            let expected_frames =
+                num_frames_snip(n, params.window_size, params.window_shift);
+            let got = nemo_build_model_inputs(&samples, &params);
+            if expected_frames == 0 {
+                assert!(
+                    got.is_none(),
+                    "{} samples (<1 frame): port must DROP (sherpa IsReady=false)",
+                    n
+                );
+            } else {
+                let (flat, t_padded, t_unpadded, length) =
+                    got.unwrap_or_else(|| panic!("{} samples: port must EMBED", n));
+                assert_eq!(t_unpadded, expected_frames, "{} samples: frame count", n);
+                assert_eq!(length as usize, expected_frames);
+                assert_eq!(
+                    t_padded,
+                    (expected_frames + 15) / 16 * 16,
+                    "{} samples: pad-to-16",
+                    n
+                );
+                assert_eq!(flat.len(), params.feat_dim * t_padded);
+            }
+        }
+
+        // Documented equivalence (the parity claim, stated as an assertion so
+        // it cannot rot silently):
+        //   sherpa IsReady(fresh stream, N samples)
+        //     ≡ NumFramesReady(N) > 0
+        //     ≡ num_frames_snip(N, 400, 160) > 0
+        //     ≡ N >= 400
+        assert_eq!(
+            num_frames_snip(400, params.window_size, params.window_shift),
+            1
+        );
+        assert_eq!(
+            num_frames_snip(399, params.window_size, params.window_shift),
+            0
+        );
+    }
 }
 
 impl SpeakerEmbeddingPort for NemoEmbeddingExtractor {
