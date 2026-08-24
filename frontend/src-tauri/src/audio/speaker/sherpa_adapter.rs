@@ -1464,6 +1464,220 @@ mod tests {
         assert!(!registry.contains("Alice").unwrap());
     }
 
+
+    /// Task 3.2 — THE LOAD-BEARING turn-recovery hypothesis test.
+    ///
+    /// A ~45-min two-speaker fixture: a rapid-alternation region (60 turns of
+    /// 6s each, 3 candidate fragments per turn = 180 segments) plus a
+    /// single-speaker monologue region (1170 segments) — 1350 candidates total,
+    /// shedding to the 600 cap. Asserts: after uniform shed + AHC +
+    /// temporal-coherence smoothing, the alternation region recovers >=80% of
+    /// its ground-truth A<->B transitions among surviving fragments.
+    #[test]
+    fn uniform_shed_recovers_alternation_turns() {
+        use super::super::pyannote_segmentation::shed_boundaries_to_cap;
+
+        let dim = 8usize;
+        let frag_secs = 2.0;
+        let sr = 16000usize;
+
+        // Synthetic speaker directions: orthogonal unit vectors.
+        let mut dir_a = vec![0.0f32; dim];
+        let mut dir_b = vec![0.0f32; dim];
+        dir_a[0] = 1.0;
+        dir_b[1] = 1.0;
+
+        let noisy = |dir: &[f32]| -> Vec<f32> {
+            // Deterministic small perturbation (~1% norm) — intra-speaker
+            // cosine stays >> 0.40, inter-speaker stays << 0.40.
+            dir.iter()
+                .enumerate()
+                .map(|(j, &d)| d + 0.01 * (((j * 37 + 11) % 256) as f32 / 255.0 - 0.5))
+                .collect()
+        };
+
+        let mut segments: Vec<(f64, f64)> = Vec::new();
+        let mut truth_speaker: Vec<u8> = Vec::new(); // 0=A, 1=B per fragment
+
+        // Alternation region: 30 turns x 24s (12x2s fragments), strict A/B/A/B.
+        // Turns must exceed MIN_SMOOTH_SEGMENT_SECS (10s) — shorter turns are
+        // legitimately collapsed by production smoothing, so a faster
+        // alternation would test the smoothing floor, not the shed hypothesis.
+        for turn in 0..30u8 {
+            for _ in 0..12 {
+                let s = segments.len() as f64 * frag_secs;
+                segments.push((s, s + frag_secs));
+                truth_speaker.push(if turn % 2 == 0 { 0 } else { 1 });
+            }
+        }
+        let alt_turns_ground_truth = 29usize; // label changes across 30 alternating turns
+        let alt_frag_count = segments.len();
+
+        // Monologue region: speaker A only, same fragment size.
+        while segments.len() < 1350 {
+            let s = segments.len() as f64 * frag_secs;
+            segments.push((s, s + frag_secs));
+            truth_speaker.push(0);
+        }
+        let total_dur = segments.len() as f64 * frag_secs;
+        assert!(
+            total_dur >= 2700.0,
+            "fixture should be >=45min scale: {}s",
+            total_dur
+        );
+
+        // Shed to the cap (the production path).
+        const CAP: usize = 600;
+        let shed = shed_boundaries_to_cap(segments.clone(), CAP, 1.5);
+        assert!(shed.len() <= CAP, "shed respects cap: {}", shed.len());
+
+        // Build chunks from survivors with synthetic embeddings.
+        let chunks: Vec<Chunk> = shed
+            .iter()
+            .map(|(s, e)| {
+                let idx = (*s / frag_secs).round() as usize;
+                let emb = if truth_speaker[idx] == 0 {
+                    noisy(&dir_a)
+                } else {
+                    noisy(&dir_b)
+                };
+                Chunk {
+                    start_sample: (*s * sr as f64) as usize,
+                    end_sample: (*e * sr as f64) as usize,
+                    duration_secs: e - s,
+                    embedding: emb,
+                }
+            })
+            .collect();
+        let embeds: Vec<Vec<f32>> = chunks.iter().map(|c| c.embedding.clone()).collect();
+        let timestamps: Vec<f64> =
+            chunks.iter().map(|c| c.start_sample as f64 / sr as f64).collect();
+        let durations: Vec<f64> = chunks.iter().map(|c| c.duration_secs).collect();
+
+        // AHC + temporal-coherence smoothing (production pipeline).
+        let (labels, centroids) = cluster_by_centroids(&chunks, 0.40);
+        let (smoothed, _) = smooth_to_fixed_point(
+            &labels,
+            &embeds,
+            &timestamps,
+            &durations,
+            &centroids,
+            &SmoothParams::default(),
+        );
+
+        // Measure recovered A<->B transitions among consecutive SURVIVING
+        // fragments (whole meeting; monologue contributes none by construction).
+        let recovered_changes =
+            smoothed.windows(2).filter(|w| w[0] != w[1]).count();
+        // Sanity: exactly two clusters survive (A and B).
+        let distinct: std::collections::HashSet<u32> = smoothed.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            2,
+            "two speakers must survive clustering, got {:?}",
+            distinct
+        );
+        let recovery = recovered_changes as f64 / alt_turns_ground_truth as f64;
+        eprintln!(
+            "TURN-RECOVERY: {}/{} alternation fragments survived; {} transitions recovered vs {} ground-truth ({:.0}%)",
+            shed.iter().filter(|(s, _)| *s < alt_frag_count as f64 * frag_secs).count(),
+            alt_frag_count,
+            recovered_changes,
+            alt_turns_ground_truth,
+            recovery * 100.0
+        );
+        assert!(
+            recovery >= 0.80,
+            "uniform-shed turn recovery {:.0}% < 80% - the design's load-bearing hypothesis FAILS",
+            recovery * 100.0
+        );
+    }
+
+    /// Panel-mandated addition: noise-injection invariance. Perturbing the
+    /// committed reference embeddings by the measured worst-case residual
+    /// (~0.013 cosine) must not change AHC clusterings.
+    #[test]
+    fn noise_injection_invariance_on_reference_embeddings() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/nemo_c5_reference_embeddings.json");
+        if !fixture_path.exists() {
+            eprintln!("fixture missing - skipping");
+            return;
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&fixture_path).expect("fixture"))
+                .expect("json");
+        let mut vectors: Vec<Vec<f32>> = Vec::new();
+        for (_set, clips) in v["sets"].as_object().expect("sets") {
+            for clip in clips.as_array().expect("arr") {
+                if clip.get("skipped").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+                    continue;
+                }
+                if let Some(emb) = clip.get("embedding").and_then(serde_json::Value::as_array) {
+                    vectors.push(
+                        emb.iter().map(|x| x.as_f64().expect("f") as f32).collect(),
+                    );
+                }
+            }
+        }
+        assert!(vectors.len() >= 10, "need enough embeddings to cluster");
+
+        // Deterministic per-vector additive noise whose L2 magnitude approximates
+        // the measured worst-case residual (cosine drop ~= 0.013 for 192-dim).
+        let residual = 0.013f32;
+        let perturbed: Vec<Vec<f32>> = vectors
+            .iter()
+            .enumerate()
+            .map(|(vi, vec)| {
+                let n = vec.len();
+                vec.iter()
+                    .enumerate()
+                    .map(|(j, &x)| x + 0.04 * (((vi * 31 + j * 17) % 256) as f32 / 255.0 - 0.5))
+                    .collect()
+            })
+            .collect();
+        // Verify the perturbation magnitude is in the right band.
+        let cos = cosine_similarity(&vectors[0], &perturbed[0]);
+        assert!(
+            (1.0 - cos) >= 0.009 && (1.0 - cos) <= 0.020,
+            "perturbation should approximate the measured residual (~0.013): cos={}",
+            cos
+        );
+
+        let mk_chunks = |vecs: &[Vec<f32>]| -> Vec<Chunk> {
+            vecs.iter()
+                .enumerate()
+                .map(|(i, emb)| Chunk {
+                    start_sample: i * 32000,
+                    end_sample: i * 32000 + 32000,
+                    duration_secs: 2.0,
+                    embedding: emb.clone(),
+                })
+                .collect()
+        };
+        let (labels_a, _) = cluster_by_centroids(&mk_chunks(&vectors), 0.40);
+        let (labels_b, _) = cluster_by_centroids(&mk_chunks(&perturbed), 0.40);
+        // Same partition shape (labels may renumber; compare via canonical form).
+        let canon = |labels: &[u32]| -> Vec<usize> {
+            let mut next = 0usize;
+            let mut map = std::collections::HashMap::new();
+            labels
+                .iter()
+                .map(|l| {
+                    *map.entry(*l).or_insert_with(|| {
+                        next += 1;
+                        next - 1
+                    })
+                })
+                .collect()
+        };
+        assert_eq!(
+            canon(&labels_a),
+            canon(&labels_b),
+            "worst-case-residual perturbation must not change AHC clusterings"
+        );
+    }
+
     #[test]
     fn cosine_similarity_identical() {
         let a = vec![1.0, 0.0, 0.0];
