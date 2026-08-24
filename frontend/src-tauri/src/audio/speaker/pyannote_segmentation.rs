@@ -493,6 +493,45 @@ impl PyannoteSegmentation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Task 2.2 — the segmentation model is actually consumed: a dummy file
+    /// at the model path must fail construction deterministically (a real ONNX
+    /// parse error), not silently proceed.
+    #[test]
+    fn pyannote_session_consumes_segmentation_model() {
+        let dir = std::env::temp_dir().join("pyannote_dummy_fixture");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let dummy = dir.join("dummy-segmentation.onnx");
+        std::fs::write(&dummy, b"this is not a valid onnx model").expect("write dummy");
+
+        let result = PyannoteSegmentation::new(dummy.to_str().unwrap());
+        assert!(result.is_err(), "dummy model must fail construction");
+
+        // And the REAL model (if present) must construct cleanly — presence
+        // of path alone was the old phantom-dependency failure mode.
+        let real = dirs::home_dir()
+            .map(|h| h.join(".meetily-models").join("pyannote-segmentation.onnx"))
+            .filter(|p| p.exists());
+        if let Some(real) = real {
+            assert!(
+                PyannoteSegmentation::new(real.to_str().unwrap()).is_ok(),
+                "real pyannote model must construct"
+            );
+        }
+    }
+
+    /// Task 2.3 — smoothing config is pinned to the validated defaults
+    /// (median rad=3, min_on=0.3s, max_off=0.5s, onset 0.5): the ONLY Phase 2b
+    /// config that hit BOTH known anchors. Asserted as constants so drift is
+    /// caught without a model.
+    #[test]
+    fn pyannote_smooths_at_defaults() {
+        let p = PyannoteParams::default();
+        assert!((p.onset - 0.5).abs() < f32::EPSILON, "onset must be 0.5");
+        assert_eq!(p.median_rad, 3);
+        assert!((p.min_on_secs - 0.3).abs() < 1e-9);
+        assert!((p.max_off_secs - 0.5).abs() < 1e-9);
+    }
+
 
     /// Log-softmax row helper: class k gets logit ln(p_k), others share
     /// log((1-p_k)/(num_classes-1)) — enough structure to exercise hysteresis.
