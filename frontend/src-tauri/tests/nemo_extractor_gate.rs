@@ -366,6 +366,94 @@ async fn nemo_extractor_cosine_gate() {
     eprintln!("GATE: PASS — margin-derived tiered threshold met on all clips");
 }
 
+/// ONE-OFF fixture generator (task 5.1 support): compute the PORTED
+/// extractor's embeddings for every clip in the C5 reference fixture and
+/// write them to `tests/fixtures/nemo_c5_port_embeddings.json`, so
+/// `extractor_only_parity_unconditional` (sherpa_adapter.rs tests) can run
+/// sherpa-vs-port AHC parity WITHOUT the recording or models.
+///
+/// Run once on a machine with the cde5c264 recording + nemo model:
+///   cargo test --release --test nemo_extractor_gate -- --ignored dump_port_embeddings_fixture --nocapture
+/// Then COMMIT the generated JSON.
+#[tokio::test]
+#[ignore]
+async fn dump_port_embeddings_fixture() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/nemo_c5_reference_embeddings.json");
+    let fixture: Fixture =
+        serde_json::from_str(&std::fs::read_to_string(&fixture_path).expect("fixture"))
+            .expect("fixture json");
+
+    let models = dirs::home_dir()
+        .expect("home")
+        .join(".meetily-models")
+        .join(app_lib::audio::speaker::model_download::embedding_filename());
+    assert!(models.exists(), "nemo model missing at {}", models.display());
+    let audio = resolve_audio().await.expect("cde5c264 recording");
+    let extractor =
+        NemoEmbeddingExtractor::new(models.to_str().unwrap()).expect("build extractor");
+    let (native_sr, native_samples) = decode_mono_native(&audio).expect("decode native");
+
+    #[derive(serde::Serialize)]
+    struct PortClip {
+        set: String,
+        id: String,
+        skipped: bool,
+        embedding: Vec<f32>,
+    }
+    let mut clips: Vec<PortClip> = Vec::new();
+    for (set_name, set_clips) in &fixture.sets {
+        for clip in set_clips {
+            let s = ((clip.start_seconds * native_sr as f64).round() as usize)
+                .min(native_samples.len());
+            let e = ((clip.end_seconds * native_sr as f64).round() as usize)
+                .min(native_samples.len());
+            let clip_16k: Vec<f32> = if e <= s {
+                Vec::new()
+            } else {
+                resample_to_16k(&native_samples[s..e], native_sr).expect("resample")
+            };
+            match extractor.extract_embedding(&clip_16k, 16000) {
+                Some(emb) => clips.push(PortClip {
+                    set: set_name.clone(),
+                    id: clip.id.clone(),
+                    skipped: false,
+                    embedding: emb,
+                }),
+                None => clips.push(PortClip {
+                    set: set_name.clone(),
+                    id: clip.id.clone(),
+                    skipped: true,
+                    embedding: Vec::new(),
+                }),
+            }
+        }
+    }
+
+    #[derive(serde::Serialize)]
+    struct PortFixture<'a> {
+        audio_meeting_id: &'a str,
+        note: &'a str,
+        clips: Vec<PortClip>,
+    }
+    let out_fixture = PortFixture {
+        audio_meeting_id: "meeting-cde5c264-1c4a-49d9-97c5-6a7e69bb9323",
+        note: "Ported NemoEmbeddingExtractor (ort) embeddings for every clip of \
+               nemo_c5_reference_embeddings.json, same slice+resample pipeline as the gate. \
+               Companion to the sherpa reference set; consumed by \
+               extractor_only_parity_unconditional.",
+        clips,
+    };
+    let out_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/nemo_c5_port_embeddings.json");
+    std::fs::write(
+        &out_path,
+        serde_json::to_string_pretty(&out_fixture).expect("serialize"),
+    )
+    .expect("write port fixture");
+    eprintln!("DUMP: wrote {}", out_path.display());
+}
+
 /// Task 2.6 — cde5c264 boundary oracle THROUGH THE PRODUCTION MODULE.
 ///
 /// Runs `PyannoteSegmentation::boundary_segments` (the exact code path the

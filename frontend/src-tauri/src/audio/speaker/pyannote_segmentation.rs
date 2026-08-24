@@ -257,7 +257,14 @@ pub(crate) fn intersect_pyannote_with_whisper(
 /// sub-minimum survivors merge only within their own region, NEVER across a
 /// silence gap (design D2 — silence is preserved as silence). A survivor with
 /// no in-region neighbor is kept as-is; `build_chunks` drops sub-`min_secs`
-/// pieces anyway, so at worst a <1.5s sliver of speech goes unembedded.
+/// pieces anyway, so the merge step alone leaves at most <1.5s slivers of
+/// speech unembedded. Positional SHEDDING can additionally drop whole regions
+/// of any length — acceptable because Pass-2 `refine_pass2` re-chunks the
+/// full recording, so shed speech still receives labels downstream.
+///
+/// Assumes `regions` are non-overlapping with unique starts (as produced by
+/// `fetch_transcript_timestamps` grouping) — containment-by-start matching
+/// would double-count pieces into overlapping regions.
 pub(crate) fn shed_boundaries_to_cap(
     segments: Vec<(f64, f64)>,
     regions: &[(f64, f64)],
