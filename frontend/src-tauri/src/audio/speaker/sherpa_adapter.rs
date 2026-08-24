@@ -1425,6 +1425,32 @@ mod tests {
         assert_eq!(result.as_deref(), Some("Alice"));
     }
 
+    /// Task 4.1 (I4, load-bearing): `search` must be a PER-VECTOR best-score
+    /// scan, not a per-speaker centroid match — sherpa parity. Alice has one
+    /// vector close to the query and one orthogonal; her centroid scores only
+    /// 0.6708 against the query, below the 0.75 threshold, so any centroid
+    /// implementation would return None. The per-vector scan must still find
+    /// her (near vector at 0.9487), AND beat Bob whose single vector scores
+    /// 0.8943 — pinning cross-name best-score selection, not first-found.
+    #[test]
+    fn registry_search_per_vector_scan_not_centroid() {
+        let registry = CosineRegistryAdapter::new(4).unwrap();
+        // cos(Q, alice_near) = 3/sqrt(10) ≈ 0.9487; cos(Q, alice_far) = 0;
+        // cos(Q, centroid(alice)) = 0.6708 < 0.75 < 0.9487.
+        let alice_near = EmbeddingVector::from_slice(&[1.0f32, 3.0, 0.0, 0.0], 4).unwrap();
+        let alice_far = EmbeddingVector::from_slice(&[0.0f32, 0.0, 1.0, 0.0], 4).unwrap();
+        registry.add("Alice", &alice_near).unwrap();
+        registry.add("Alice", &alice_far).unwrap();
+        // cos(Q, bob) = 2/sqrt(5) ≈ 0.8943 — above threshold, below Alice.
+        let bob = EmbeddingVector::from_slice(&[1.0f32, 2.0, 0.0, 0.0], 4).unwrap();
+        registry.add("Bob", &bob).unwrap();
+
+        let query = EmbeddingVector::from_slice(&[0.0f32, 1.0, 0.0, 0.0], 4).unwrap();
+        assert_eq!(registry.search(&query, 0.75).unwrap().as_deref(), Some("Alice"));
+        // verify shares the any-single-vector semantics (sherpa parity).
+        assert!(registry.verify("Alice", &query, 0.75).unwrap());
+    }
+
     #[test]
     fn registry_dimension_mismatch_rejected() {
         let registry = CosineRegistryAdapter::new(4).unwrap();
