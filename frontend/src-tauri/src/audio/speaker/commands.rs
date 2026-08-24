@@ -410,8 +410,49 @@ pub async fn run_diarization_for_meeting(
     // 2 s re-chunk assigned to the post-cap centroids, design D1). All three
     // are CPU-bound; offloading keeps detection polls / IPC responsive.
     let t2 = std::time::Instant::now();
+    let segmentation_path_for_pya = segmentation_path.clone();
     let (segments, centroids) = tokio::task::spawn_blocking(move || {
-        let coarse = adapter.process(&samples, DIARIZATION_SAMPLE_RATE, &transcript_segments)?;
+        // Part B: source intra-region splits from in-process pyannote
+        // (design D2/D4). The pyannote session runs INSIDE spawn_blocking —
+        // it is CPU-bound (~240ms/window) and must not block the async
+        // executor. On model-missing/corrupt, fall back to the Whisper
+        // transcript boundaries unchanged: `build_chunks` then applies
+        // `effective_split` exactly as pre-Part-B (the ONLY fallback path).
+        let effective_segments =
+            match super::pyannote_segmentation::PyannoteSegmentation::new(
+                segmentation_path_for_pya.to_str().unwrap_or(""),
+            ) {
+                Ok(pya) => {
+                    let t_pya = std::time::Instant::now();
+                    match pya.boundary_segments(&samples, &transcript_segments, super::sherpa_adapter::max_diarization_chunks()) {
+                        Ok(bounded) => {
+                            log::warn!(
+                                "DIARIZATION: pyannote boundaries in {:.2}s → {} intersected segments (from {} whisper segments)",
+                                t_pya.elapsed().as_secs_f64(),
+                                bounded.len(),
+                                transcript_segments.len()
+                            );
+                            bounded
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "DIARIZATION: pyannote inference failed ({}) — falling back to effective_split grid",
+                                e
+                            );
+                            transcript_segments.clone()
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "DIARIZATION: pyannote unavailable ({}) — falling back to effective_split grid",
+                        e
+                    );
+                    transcript_segments.clone()
+                }
+            };
+
+        let coarse = adapter.process(&samples, DIARIZATION_SAMPLE_RATE, &effective_segments)?;
         let mut segments = coarse.segments;
         let mut centroids = coarse.centroids;
         if !segments.is_empty() {

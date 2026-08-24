@@ -60,6 +60,12 @@ const SPLIT_TARGET_SECS: f64 = 3.0;
 // above 3 s once total speech exceeds 600 × 3 s = 30 min, keeping n bounded so
 // the O(n²) clustering stays sub-second (design D2).
 const MAX_DIARIZATION_CHUNKS: usize = 600;
+
+/// The diarization chunk cap (Part B: enforced at the pyannote-boundary layer,
+/// design D4 — see `pyannote_segmentation::shed_boundaries_to_cap`).
+pub(crate) fn max_diarization_chunks() -> usize {
+    MAX_DIARIZATION_CHUNKS
+}
 const MIN_CLUSTER_FRAC: f64 = 0.02;
 
 // Pass-2 fine re-chunking granularity (design D2). Uniform across the full
