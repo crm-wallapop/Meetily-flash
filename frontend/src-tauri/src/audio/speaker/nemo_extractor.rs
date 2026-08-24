@@ -362,10 +362,14 @@ pub(crate) fn is_effectively_silent(audio: &[f32]) -> bool {
 /// SAME on-disk `nemo-titanet-embedding.onnx` sherpa used — only the loader and
 /// preprocessing runtime changed (both validated to 0.9946+ cosine).
 pub struct NemoEmbeddingExtractor {
-    /// `Session::run` takes `&mut self` in ort 2.0.0-rc.10 — the Mutex lets the
-    /// extractor stay `Send + Sync` behind `&self` (design D1). Fbank/CMVN work
-    /// happens outside the lock; only the forward pass serializes.
-    session: Mutex<Session>,
+    /// `Session::run` takes `&mut self` in ort 2.0.0-rc.10, so sessions sit
+    /// behind Mutexes. A POOL of N independent sessions (round-robin checkout)
+    /// restores rayon-parallel inference for `build_fine_chunks`/`refine_pass2`
+    /// — a single Mutex serialized Pass-2 to 95.9s against its 60s budget
+    /// (task 6.2's documented fallback; ~40 MB per nemo_titanet session).
+    /// Fbank/CMVN work happens outside the locks.
+    sessions: Vec<Mutex<Session>>,
+    next: std::sync::atomic::AtomicUsize,
     audio_input_name: String,
     length_input_name: String,
     emb_output_name: String,
@@ -382,43 +386,58 @@ impl NemoEmbeddingExtractor {
             return Err(anyhow!("embedding model not found: {}", model_path));
         }
 
-        let providers = vec![CPUExecutionProvider::default().build()];
-        let session = Session::builder()
-            .map_err(|e| anyhow!("session builder: {}", e))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| anyhow!("opt level: {}", e))?
-            .with_execution_providers(providers)
-            .map_err(|e| anyhow!("providers: {}", e))?
-            .with_intra_threads(2)
-            .map_err(|e| anyhow!("intra threads: {}", e))?
-            .commit_from_file(&path)
-            .map_err(|e| anyhow!("commit nemo_titanet session: {}", e))?;
-
-        let audio_input_name = session
+        let build_session = || -> Result<Session> {
+            let providers = vec![CPUExecutionProvider::default().build()];
+            Session::builder()
+                .map_err(|e| anyhow!("session builder: {}", e))?
+                .with_optimization_level(GraphOptimizationLevel::Level3)
+                .map_err(|e| anyhow!("opt level: {}", e))?
+                .with_execution_providers(providers.clone())
+                .map_err(|e| anyhow!("providers: {}", e))?
+                .with_intra_threads(2)
+                .map_err(|e| anyhow!("intra threads: {}", e))?
+                .commit_from_file(&path)
+                .map_err(|e| anyhow!("commit nemo_titanet session: {}", e))
+        };
+        // Pool size: min(8, hardware threads) — enough to keep rayon's
+        // par_iter fed during refine_pass2 without unbounded memory.
+        let pool_size = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(1, 8);
+        // First session doubles as the I/O-name introspection source.
+        let first = build_session()?;
+        let audio_input_name = first
             .inputs
             .iter()
             .find(|i| i.name == "audio_signal")
             .ok_or_else(|| anyhow!("model has no 'audio_signal' input"))?
             .name
             .to_string();
-        let length_input_name = session
+        let length_input_name = first
             .inputs
             .iter()
             .find(|i| i.name == "length")
             .ok_or_else(|| anyhow!("model has no 'length' input"))?
             .name
             .to_string();
-        let emb_output_name = session
+        let emb_output_name = first
             .outputs
             .iter()
             .find(|o| o.name == "embs")
-            .or_else(|| session.outputs.iter().find(|o| o.name == "embeddings"))
+            .or_else(|| first.outputs.iter().find(|o| o.name == "embeddings"))
             .ok_or_else(|| anyhow!("model has no 'embs'/'embeddings' output"))?
             .name
             .to_string();
+        let mut sessions = Vec::with_capacity(pool_size);
+        sessions.push(Mutex::new(first));
+        for _ in 1..pool_size {
+            sessions.push(Mutex::new(build_session()?));
+        }
 
         Ok(Self {
-            session: Mutex::new(session),
+            sessions,
+            next: std::sync::atomic::AtomicUsize::new(0),
             audio_input_name,
             length_input_name,
             emb_output_name,
@@ -472,7 +491,13 @@ impl NemoEmbeddingExtractor {
 
         // SessionOutputs borrows the session — extract the owned embedding
         // inside the lock scope, then release.
-        let mut session = self.session.lock().ok()?;
+        // Round-robin over the session pool: concurrent callers (rayon
+        // par_iter) land on distinct sessions and run truly in parallel.
+        let idx = self
+            .next
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % self.sessions.len();
+        let mut session = self.sessions[idx].lock().ok()?;
         let outputs = session.run(inputs).ok()?;
         let out = outputs.get(self.emb_output_name.as_str())?;
         let arr = out.try_extract_array::<f32>().ok()?;
