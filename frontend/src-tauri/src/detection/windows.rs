@@ -543,6 +543,11 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
         // an immutable latch must not survive across calls (design D4).
         self.exit_stable_latch = None;
         self.bc_true_since = None;
+        // Invalidate the "first-seen" gate so the state machine re-evaluates the
+        // next call from scratch instead of seeing a stale "pre-existing" timestamp
+        // that forces immediate re-entry after MeetingEnded — the root cause of the
+        // 20s "Meeting ended" notification loop the user reported.
+        self.connection_first_seen_at = None;
     }
 
     fn current_state(&mut self) -> DetectorObservation {
@@ -1165,6 +1170,42 @@ mod tests {
         let obs = det.current_state();
         assert!(obs.has_meet_connection,
             "after notify_exit(), persistent Otter.ai WASAPI does not block next call");
+    }
+
+    // Regression for the 20s oscillation loop: notify_exit MUST reset
+    // connection_first_seen_at. Without it, the state machine sees
+    // `not_preexisting=true` from a stale stamp and re-enters InCall immediately
+    // after MeetingEnded, producing repeated "Meeting ended" notifications.
+    #[test]
+    fn notify_exit_resets_connection_first_seen_at() {
+        let probes = DetectorProbes {
+            has_turn:    Box::new(|| false),
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            browser_windows: probe_windows(&["Meet - standup"]),
+        };
+        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
+
+        // Poll 1: connection is present; first_seen_at gets stamped.
+        let obs1 = det.current_state();
+        assert!(obs1.connection_first_seen_at.is_some(),
+            "first poll should set connection_first_seen_at");
+        let first_seen = obs1.connection_first_seen_at.unwrap();
+
+        // notify_exit() must invalidate the stamp so the next poll re-evaluates
+        // from scratch instead of seeing a stale "pre-existing" timestamp.
+        det.notify_exit();
+        assert!(det.connection_first_seen_at.is_none(),
+            "notify_exit must reset connection_first_seen_at to None");
+
+        // Next poll: stamp is fresh (re-stamped at the new poll instant, not the
+        // old one — the point is that it is no longer the stale pre-existing
+        // stamp, so the state machine re-evaluates from scratch).
+        let obs2 = det.current_state();
+        assert!(obs2.connection_first_seen_at.is_some(),
+            "post-notify_exit poll must re-stamp connection_first_seen_at");
+        assert!(obs2.connection_first_seen_at.unwrap() >= first_seen,
+            "post-notify_exit stamp must be at or after the pre-notify_exit stamp");
     }
 
     // ── meeting-udp-confidence-debounce — adversarial RED tests ─────────────
