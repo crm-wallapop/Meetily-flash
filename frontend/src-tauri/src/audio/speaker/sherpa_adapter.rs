@@ -1486,6 +1486,125 @@ mod tests {
         assert!(!registry.contains("Alice").unwrap());
     }
 
+    /// Shared fixture plumbing for the single-speaker tests (2.8 / 3.4):
+    /// one synthetic speaker direction with deterministic ~1% perturbation.
+    fn single_speaker_fragments(dim: usize, count: usize, frag_secs: f64) -> Vec<Chunk> {
+        let mut dir = vec![0.0f32; dim];
+        dir[0] = 1.0;
+        (0..count)
+            .map(|i| {
+                let embedding: Vec<f32> = dir
+                    .iter()
+                    .enumerate()
+                    .map(|(j, &d)| d + 0.01 * (((i * 31 + j * 37 + 11) % 256) as f32 / 255.0 - 0.5))
+                    .collect();
+                Chunk {
+                    start_sample: (i as f64 * frag_secs * 16000.0) as usize,
+                    end_sample: ((i + 1) as f64 * frag_secs * 16000.0) as usize,
+                    duration_secs: frag_secs,
+                    embedding,
+                }
+            })
+            .collect()
+    }
+
+    /// Task 2.8 — a single-speaker meeting must yield exactly ONE cluster
+    /// after AHC + temporal-coherence smoothing. The pyannote boundary source
+    /// produces MANY fine candidate fragments on a true monologue (one voice
+    /// still crosses smoothing windows); finer boundaries must NOT manufacture
+    /// a spurious second speaker. Uses post-pyannote granularity (1.5s
+    /// fragments, the MIN_SEGMENT_SECS floor).
+    #[test]
+    fn single_speaker_not_fragmented() {
+        let chunks = single_speaker_fragments(8, 200, 1.5); // 5-min monologue
+        let sr = 16000usize;
+        let embeds: Vec<Vec<f32>> = chunks.iter().map(|c| c.embedding.clone()).collect();
+        let timestamps: Vec<f64> =
+            chunks.iter().map(|c| c.start_sample as f64 / sr as f64).collect();
+        let durations: Vec<f64> = chunks.iter().map(|c| c.duration_secs).collect();
+
+        let (labels, centroids) = cluster_by_centroids(&chunks, 0.40);
+        let (smoothed, _) = smooth_to_fixed_point(
+            &labels,
+            &embeds,
+            &timestamps,
+            &durations,
+            &centroids,
+            &SmoothParams::default(),
+        );
+        let distinct: std::collections::HashSet<u32> = smoothed.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            1,
+            "single-speaker meeting fragmented into {} clusters: {:?}",
+            distinct.len(),
+            distinct
+        );
+    }
+
+    /// Task 3.4 — a long single-speaker meeting whose candidate boundaries hit
+    /// the cap: after uniform shed-to-cap, AHC + smoothing re-coalesces all
+    /// surviving fragments back to ONE speaker (shedding degrades resolution,
+    /// never manufactures speakers).
+    #[test]
+    fn single_speaker_at_cap() {
+        use super::super::pyannote_segmentation::shed_boundaries_to_cap;
+
+        // 45-min monologue at 2s fragments = 1350 candidates > 600 cap.
+        let cap = max_diarization_chunks();
+        let segments: Vec<(f64, f64)> = (0..1350)
+            .map(|i| (i as f64 * 2.0, i as f64 * 2.0 + 2.0))
+            .collect();
+        let regions: Vec<(f64, f64)> = segments.clone();
+        let shed = shed_boundaries_to_cap(segments, &regions, cap, 1.5);
+        assert!(shed.len() <= cap, "shed respects cap: {}", shed.len());
+
+        // Embeddings for SURVIVORS only (the production path embeds exactly
+        // the surviving spans), then AHC + smoothing.
+        let dim = 8usize;
+        let mut dir = vec![0.0f32; dim];
+        dir[0] = 1.0;
+        let noisy = |seed: usize| -> Vec<f32> {
+            dir.iter()
+                .enumerate()
+                .map(|(j, &d)| d + 0.01 * (((seed * 31 + j * 37 + 11) % 256) as f32 / 255.0 - 0.5))
+                .collect()
+        };
+        let chunks: Vec<Chunk> = shed
+            .iter()
+            .enumerate()
+            .map(|(i, (s, e))| Chunk {
+                start_sample: (*s * 16000.0) as usize,
+                end_sample: (*e * 16000.0) as usize,
+                duration_secs: e - s,
+                embedding: noisy(i),
+            })
+            .collect();
+
+        let sr = 16000usize;
+        let embeds: Vec<Vec<f32>> = chunks.iter().map(|c| c.embedding.clone()).collect();
+        let timestamps: Vec<f64> =
+            chunks.iter().map(|c| c.start_sample as f64 / sr as f64).collect();
+        let durations: Vec<f64> = chunks.iter().map(|c| c.duration_secs).collect();
+        let (labels, centroids) = cluster_by_centroids(&chunks, 0.40);
+        let (smoothed, _) = smooth_to_fixed_point(
+            &labels,
+            &embeds,
+            &timestamps,
+            &durations,
+            &centroids,
+            &SmoothParams::default(),
+        );
+        let distinct: std::collections::HashSet<u32> = smoothed.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            1,
+            "monologue at the cap fragmented into {} clusters: {:?}",
+            distinct.len(),
+            distinct
+        );
+    }
+
 
     /// Task 3.2 — THE LOAD-BEARING turn-recovery hypothesis test.
     ///
