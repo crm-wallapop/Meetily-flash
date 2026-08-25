@@ -620,7 +620,48 @@ The submitted name SHALL be persisted via `sqlx` parameterized binding (`?` plac
 - **THEN** the override is cleared along with all other labels (auto and manual), as required by the canonical "Re-diarization cleans up stale state" requirement
 - **AND** this change does not alter that behavior; it inherits it
 
-#### Scenario: Per-segment override is revertible via cluster-level revert (for previously-labeled rows)
+#### Scenario: Speakers button timeout and error recovery
+
+- **GIVEN** a transcript exists with speaker labels
+- **WHEN** the user clicks the "Speakers" re-diarize button
+- **THEN** the system initiates a full re-diarization as documented in "Re-diarization cleans up stale state and resets speaker labels"
+- **AND** the UI disables the button (showing "Analyzing…") and prevents double-clicks to avoid queuing multiple jobs
+- **AND** the system tracks completion via one of three paths:
+  1. The `diarization-complete` event fires → success toast shown and button re-enabled
+  2. The background diarization command completes normally → success toast shown and button re-enabled  
+  3. Neither completes within 5 minutes → timeout error toast shown and button re-enabled (user can retry)
+- **AND** per-meeting `diarization_lock` in the backend ensures only one diarization job runs at a time for the same meeting, preventing parallel execution
+- **AND** if the UI fails to register the `diarization-complete` event listener, the diarization command is still executed and the UI recovers via the 5-minute timeout path
+
+### Requirement: Speakers button timeout and error recovery
+
+When the user clicks the "Speakers" re-diarize button, the system SHALL enforce:
+
+1. **UI safety** – Button is immediately disabled and marked "Analyzing…" to prevent double-clicks; button is re-enabled when any completion path fires or after a 5-minute timeout, whichever comes first
+2. **Completion tracking** – The system SHALL race three completion paths:
+   - The `diarization-complete` event (primary success path)
+   - Completion of the background diarization command (fallback path) 
+   - A 5-minute timeout safety net (for backend crashes / IPC hangs)
+3. **User feedback** – Success (via event or command completion) shows success toast; timeout shows error toast; both cases re-enable the button so the user can retry
+4. **Backend constraints** – The per-meeting `diarization_lock` in `commands.rs` ensures only one diarization job runs at a time for the same meeting, preventing queue buildup or parallel execution
+5. **Error resilience** – If the UI fails to listen for the `diarization-complete` event, the diarization command is still executed and the UI recovers via the 5-minute timeout
+
+#### Scenario: Speakers button timeout (5 minutes)
+
+- **GIVEN** a transcript exists and user clicks "Speakers" button
+- **AND** the backend fails (dev server crash, IPC hang) and neither the `diarization-complete` event nor the command completion occurs within 5 minutes
+- **THEN** the UI shows an error toast: "Re-diarization timed out – the diarization process may have failed. Please try again."
+- **AND** the button is re-enabled so the user can retry the operation
+- **AND** a log entry records the timeout for operational monitoring
+
+#### Scenario: Speakers button timeout recovery
+
+- **GIVEN** a previous "Speakers" button click timed out and user sees the error toast
+- **WHEN** the user clicks the "Speakers" button again
+- **THEN** the system enforces the same timeout and error recovery behavior as the initial click
+- **AND** the new attempt is properly locked by the per-meeting `diarization_lock` if one is still running (if the first attempt's backend process is still running despite the timeout)
+
+This requirement ensures that the Speakers button is resilient to backend failures, provides clear feedback to users, and prevents UI deadlock while respecting the backend's per-meeting execution constraints.
 
 - **GIVEN** a transcript row overridden per-segment from "Speaker 2" to "Carlos", where the row had a non-null `previous_label`
 - **WHEN** the user reverts "Carlos" via the existing badge undo (which calls `revert_speaker_label(meeting_id, "Carlos")`)

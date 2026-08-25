@@ -51,7 +51,22 @@ export function TranscriptButtonGroup({
         }
       );
 
-      await resetSpeakerLabels(meetingId);
+      // Fire the command without awaiting it. If the backend dies mid-pipeline
+      // (dev server crash, command timeout), the await would hang forever and
+      // leave the button stuck on "Analyzing…". The diarization-complete event
+      // is the only completion signal that matters; the command's own Promise
+      // is fire-and-forget so a backend failure can't freeze the UI.
+      // The button stays disabled while the event is awaited (which can take
+      // 20+ minutes for long recordings), and only re-enables on the event
+      // firing or the command explicitly rejecting.
+      resetSpeakerLabels(meetingId).catch((e) => {
+        console.error('Re-diarization failed:', e);
+        toast.error('Re-diarization failed', {
+          description: e instanceof Error ? e.message : String(e),
+        });
+        unlisten();
+        setIsRediarizing(false);
+      });
     } catch (e) {
       console.error('Re-diarization failed:', e);
       toast.error('Re-diarization failed', {
