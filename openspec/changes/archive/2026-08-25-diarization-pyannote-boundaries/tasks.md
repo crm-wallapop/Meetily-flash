@@ -72,4 +72,4 @@ The prior single "AHC parity vs the pre-change sherpa reference" gate conflated 
 - [x] 6.3 — DONE (2026-08-24): boundary oracle (task 2.6) + two-pass oracle both PASS on cde5c264 through the production module with pyannote boundaries enabled; label-quality/temporal-coherence assertions green (commits c2088be, 9ac7a53).
 - [x] 6.4 — DONE (2026-08-24): cargo 549 lib + all integration targets ok (incl. removal gate, hydration gate, extractor-parity); pytest backend 6 ok; vitest 267/23 files (3 clean runs); Playwright e2e 42 passed (incl. speaker-diarization smokes 15.2/15.3/15.6/15.7); clippy clean of new issues (one pre-existing error in audio/capture predates this branch).
 - [x] 6.5 — DONE (2026-08-24): delta amended to match shipped behavior (effective_split survives as >MAX_CHUNK_SECS size guard; cap bound ~2× post-split stated); code-review round confirmed delta == build_chunks exactly.
-- [ ] 6.6 `/opsx:archive` after spec/design reconciliation.
+- [x] 6.6 ARCHIVED 2026-08-25 -> openspec/changes/archive/2026-08-25-diarization-pyannote-boundaries (delta spec synced to main).
