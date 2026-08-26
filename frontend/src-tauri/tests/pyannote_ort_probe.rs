@@ -1666,3 +1666,87 @@ async fn pyannote_cde5c264_alignment_parity() {
     std::fs::write(&path, &out).expect("write");
     eprintln!("ALIGN: report at {}", path.display());
 }
+
+// ============================================================================
+// PHASE 2g: FULL production command - run_diarization_for_meeting against the
+// real DB (with backup), then print the persisted banter rows.
+//
+// WHY: 2f verified alignment in isolation; this runs the ACTUAL Tauri command
+// body (fetch -> intersect -> process -> cap -> pass2 -> align -> persist) so
+// what lands in meeting_minutes.sqlite is exactly what the Speakers button
+// would produce. Backs up the DB first.
+//
+// Run:
+//   cargo test --release --test pyannote_ort_probe -- --ignored --nocapture pyannote_cde5c264_real_persist
+// ============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn pyannote_cde5c264_real_persist() {
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+
+    let db_path = r"C:\Users\CarlosRuizMartínez\AppData\Roaming\com.meetily.ai\meeting_minutes.sqlite";
+
+    // --- Backup DB + WAL/SHM before any write ---
+    for ext in ["", "-wal", "-shm"] {
+        let src = format!("{}{}", db_path, ext);
+        let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+        let dst = format!("{}.bak-{}{}", db_path, stamp, ext);
+        if std::path::Path::new(&src).exists() {
+            std::fs::copy(&src, &dst).expect("backup copy");
+            eprintln!("PERSIST: backed up {} -> {}", src, dst);
+        }
+    }
+
+    let meeting_id = "meeting-cde5c264-1c4a-49d9-97c5-6a7e69bb9323";
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", db_path))
+        .await.expect("DB connect (rw)");
+
+    // Production threshold from the settings table (0.65 live).
+    let threshold: f32 = sqlx::query("SELECT speakerMergeThreshold FROM settings WHERE id = '1'")
+        .fetch_one(&pool).await
+        .map(|r| sqlx::Row::get::<f64, _>(&r, "speakerMergeThreshold") as f32)
+        .unwrap_or(0.50);
+    eprintln!("PERSIST: production speakerMergeThreshold = {}", threshold);
+
+    // Cap resolution happens inside run_diarization_for_meeting
+    // (meetings.max_speakers override -> settings.max_speakers).
+
+    // No cross-meeting registry in probe context (production default is also
+    // None until a speaker is named).
+    let registry = Arc::new(std::sync::Mutex::new(None));
+
+    let threshold_fp = (threshold * 65536.0) as u32;
+    eprintln!("PERSIST: running run_diarization_for_meeting...");
+    let result = app_lib::audio::speaker::commands::run_diarization_for_meeting(
+        &pool, meeting_id, threshold_fp, registry,
+    ).await.expect("run_diarization_for_meeting");
+    eprintln!("PERSIST: {} speakers, {} segments labeled",
+        result.speaker_count, result.segments_labeled);
+
+    // --- Print the persisted banter rows and 2818 coverage ---
+    #[derive(sqlx::FromRow)]
+    struct Row { start: f64, end: f64, speaker: Option<String>, text: String }
+    let rows = sqlx::query_as::<_, Row>(
+        "SELECT audio_start_time as start, audio_end_time as end, speaker_label as speaker, transcript as text \
+         FROM transcripts WHERE meeting_id = ? AND audio_start_time < 35 ORDER BY audio_start_time ASC")
+        .bind(meeting_id).fetch_all(&pool).await.expect("fetch banter");
+    println!("\n=== PERSISTED BANTER ROWS ===");
+    for r in rows {
+        println!("  [{:7.2} - {:7.2}] {:<12} {}",
+            r.start, r.end, r.speaker.as_deref().unwrap_or("?"),
+            &r.text[..r.text.len().min(70)]);
+    }
+    let rows = sqlx::query_as::<_, Row>(
+        "SELECT audio_start_time as start, audio_end_time as end, speaker_label as speaker, transcript as text \
+         FROM transcripts WHERE meeting_id = ? AND audio_start_time BETWEEN 2790 AND 2830 ORDER BY audio_start_time ASC")
+        .bind(meeting_id).fetch_all(&pool).await.expect("fetch 2818");
+    println!("\n=== PERSISTED ROWS AROUND 46:58 (2818s) ===");
+    for r in rows {
+        println!("  [{:7.2} - {:7.2}] {:<12} {}",
+            r.start, r.end, r.speaker.as_deref().unwrap_or("?"),
+            &r.text[..r.text.len().min(70)]);
+    }
+    pool.close().await;
+}
