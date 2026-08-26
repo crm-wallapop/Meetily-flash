@@ -38,8 +38,16 @@ static GOOGLE_V4_CIDRS: &[&str] = &[
 ];
 
 /// TURN/relay-server-only CIDRs — a strict subset of GOOGLE_V4_CIDRS.
-/// These ranges host WebRTC relay servers and are only active during a live call;
-/// the Meet lobby page never connects to them. Used for "still in call" detection.
+///
+/// WARNING — these ranges are NOT actually call-only: `34.64.0.0/10` is general
+/// Google Cloud hosting (~16.7M addresses) and `35.190.0.0/17`, `35.191.0.0/16`,
+/// `130.211.0.0/22` are Cloud Load-Balancer frontend ranges shared by countless
+/// unrelated services. A browser idling on any GCP-hosted site produces a
+/// persistent match with no call in progress (2026-08-26 false-positive
+/// incident: recording auto-started + 20 s detected→ended notification loop).
+/// Callers MUST therefore conjoin this signal with an active browser capture
+/// session (`bc`) before treating it as in-call evidence; network presence
+/// alone is never sufficient for entry.
 static TURN_V4_CIDRS: &[&str] = &[
     "34.64.0.0/10",
     "35.190.0.0/17",
