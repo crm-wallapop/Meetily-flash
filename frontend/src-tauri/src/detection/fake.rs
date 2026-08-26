@@ -72,7 +72,6 @@ impl FakeDetectorHandle {
                     // conservative app-start (D15) guard does not suppress detection.
                     connection_first_seen_at: Some(std::time::Instant::now()),
                     default_title: resolved,
-                    is_turn_exit: false,
                     // Default false = conservative 15 s debounce. The fake adapter drives
                     // no real bc signal, so without an explicit override every simulated
                     // call behaves as if transient-prone (today's behaviour). A test that
@@ -124,7 +123,6 @@ mod tests {
         DetectorSettings {
             debounce_duration: Duration::from_millis(50),
             stable_udp_debounce_duration: Duration::from_millis(50),
-            turn_debounce_duration: Duration::from_millis(50),
         }
     }
 
@@ -195,7 +193,6 @@ mod tests {
             DetectorSettings {
                 debounce_duration: Duration::from_millis(5),
                 stable_udp_debounce_duration: Duration::from_millis(5),
-                turn_debounce_duration: Duration::from_millis(5),
             },
             suppress,
         );
@@ -239,7 +236,6 @@ mod tests {
         let settings = DetectorSettings {
             debounce_duration: Duration::from_millis(400),           // LONG
             stable_udp_debounce_duration: Duration::from_millis(60), // SHORT
-            turn_debounce_duration: Duration::from_millis(400),
         };
         let det = spawn_detector(
             fake,
@@ -257,7 +253,6 @@ mod tests {
         {
             let mut g = handle.0.lock().unwrap();
             g.has_browser_capture_session = false;
-            g.is_turn_exit = false;
             g.stable_capture = false;
         }
 
