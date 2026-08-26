@@ -157,14 +157,52 @@ impl DiarizationPort for OrtDiarizationAdapter {
             let timestamps: Vec<f64> =
                 chunks.iter().map(|c| c.start_sample as f64 / sr_f).collect();
             let durations: Vec<f64> = chunks.iter().map(|c| c.duration_secs).collect();
-            smooth_to_fixed_point(
+
+            // Env-gated stage trace (probe support): MEETIFY_DIARIZE_WINDOW="a,b"
+            // prints per-chunk labels within [a,b) at each stage so absorption
+            // points can be attributed without a debugger.
+            let trace_window: Option<(f64, f64)> = std::env::var("MEETIFY_DIARIZE_WINDOW").ok()
+                .and_then(|v| {
+                    let mut it = v.split(',');
+                    let a: f64 = it.next()?.trim().parse().ok()?;
+                    let b: f64 = it.next()?.trim().parse().ok()?;
+                    Some((a, b))
+                });
+            if let Some((w0, w1)) = trace_window {
+                eprintln!("TRACE[pre-smooth] chunks in [{w0},{w1}):");
+                for (i, c) in chunks.iter().enumerate() {
+                    let st = c.start_sample as f64 / sr_f;
+                    let en = st + c.duration_secs;
+                    if st < w1 && en > w0 {
+                        eprintln!("  [{st:.2}-{en:.2}] label={}", labels[i]);
+                    }
+                }
+            }
+
+            let out = smooth_to_fixed_point(
                 &labels,
                 &embeddings,
                 &timestamps,
                 &durations,
                 &cluster_centroids,
                 &SmoothParams::default(),
-            )
+            );
+
+            if let Some((w0, w1)) = trace_window {
+                // Recompute chunk order view post-smooth.
+                let mut indexed: Vec<(usize, u32)> = out.0.iter().copied().enumerate().collect();
+                indexed.sort_by_key(|(i, _)| chunks[*i].start_sample);
+                eprintln!("TRACE[post-smooth] chunks in [{w0},{w1}):");
+                for (i, l) in indexed {
+                    let st = chunks[i].start_sample as f64 / sr_f;
+                    let en = st + chunks[i].duration_secs;
+                    if st < w1 && en > w0 {
+                        eprintln!("  [{st:.2}-{en:.2}] label={l}");
+                    }
+                }
+            }
+
+            out
         };
         let n_clusters: std::collections::HashSet<u32> = labels.iter().copied().collect();
         log::info!(
@@ -359,7 +397,8 @@ impl OrtDiarizationAdapter {
     // AHC — every label is drawn from `final_centroids`, so the speaker cap
     // stays satisfied. Returns fine segments; the post-cap centroids stay
     // valid (commands.rs prunes any a speaker no longer uses).
-    pub(crate) fn refine_pass2(
+    /// pub for the cde5c264 probe integration tests (production parity checks).
+    pub fn refine_pass2(
         &self,
         samples: &[f32],
         sample_rate: u32,
@@ -581,6 +620,58 @@ fn merge_short_speakers(
                 speaker_dur[short_id],
                 target,
             );
+        }
+    }
+
+    // Env-gated consolidation trace + pre-merge snapshot (probe support):
+    // MEETIFY_MERGE_DUMP=<path> writes the pre-merge segments and centroids so
+    // consolidation policies can be simulated offline without re-running
+    // inference. Every merge decision is echoed to stderr when set.
+    if let Ok(dump_path) = std::env::var("MEETIFY_MERGE_DUMP") {
+        eprintln!(
+            "MERGE: min_dur={:.1}s; {} speakers ({} short):",
+            min_dur,
+            speaker_dur.len(),
+            short_speakers.len(),
+        );
+        let mut durs: Vec<(u32, f64)> =
+            speaker_dur.iter().map(|(&id, &d)| (id, d)).collect();
+        durs.sort_by_key(|&(id, _)| id);
+        for (id, dur) in &durs {
+            let short = *dur < min_dur;
+            eprintln!(
+                "  cluster {} total={:.1}s{} nn_target={:?}",
+                id,
+                dur,
+                if short { " [SHORT]" } else { "" },
+                remap.get(id).copied(),
+            );
+        }
+        let json = serde_json::json!({
+            "min_dur_secs": min_dur,
+            "total_audio_secs": total_audio_secs,
+            "cluster_durations": durs.iter().map(|(id, d)| serde_json::json!({
+                "speaker": id, "total_secs": d, "short": d < &min_dur,
+            })).collect::<Vec<_>>(),
+            "segments": segments.iter().map(|s| serde_json::json!({
+                "start": s.start_seconds, "end": s.end_seconds, "speaker": s.speaker_id,
+            })).collect::<Vec<_>>(),
+            // (short_id -> [(long_id, cosine), ...]) so consolidation policies
+            // (floors, similarity gates) can be simulated offline.
+            "short_long_sims": short_speakers.iter().map(|&sid| {
+                serde_json::json!({
+                    "short": sid,
+                    "dur": speaker_dur.get(&sid).copied().unwrap_or(0.0),
+                    "sims": long_speakers.iter().filter_map(|&lid| {
+                        let sc = centroids.get(&sid)?;
+                        let lc = centroids.get(&lid)?;
+                        Some((lid, cosine_similarity(sc, lc)))
+                    }).collect::<Vec<_>>(),
+                })
+            }).collect::<Vec<_>>(),
+        });
+        if let Ok(()) = std::fs::write(&dump_path, serde_json::to_string_pretty(&json).unwrap_or_default()) {
+            eprintln!("MERGE: pre-merge snapshot written to {}", dump_path);
         }
     }
 
@@ -827,6 +918,25 @@ const MIN_SMOOTH_SEGMENT_SECS: f64 = 10.0;
 const SMOOTH_CONFIDENCE_MARGIN: f32 = 0.03;
 const SMOOTH_MAX_ITERS: usize = 2;
 const SMOOTH_SELF_WEIGHT: f32 = 0.6;
+/// Confidence gate for the temporal vote: a chunk whose OWN embedding has
+/// cosine >= this value to its current label's centroid is real acoustic
+/// evidence for that speaker and must not be out-voted by neighbours, no
+/// matter how lopsided the neighbourhood. Without it, a lone 2s utterance by
+/// a second speaker between two runs of the dominant voice is buried 6:1 and
+/// the whole exchange persists as one flat speaker (cde5c264 banter,
+/// 2026-08-26). Calibrated on that recording: the two minority fragments sit
+/// at self-similarity 0.564/0.623; contaminated or mixed chunks — the case
+/// smoothing exists to fix — score lower and remain correctable.
+const SMOOTH_SELF_SIM_PROTECT: f32 = 0.55;
+/// Max run length (chunks) eligible for turn protection: real short turns are
+/// isolated islands; confidently-wrong drift is a LONG run of chunks, which
+/// must stay vote-fixable. cde5c264 banter islands are 1 chunk; the drift
+/// fixtures run 20.
+const SMOOTH_PROTECT_RUN_CHUNKS: usize = 2;
+/// Protection requires the chunk's embedding to favour its current centroid
+/// over the flip target's by more than this margin. The flicker fixture's
+/// chunks are equidistant to both centroids (gap 0) so they stay correctable.
+const SMOOTH_PROTECT_WINNER_MARGIN: f32 = 0.10;
 
 pub(crate) struct SmoothParams {
     pub(crate) window: usize,
@@ -834,6 +944,18 @@ pub(crate) struct SmoothParams {
     pub(crate) confidence_margin: f32,
     pub(crate) self_weight: f32,
     pub(crate) max_iters: usize,
+    /// Chunks with self-similarity >= this value are protected from flipping
+    /// (see SMOOTH_SELF_SIM_PROTECT).
+    pub(crate) self_sim_protect: f32,
+    /// A chunk is only protected while its run in the original labels is at
+    /// most this many chunks; long runs are exactly the drift case the vote
+    /// must remain able to fix (see SMOOTH_PROTECT_RUN_CHUNKS).
+    pub(crate) protect_run_chunks: usize,
+    /// Protection additionally requires the chunk's embedding to favour its
+    /// current centroid over the flip target's by this margin; flicker ties
+    /// (equal similarity) must stay correctable (see
+    /// SMOOTH_PROTECT_WINNER_MARGIN).
+    pub(crate) protect_winner_margin: f32,
 }
 
 impl Default for SmoothParams {
@@ -844,6 +966,9 @@ impl Default for SmoothParams {
             confidence_margin: SMOOTH_CONFIDENCE_MARGIN,
             self_weight: SMOOTH_SELF_WEIGHT,
             max_iters: SMOOTH_MAX_ITERS,
+            self_sim_protect: SMOOTH_SELF_SIM_PROTECT,
+            protect_run_chunks: SMOOTH_PROTECT_RUN_CHUNKS,
+            protect_winner_margin: SMOOTH_PROTECT_WINNER_MARGIN,
         }
     }
 }
@@ -872,6 +997,24 @@ pub(crate) fn smooth_labels_temporal(
     let mut out = labels.to_vec();
     let w = params.window;
 
+    // Run length of each chunk along the temporal order (original labels).
+    // Used by the turn-protection gate: only SHORT runs of a label are
+    // eligible (long confident runs are the drift case that must stay fixable).
+    let mut run_len_of = vec![1usize; labels.len()];
+    if !order.is_empty() {
+        let mut run_start = 0usize;
+        for pos in 1..=order.len() {
+            let boundary = pos == order.len() || labels[order[pos]] != labels[order[run_start]];
+            if boundary {
+                let len = pos - run_start;
+                for q in run_start..pos {
+                    run_len_of[order[q]] = len;
+                }
+                run_start = pos;
+            }
+        }
+    }
+
     for pos in 0..order.len() {
         let i = order[pos];
         let lo = pos.saturating_sub(w);
@@ -896,6 +1039,19 @@ pub(crate) fn smooth_labels_temporal(
         }
         let cur = labels[i];
         let cur_score = score_sum.get(&cur).copied().unwrap_or(0.0) / total_w;
+        // Confidence gate (run-aware): a chunk that is (a) part of a SHORT run
+        // of its label, (b) acoustically confident about that label, and (c)
+        // whose embedding favours the current centroid over the flip target's,
+        // is a real speaker turn — not noise, not contamination drift. Drift
+        // runs are long (rule a), flicker ties its label and target (rule c),
+        // and ambiguous chunks fail (rule b), so all prior behaviours hold.
+        let self_sim = if embeddings[i].iter().all(|x| x.is_finite()) {
+            centroids.get(&cur)
+                .map(|c| cosine_similarity(&embeddings[i], c))
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
         // Deterministic winner: highest score, ties broken by smallest label, so
         // output is independent of HashMap iteration order (required by the spec).
         let mut winner: Option<(u32, f32)> = None;
@@ -912,13 +1068,22 @@ pub(crate) fn smooth_labels_temporal(
         }
         if let Some((wk, ws)) = winner {
             let win_score = ws / total_w;
-            if wk != cur && win_score > cur_score + params.confidence_margin {
+            let protected = run_len_of[i] <= params.protect_run_chunks
+                && self_sim >= params.self_sim_protect
+                && centroids.get(&wk).map_or(true, |wc| {
+                    self_sim - cosine_similarity(&embeddings[i], wc)
+                        > params.protect_winner_margin
+                });
+            if wk != cur
+                && win_score > cur_score + params.confidence_margin
+                && !protected
+            {
                 out[i] = wk;
             }
         }
     }
 
-    enforce_min_segment_floor(&mut out, &order, durations, params);
+    enforce_min_segment_floor(&mut out, &order, durations, embeddings, centroids, params);
     out
 }
 
@@ -998,11 +1163,28 @@ fn enforce_min_segment_floor(
     labels: &mut [u32],
     order: &[usize],
     durations: &[f64],
+    embeddings: &[Vec<f32>],
+    centroids: &HashMap<u32, Vec<f32>>,
     params: &SmoothParams,
 ) {
     if order.is_empty() {
         return;
     }
+    // Self-similarity per chunk against its current label's centroid, guarded
+    // for degenerate embeddings. Chunks at or above the confidence gate are
+    // real acoustic evidence and exempt the whole run from floor absorption:
+    // a confident 2s utterance between two runs of another speaker is a real
+    // turn, not flicker (cde5c264 banter, 2026-08-26).
+    let self_sims: Vec<f32> = order.iter().map(|&i| {
+        if embeddings[i].iter().all(|x| x.is_finite()) {
+            centroids.get(&labels[i])
+                .map(|c| cosine_similarity(&embeddings[i], c))
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        }
+    }).collect();
+
     loop {
         let runs = runs_along_order(labels, order);
         let mut merged = false;
@@ -1016,6 +1198,20 @@ fn enforce_min_segment_floor(
             let right = runs.get(ri + 1).map(|t| t.2);
             if let (Some(l), Some(r)) = (left, right) {
                 if l == r && l != rl {
+                    // Exempt the run only if some chunk is confident in its
+                    // own label AND its embedding favours that label over the
+                    // absorbing label. Flicker singletons tie (gap 0) and stay
+                    // collapsible; a real turn is strictly closer to home.
+                    let confident = (rs..=re).any(|p| {
+                        self_sims[p] >= params.self_sim_protect
+                            && centroids.get(&l).map_or(true, |lc| {
+                                self_sims[p] - cosine_similarity(&embeddings[order[p]], lc)
+                                    > params.protect_winner_margin
+                            })
+                    });
+                    if confident {
+                        continue;
+                    }
                     for p in rs..=re {
                         labels[order[p]] = l;
                     }
@@ -2666,6 +2862,19 @@ mod tests {
         e
     }
 
+    /// Unit vector with `w` weight along `axis` plus the remainder on a private
+    /// axis, so `cosine(e, emb(axis, dim)) == w` exactly.
+    fn blend(axis: usize, w: f32, dim: usize) -> Vec<f32> {
+        let mut e = vec![0.0f32; dim];
+        if axis < dim {
+            e[axis] = w;
+        }
+        let private = if axis + 1 < dim { axis + 1 } else { 0 };
+        let rest = (1.0 - w * w).sqrt();
+        e[private] = rest;
+        e
+    }
+
     fn ts_seq(n: usize, step: f64) -> Vec<f64> {
         (0..n).map(|i| i as f64 * step).collect()
     }
@@ -2974,6 +3183,65 @@ mod tests {
             recovered,
             single_recovered
         );
+    }
+
+    // ── 2026-08-26 banter regression: confident minority islands ──────────
+    //
+    // Ground truth (cde5c264): a 2s utterance by a second speaker sits between
+    // two runs of the dominant speaker. pass2's temporal vote buried it 6-to-1
+    // and the whole 24s window persisted as one flat label. A chunk whose OWN
+    // embedding confidently matches its current centroid (cosine >= gate) is
+    // real evidence, not noise, and must not be out-voted.
+
+    #[test]
+    fn smooth_keeps_confident_minority_island_between_majority_runs() {
+        let dim = 4;
+        let c0 = emb(0, dim);
+        let c1 = emb(1, dim);
+        // Minority chunk: cosine 0.6 to its own centroid c1 (>= 0.55 gate).
+        let minority = blend(1, 0.6, dim);
+        let mut labels = vec![0u32; 3];
+        labels.push(1u32);
+        labels.extend(vec![0u32; 3]);
+        let n = labels.len();
+        let mut embeddings: Vec<Vec<f32>> = vec![c0.clone(); 3];
+        embeddings.push(minority);
+        embeddings.extend(vec![c0.clone(); 3]);
+        let timestamps = ts_seq(n, 2.0);
+        let durations = vec![2.0f64; n];
+        let centroids = centroids_from(&[(0, c0.clone()), (1, c1.clone())]);
+        let out = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        assert_eq!(out[3], 1,
+            "confident minority chunk must keep its label against a 6:1 neighbourhood vote");
+        // Majority runs untouched.
+        assert!(out[..3].iter().all(|&l| l == 0) && out[4..].iter().all(|&l| l == 0));
+    }
+
+    #[test]
+    fn smooth_still_flips_low_confidence_minority_island() {
+        let dim = 4;
+        let c0 = emb(0, dim);
+        let c1 = emb(1, dim);
+        // Low-confidence minority: cosine only 0.3 to c1 (below gate) — this is
+        // the contamination/noise case smoothing exists to fix. It MUST flip.
+        let noisy = blend(1, 0.3, dim);
+        let mut labels = vec![0u32; 3];
+        labels.push(1u32);
+        labels.extend(vec![0u32; 3]);
+        let n = labels.len();
+        let mut embeddings: Vec<Vec<f32>> = vec![c0.clone(); 3];
+        embeddings.push(noisy);
+        embeddings.extend(vec![c0.clone(); 3]);
+        let timestamps = ts_seq(n, 2.0);
+        let durations = vec![2.0f64; n];
+        let centroids = centroids_from(&[(0, c0.clone()), (1, c1.clone())]);
+        let out = smooth_labels_temporal(
+            &labels, &embeddings, &timestamps, &durations, &centroids, &SmoothParams::default(),
+        );
+        assert_eq!(out[3], 0,
+            "low-confidence island must still be absorbed (de-contamination preserved)");
     }
 
     // Task 3.2 — termination: the fixed-point loop always returns (max_iters cap),

@@ -1183,3 +1183,486 @@ async fn pyannote_cde5c264_ahc_reclustering() {
 
 // ============================================================================
 
+
+// ============================================================================
+// PHASE 2d: Path B through FULL production post-processing (cap + refine_pass2).
+//
+// WHY: Phase 2c compared raw adapter.process() outputs. Production additionally
+// runs enforce_max_speakers_cap(meeting override) + refine_pass2. Ground truth:
+// this meeting has EXACTLY 3 speakers; Phase 2c's raw Path B produced 4
+// (oversplit) and appeared to lose the 46:58 interjection. This probe answers,
+// with production parity on BOTH paths:
+//   1. final distinct-speaker count == 3?
+//   2. banter 5.7-32.5s split into >1 speaker?
+//   3. which final segment COVERS 2818s (46:58), what label, what span?
+//      (Phase 2c filtered by segment START within +-10s - an absorbed span
+//       would have been miscounted as "lost".)
+//
+// Run:
+//   cargo test --release --test pyannote_ort_probe -- --ignored --nocapture pyannote_cde5c264_production_parity
+// ============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn pyannote_cde5c264_production_parity() {
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+    use app_lib::audio::speaker::commands::enforce_max_speakers_cap;
+    use app_lib::audio::speaker::diarization::DiarizationPort;
+
+    // --- Audio + transcript grid (identical to Phase 2c) ---
+    let db_path = r"C:\Users\CarlosRuizMartínez\AppData\Roaming\com.meetily.ai\meeting_minutes.sqlite";
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=ro", db_path))
+        .await
+        .expect("DB connect");
+    let meeting_id = "meeting-cde5c264-1c4a-49d9-97c5-6a7e69bb9323";
+    let row = sqlx::query("SELECT folder_path FROM meetings WHERE id = ?")
+        .bind(meeting_id).fetch_optional(&pool).await.expect("fetch meeting");
+    let folder = row.and_then(|r| sqlx::Row::get::<Option<String>, _>(&r, "folder_path")).expect("folder_path");
+
+    let audio_dir = std::path::Path::new(&folder);
+    let audio_path = ["audio.mp4", "audio.wav", "audio.m4a", "audio.mp3"].iter()
+        .map(|n| audio_dir.join(n)).find(|p| p.exists())
+        .unwrap_or_else(|| panic!("no audio in {}", folder));
+    let decoded = app_lib::audio::decoder::decode_audio_file(&audio_path).expect("decode");
+    let samples = decoded.to_whisper_format();
+    let audio_duration = decoded.duration_seconds.max(0.001);
+
+    let transcript_segments: Vec<(f64, f64)> = {
+        let rows = sqlx::query(
+            "SELECT audio_start_time, audio_end_time FROM transcripts \
+             WHERE meeting_id = ? ORDER BY audio_start_time ASC")
+            .bind(meeting_id).fetch_all(&pool).await.expect("fetch transcripts");
+        rows.into_iter().filter_map(|r| {
+            let s: Option<f64> = sqlx::Row::get(&r, "audio_start_time");
+            let e: Option<f64> = sqlx::Row::get(&r, "audio_end_time");
+            match (s, e) {
+                (Some(a), Some(b)) if a < b && a >= 0.0 && b <= audio_duration + 1.0 => Some((a, b)),
+                _ => None,
+            }
+        }).collect()
+    };
+    drop(pool);
+    eprintln!("PARITY: {} transcript segments", transcript_segments.len());
+
+    // --- Adapter (production threshold 0.40) ---
+    let home = dirs::home_dir().expect("home").join(".meetily-models");
+    let emb_path = home.join(app_lib::audio::speaker::model_download::embedding_filename());
+    let seg_path = home.join("pyannote-segmentation.onnx");
+    assert!(emb_path.exists() && seg_path.exists());
+    let threshold_fp = Arc::new(AtomicU32::new((0.40f32 * 65536.0) as u32));
+    let adapter = app_lib::audio::speaker::sherpa_adapter::OrtDiarizationAdapter::with_shared_threshold(
+        emb_path.to_str().unwrap(), seg_path.to_str().unwrap(), threshold_fp,
+    ).expect("adapter");
+
+    const CAP: usize = 3;
+
+    /// Production post-processing: cap to the meeting override, then Pass-2 refine.
+    fn production_post(
+        adapter: &app_lib::audio::speaker::sherpa_adapter::OrtDiarizationAdapter,
+        samples: &[f32],
+        coarse: app_lib::audio::speaker::diarization::DiarizationOutput,
+    ) -> Vec<app_lib::audio::speaker::types::SpeakerSegment> {
+        let mut segments = coarse.segments;
+        let mut centroids = coarse.centroids;
+        if !segments.is_empty() {
+            enforce_max_speakers_cap(&mut centroids, &mut segments, CAP);
+            if !centroids.is_empty() {
+                segments = adapter.refine_pass2(samples, 16000, &centroids)
+                    .expect("refine_pass2");
+                let used: std::collections::HashSet<u32> =
+                    segments.iter().map(|s| s.speaker_id).collect();
+                centroids.retain(|k, _| used.contains(k));
+            }
+        }
+        eprintln!("PARITY: post-cap clusters: {}", centroids.len());
+        segments
+    }
+
+    fn sorted_labels(set: &std::collections::HashSet<u32>) -> Vec<u32> {
+        let mut v: Vec<u32> = set.iter().copied().collect();
+        v.sort();
+        v
+    }
+
+    fn report(name: &str, segs: &[app_lib::audio::speaker::types::SpeakerSegment]) -> String {
+        let labels: std::collections::HashSet<u32> = segs.iter().map(|s| s.speaker_id).collect();
+        let banter: Vec<&app_lib::audio::speaker::types::SpeakerSegment> = segs.iter()
+            .filter(|s| s.start_seconds < 32.5 && s.end_seconds > 5.7).collect();
+        let banter_labels: std::collections::HashSet<u32> = banter.iter().map(|s| s.speaker_id).collect();
+        let covering: Vec<&app_lib::audio::speaker::types::SpeakerSegment> = segs.iter()
+            .filter(|s| s.start_seconds <= 2818.0 && s.end_seconds >= 2818.0).collect();
+        let mut out = format!(
+            "## {name}\n- total segments: {}\n- distinct speakers: {:?}\n- banter 5.7-32.5s coverage: {} segments, labels {:?}\n",
+            segs.len(),
+            sorted_labels(&labels),
+            banter.len(),
+            sorted_labels(&banter_labels),
+        );
+        for c in &covering {
+            out.push_str(&format!("- covers 2818s: [{:.1} - {:.1}] label=Speaker {}\n",
+                c.start_seconds, c.end_seconds, c.speaker_id));
+        }
+        if covering.is_empty() {
+            out.push_str("- covers 2818s: NONE FOUND\n");
+        }
+        out
+    }
+
+    let mut report_text = format!("# production-parity probe (cap={CAP} + refine_pass2)\n\n");
+
+    // --- Path A: transcript grid through full production flow ---
+    eprintln!("PARITY: Path A coarse...");
+    let out_a = adapter.process(&samples, 16000, &transcript_segments).expect("Path A");
+    let final_a = production_post(&adapter, &samples, out_a);
+    report_text.push_str(&report("Path A (transcript grid, production)", &final_a));
+    report_text.push('\n');
+
+    // --- Path B: pyannote fragment grid through full production flow ---
+    let providers = vec![ort::execution_providers::CPUExecutionProvider::default().build()];
+    let session = ort::session::Session::builder().expect("builder")
+        .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+        .expect("opt")
+        .with_execution_providers(providers).expect("providers")
+        .with_intra_threads(1).expect("threads")
+        .commit_from_file(&seg_path).expect("load pyannote");
+    let input_name = session.inputs[0].name.to_string();
+    let output_name = session.outputs[0].name.to_string();
+    let mut session = session;
+
+    const SAMPLE_RATE: usize = 16000;
+    const WINDOW_SAMPLES: usize = 160000;
+    const STEP_SAMPLES: usize = 16000;
+    const FRAME_SHIFT_SECS: f64 = 270.0 / 16000.0;
+    const RECEPTIVE_OFFSET_SECS: f64 = 721.0 / 16000.0;
+    const ONSET: f32 = 0.5;
+
+    let total_windows = if samples.len() > WINDOW_SAMPLES {
+        (samples.len() - WINDOW_SAMPLES) / STEP_SAMPLES + 1
+    } else { 1 };
+    eprintln!("PARITY: Path B inferring {} windows...", total_windows);
+
+    let mut cached: Vec<(f64, Vec<f32>)> = Vec::new();
+    for win_idx in 0..total_windows {
+        let start = win_idx * STEP_SAMPLES;
+        let end = (start + WINDOW_SAMPLES).min(samples.len());
+        if end - start < 16000 { break; }
+        let win_start_secs = start as f64 / SAMPLE_RATE as f64;
+        let mut window = vec![0.0f32; WINDOW_SAMPLES];
+        window[..end - start].copy_from_slice(&samples[start..end]);
+        let input_3d: ndarray::Array3<f32> = ndarray::Array1::from(window)
+            .into_shape_with_order([1, 1, WINDOW_SAMPLES]).unwrap();
+        let tensor_ref = ort::value::TensorRef::from_array_view(input_3d.view()).expect("tensor");
+        let inputs = ort::inputs![input_name.as_str() => tensor_ref];
+        let outputs = session.run(inputs).expect("forward");
+        let output = outputs.get(output_name.as_str()).expect("output");
+        let arr = output.try_extract_array::<f32>().expect("extract");
+        let shape = arr.shape();
+        let sl = arr.as_slice().unwrap_or_else(|| arr.to_slice().unwrap());
+        cached.push((win_start_secs, sl[..shape[1] * shape[2]].to_vec()));
+    }
+
+    let mut raw_activity: Vec<[bool; 3]> = Vec::new();
+    for &(win_start_secs, ref logits) in &cached {
+        let num_classes = 7;
+        let num_frames = logits.len() / num_classes;
+        let window_activity = decode_multilabel_with_hysteresis(logits, num_frames, ONSET, ONSET);
+        for (i, &act) in window_activity.iter().enumerate() {
+            let abs_secs = win_start_secs + RECEPTIVE_OFFSET_SECS + (i as f64) * FRAME_SHIFT_SECS;
+            let frame_idx = (abs_secs / FRAME_SHIFT_SECS).round() as usize;
+            while raw_activity.len() <= frame_idx { raw_activity.push([false; 3]); }
+            raw_activity[frame_idx] = act;
+        }
+    }
+    const FPS: f64 = 1.0 / FRAME_SHIFT_SECS;
+    let sec_to_frames = |s: f64| (s * FPS).round() as usize;
+    let med = median_filter_per_speaker(&raw_activity, 3);
+    let gated = duration_gates_per_speaker(&med, sec_to_frames(0.3), sec_to_frames(0.5));
+    let cps = change_points(&gated, FRAME_SHIFT_SECS, 0.0);
+    let mut bounds = vec![0.0f64];
+    bounds.extend(cps.iter().copied().filter(|&t| t > 0.0 && t < audio_duration));
+    bounds.push(audio_duration);
+    bounds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    bounds.dedup_by(|a, b| (*a - *b).abs() < 0.05);
+    let pyannote_segments: Vec<(f64, f64)> = bounds.windows(2)
+        .map(|w| (w[0], w[1]))
+        .filter(|(st, en)| en - st >= 0.1)
+        .collect();
+    eprintln!("PARITY: Path B {} fragments, running coarse...", pyannote_segments.len());
+
+    let out_b = adapter.process(&samples, 16000, &pyannote_segments).expect("Path B");
+    let final_b = production_post(&adapter, &samples, out_b);
+    report_text.push_str(&report("Path B (pyannote grid, production post)", &final_b));
+
+    let out = std::env::temp_dir().join("cde5c264_production_parity.txt");
+    std::fs::write(&out, &report_text).expect("write report");
+    eprintln!("PARITY: report at {}", out.display());
+}
+
+// ============================================================================
+// PHASE 2e: Path A WITH production's boundary_segments() intersection.
+//
+// WHY: Phase 2d showed the RAW transcript grid through cap+pass2 splits the
+// banter into 2 speakers - but the real app run (which includes the
+// pyannote-boundary intersection with MIN_SEGMENT_SECS sliver chain-merging)
+// produced one flat Speaker-0 row there. This probe inserts the exact
+// production intersection step and reports:
+//   1. how many intersected pieces overlap the banter window BEFORE clustering,
+//   2. final banter speaker labels after cap+pass2,
+//   3. 2818s coverage.
+// If banter collapses here but not in 2d-Path-A, the chain-merge is proven
+// to be the flattening point.
+//
+// Run:
+//   cargo test --release --test pyannote_ort_probe -- --ignored --nocapture pyannote_cde5c264_intersection_parity
+// ============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn pyannote_cde5c264_intersection_parity() {
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+    use app_lib::audio::speaker::commands::enforce_max_speakers_cap;
+    use app_lib::audio::speaker::diarization::DiarizationPort;
+
+    let db_path = r"C:\Users\CarlosRuizMartínez\AppData\Roaming\com.meetily.ai\meeting_minutes.sqlite";
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=ro", db_path))
+        .await.expect("DB connect");
+    let meeting_id = "meeting-cde5c264-1c4a-49d9-97c5-6a7e69bb9323";
+    let row = sqlx::query("SELECT folder_path FROM meetings WHERE id = ?")
+        .bind(meeting_id).fetch_optional(&pool).await.expect("fetch meeting");
+    let folder = row.and_then(|r| sqlx::Row::get::<Option<String>, _>(&r, "folder_path")).expect("folder_path");
+
+    let audio_dir = std::path::Path::new(&folder);
+    let audio_path = ["audio.mp4", "audio.wav", "audio.m4a", "audio.mp3"].iter()
+        .map(|n| audio_dir.join(n)).find(|p| p.exists())
+        .unwrap_or_else(|| panic!("no audio in {}", folder));
+    let decoded = app_lib::audio::decoder::decode_audio_file(&audio_path).expect("decode");
+    let samples = decoded.to_whisper_format();
+    let audio_duration = decoded.duration_seconds.max(0.001);
+
+    let transcript_segments: Vec<(f64, f64)> = {
+        let rows = sqlx::query(
+            "SELECT audio_start_time, audio_end_time FROM transcripts \
+             WHERE meeting_id = ? ORDER BY audio_start_time ASC")
+            .bind(meeting_id).fetch_all(&pool).await.expect("fetch transcripts");
+        rows.into_iter().filter_map(|r| {
+            let s: Option<f64> = sqlx::Row::get(&r, "audio_start_time");
+            let e: Option<f64> = sqlx::Row::get(&r, "audio_end_time");
+            match (s, e) {
+                (Some(a), Some(b)) if a < b && a >= 0.0 && b <= audio_duration + 1.0 => Some((a, b)),
+                _ => None,
+            }
+        }).collect()
+    };
+    drop(pool);
+
+    fn sorted_labels(set: &std::collections::HashSet<u32>) -> Vec<u32> {
+        let mut v: Vec<u32> = set.iter().copied().collect();
+        v.sort();
+        v
+    }
+
+    // --- Production intersection step ---
+    let seg_model = dirs::home_dir().expect("home").join(".meetily-models").join("pyannote-segmentation.onnx");
+    let pya = app_lib::audio::speaker::pyannote_segmentation::PyannoteSegmentation::new(
+        seg_model.to_str().unwrap()).expect("pyannote");
+    let bounded = pya.boundary_segments(
+        &samples, &transcript_segments,
+        app_lib::audio::speaker::sherpa_adapter::max_diarization_chunks(),
+    ).expect("boundary_segments");
+    let banter_pieces: Vec<(f64, f64)> = bounded.iter()
+        .filter(|(st, en)| *st < 32.5 && *en > 5.7).copied().collect();
+    eprintln!("INTERSECT: {} intersected segments total; {} pieces overlap banter:",
+        bounded.len(), banter_pieces.len());
+    for (st, en) in &banter_pieces {
+        eprintln!("  [{:.2} - {:.2}] ({:.2}s)", st, en, en - st);
+    }
+
+    // --- Adapter + production post ---
+    let home = dirs::home_dir().expect("home").join(".meetily-models");
+    let emb_path = home.join(app_lib::audio::speaker::model_download::embedding_filename());
+    assert!(emb_path.exists());
+    // Production parity: speakerMergeThreshold=0.65 is the live DB value
+    // (settings table); the 2e run used the 0.40 compile-time default.
+    let threshold_fp = Arc::new(AtomicU32::new((0.65f32 * 65536.0) as u32));
+    let adapter = app_lib::audio::speaker::sherpa_adapter::OrtDiarizationAdapter::with_shared_threshold(
+        emb_path.to_str().unwrap(), seg_model.to_str().unwrap(), threshold_fp,
+    ).expect("adapter");
+
+    eprintln!("INTERSECT-065: running coarse...");
+    let coarse = adapter.process(&samples, 16000, &bounded).expect("process");
+    let mut segments = coarse.segments;
+    let mut centroids = coarse.centroids;
+    if !segments.is_empty() {
+        enforce_max_speakers_cap(&mut centroids, &mut segments, 3);
+        if !centroids.is_empty() {
+            segments = adapter.refine_pass2(&samples, 16000, &centroids).expect("pass2");
+            let used: std::collections::HashSet<u32> =
+                segments.iter().map(|s| s.speaker_id).collect();
+            centroids.retain(|k, _| used.contains(k));
+        }
+    }
+
+    let labels: std::collections::HashSet<u32> = segments.iter().map(|s| s.speaker_id).collect();
+    let banter: Vec<&app_lib::audio::speaker::types::SpeakerSegment> = segments.iter()
+        .filter(|s| s.start_seconds < 32.5 && s.end_seconds > 5.7).collect();
+    let banter_labels: std::collections::HashSet<u32> = banter.iter().map(|s| s.speaker_id).collect();
+    let covering: Vec<&app_lib::audio::speaker::types::SpeakerSegment> = segments.iter()
+        .filter(|s| s.start_seconds <= 2818.0 && s.end_seconds >= 2818.0).collect();
+
+    let mut out = format!(
+        "# intersection-parity probe\n\n## banter pre-cluster pieces\n{} pieces: {:?}\n\n## post cap+pass2\n- distinct speakers: {:?}\n- banter: {} segments, labels {:?}\n",
+        banter_pieces.len(), banter_pieces, sorted_labels(&labels), banter.len(), sorted_labels(&banter_labels));
+    for c in &covering {
+        out.push_str(&format!("- covers 2818s: [{:.1} - {:.1}] Speaker {}\n",
+            c.start_seconds, c.end_seconds, c.speaker_id));
+    }
+    let path = std::env::temp_dir().join("cde5c264_intersection_parity_065.txt");
+    std::fs::write(&path, &out).expect("write");
+    eprintln!("INTERSECT: report at {}", path.display());
+}
+// ============================================================================
+// PHASE 2f: alignment + persistence parity - the LAST untested stage.
+//
+// WHY: 2e/2f probes proved the diarization output splits the banter into 2
+// speakers (at both 0.40 and 0.65). But the app persisted ONE flat Speaker-0
+// row. This probe runs align_transcripts_with_diarization over the final
+// diarization segments vs the CURRENT transcript rows and prints what WOULD
+// be persisted for the banter window (5.67-30.0) and for 2818s.
+//
+// Run:
+//   cargo test --release --test pyannote_ort_probe -- --ignored --nocapture pyannote_cde5c264_alignment_parity
+// ============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn pyannote_cde5c264_alignment_parity() {
+    let _ = env_logger::builder()
+        .filter_level(log::LevelFilter::Info)
+        .is_test(true)
+        .try_init();
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+    use app_lib::audio::speaker::alignment::{
+        align_transcripts_with_diarization, DiarizationSegment, TranscriptInput,
+    };
+    use app_lib::audio::speaker::commands::enforce_max_speakers_cap;
+    use app_lib::audio::speaker::diarization::DiarizationPort;
+
+    let db_path = r"C:\Users\CarlosRuizMartínez\AppData\Roaming\com.meetily.ai\meeting_minutes.sqlite";
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=ro", db_path))
+        .await.expect("DB connect");
+    let meeting_id = "meeting-cde5c264-1c4a-49d9-97c5-6a7e69bb9323";
+
+    // Full transcripts (id/text/start/end) for alignment input.
+    #[derive(sqlx::FromRow)]
+    struct Row { id: String, text: String, start_time: f64, end_time: f64 }
+    let rows = sqlx::query_as::<_, Row>(
+        "SELECT id, transcript as text, audio_start_time as start_time, audio_end_time as end_time FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time ASC",
+    )
+    .bind(meeting_id)
+    .fetch_all(&pool).await.expect("fetch transcripts");
+    let transcripts: Vec<TranscriptInput> = rows.iter().map(|r| TranscriptInput {
+        id: r.id.clone(),
+        text: r.text.clone(),
+        audio_start_ms: (r.start_time * 1000.0) as i64,
+        audio_end_ms: (r.end_time * 1000.0) as i64,
+        token_words: None,
+    }).collect();
+    eprintln!("ALIGN: {} transcript rows", transcripts.len());
+
+    // Audio + grid + adapter at production threshold 0.65.
+    let mrow = sqlx::query("SELECT folder_path FROM meetings WHERE id = ?")
+        .bind(meeting_id).fetch_optional(&pool).await.expect("fetch meeting").expect("meeting");
+    let folder = sqlx::Row::get::<Option<String>, _>(&mrow, "folder_path").expect("folder");
+    drop(pool);
+    let audio_dir = std::path::Path::new(&folder);
+    let audio_path = ["audio.mp4", "audio.wav", "audio.m4a", "audio.mp3"].iter()
+        .map(|n| audio_dir.join(n)).find(|p| p.exists())
+        .unwrap_or_else(|| panic!("no audio in {}", folder));
+    let decoded = app_lib::audio::decoder::decode_audio_file(&audio_path).expect("decode");
+    let samples = decoded.to_whisper_format();
+    let audio_duration = decoded.duration_seconds.max(0.001);
+
+    let grid: Vec<(f64, f64)> = transcripts.iter().map(|t|
+        (t.audio_start_ms as f64 / 1000.0, t.audio_end_ms as f64 / 1000.0)).collect();
+
+    let seg_model = dirs::home_dir().expect("home").join(".meetily-models").join("pyannote-segmentation.onnx");
+    let pya = app_lib::audio::speaker::pyannote_segmentation::PyannoteSegmentation::new(
+        seg_model.to_str().unwrap()).expect("pyannote");
+    let bounded = pya.boundary_segments(&samples, &grid,
+        app_lib::audio::speaker::sherpa_adapter::max_diarization_chunks()).expect("boundary_segments");
+
+    let home = dirs::home_dir().expect("home").join(".meetily-models");
+    let emb_path = home.join(app_lib::audio::speaker::model_download::embedding_filename());
+    let threshold_fp = Arc::new(AtomicU32::new((0.65f32 * 65536.0) as u32));
+    let adapter = app_lib::audio::speaker::sherpa_adapter::OrtDiarizationAdapter::with_shared_threshold(
+        emb_path.to_str().unwrap(), seg_model.to_str().unwrap(), threshold_fp,
+    ).expect("adapter");
+
+    eprintln!("ALIGN: coarse...");
+    let coarse = adapter.process(&samples, 16000, &bounded).expect("process");
+    let mut segments = coarse.segments;
+    let mut centroids = coarse.centroids;
+    if !segments.is_empty() {
+        enforce_max_speakers_cap(&mut centroids, &mut segments, 3);
+        if !centroids.is_empty() {
+            segments = adapter.refine_pass2(&samples, 16000, &centroids).expect("pass2");
+            let used: std::collections::HashSet<u32> =
+                segments.iter().map(|s| s.speaker_id).collect();
+            centroids.retain(|k, _| used.contains(k));
+        }
+    }
+
+// --- Dump the RAW final segments overlapping the banter window so the
+    // alignment collapse (if any) can be attributed precisely. Also cache all
+    // final segments to JSON for offline analysis.
+    {
+        let banter_raw: Vec<&app_lib::audio::speaker::types::SpeakerSegment> = segments.iter()
+            .filter(|s| s.start_seconds < 32.5 && s.end_seconds > 5.7)
+            .collect();
+        eprintln!("ALIGN-RAW: {} final segments overlap banter:", banter_raw.len());
+        for s in &banter_raw {
+            eprintln!("  [{:.2} - {:.2}] Speaker {}", s.start_seconds, s.end_seconds, s.speaker_id);
+        }
+        let json = serde_json::json!(segments.iter().map(|s| serde_json::json!({
+            "start": s.start_seconds, "end": s.end_seconds, "speaker": s.speaker_id,
+        })).collect::<Vec<_>>());
+        let jpath = std::env::temp_dir().join("cde5c264_final_segments.json");
+        std::fs::write(&jpath, serde_json::to_string_pretty(&json).unwrap()).ok();
+        eprintln!("ALIGN-RAW: cached all {} final segments to {}", segments.len(), jpath.display());
+    }
+
+    // --- THE STAGE UNDER TEST: alignment ---
+    let diar_segs: Vec<DiarizationSegment> = segments.iter().map(|s| DiarizationSegment {
+        start_ms: (s.start_seconds * 1000.0) as i64,
+        end_ms: (s.end_seconds * 1000.0) as i64,
+        speaker_id: s.speaker_id,
+    }).collect();
+    let aligned = align_transcripts_with_diarization(transcripts, &diar_segs);
+
+    // What would be persisted in the banter window and around 2818s?
+    let banter_rows: Vec<&app_lib::audio::speaker::alignment::AlignedSegment> = aligned.iter()
+        .filter(|a| a.audio_start_ms < 32_500 && a.audio_end_ms > 5_000)
+        .collect();
+    let near_2818: Vec<&app_lib::audio::speaker::alignment::AlignedSegment> = aligned.iter()
+        .filter(|a| a.audio_start_ms <= 2_818_000 && a.audio_end_ms >= 2_818_000)
+        .collect();
+
+    let mut out = String::from("# alignment-parity probe (0.65, full pipeline)\n\n## persisted-shape rows, banter window\n");
+    for a in &banter_rows {
+        out.push_str(&format!("- row {} [{:.2}-{:.2}] speaker={} source={:?} text=\"{}\"\n",
+            a.original_id, a.audio_start_ms as f64 / 1000.0, a.audio_end_ms as f64 / 1000.0,
+            a.speaker, a.speaker_source,
+            if a.text.len() > 60 { &a.text[..60] } else { &a.text }));
+    }
+    out.push_str("\n## rows covering 2818s\n");
+    for a in &near_2818 {
+        out.push_str(&format!("- row {} [{:.2}-{:.2}] speaker={}\n",
+            a.original_id, a.audio_start_ms as f64 / 1000.0, a.audio_end_ms as f64 / 1000.0, a.speaker));
+    }
+    let path = std::env::temp_dir().join("cde5c264_alignment_parity.txt");
+    std::fs::write(&path, &out).expect("write");
+    eprintln!("ALIGN: report at {}", path.display());
+}
