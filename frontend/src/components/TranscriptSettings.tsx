@@ -16,6 +16,13 @@ export interface TranscriptModelProps {
 
 type UiProvider = TranscriptModelProps['provider'];
 
+// Stored configs may hold legacy/normalized values this page has no select
+// entry for (e.g. the backend resolves unknowns to plain "whisper"). Display
+// them as localWhisper instead of indexing modelOptions with a missing key.
+const KNOWN_UI_PROVIDERS: UiProvider[] = ['localWhisper', 'deepgram', 'elevenLabs', 'groq', 'openai'];
+const asUiProvider = (provider: string): UiProvider =>
+    (KNOWN_UI_PROVIDERS as string[]).includes(provider) ? (provider as UiProvider) : 'localWhisper';
+
 export interface TranscriptSettingsProps {
     transcriptModelConfig: TranscriptModelProps;
     setTranscriptModelConfig: (config: TranscriptModelProps) => void;
@@ -27,11 +34,11 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [showApiKey, setShowApiKey] = useState<boolean>(false);
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
-    const [uiProvider, setUiProvider] = useState<UiProvider>(transcriptModelConfig.provider);
+    const [uiProvider, setUiProvider] = useState<UiProvider>(asUiProvider(transcriptModelConfig.provider));
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
-        setUiProvider(transcriptModelConfig.provider);
+        setUiProvider(asUiProvider(transcriptModelConfig.provider));
     }, [transcriptModelConfig.provider]);
 
     useEffect(() => {
