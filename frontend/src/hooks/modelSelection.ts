@@ -38,8 +38,9 @@ export interface DefaultModelPick {
 /// - configured Whisper model available  → it, no notice
 /// - configured Whisper model missing    → best available by QUALITY_ORDER,
 ///   with a fallback notice naming both models
-/// - configured provider is not Whisper  → deliberate whisper-only decision
-///   (2026-08-27); best available, no notice
+/// - configured provider is not Whisper  → best available, WITH an
+///   engine-substitution notice: Parakeet emits no word timestamps, which
+///   speaker alignment requires, so the divergence is always visible
 /// - nothing listed                      → null key, no notice
 export function pickDefaultModel(
   listed: ModelOption[],
@@ -65,7 +66,9 @@ export function pickDefaultModel(
   const notice =
     isWhisperConfig && configuredModel
       ? `Configured model '${configuredModel}' is not available — using '${best.name}' instead.`
-      : null;
+      : configuredProvider === 'parakeet'
+        ? `Configured engine 'Parakeet' is not used by Enhance — it emits no word timestamps, which speaker alignment requires. Using Whisper instead.`
+        : null;
 
   return { key: `${best.provider}:${best.name}`, fallbackNotice: notice };
 }

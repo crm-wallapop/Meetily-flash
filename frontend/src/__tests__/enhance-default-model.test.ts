@@ -20,11 +20,13 @@ describe('pickDefaultModel (enhance dialog default + fallback notice)', () => {
     expect(r.fallbackNotice).toContain('large-v3-turbo-q5_0');
   });
 
-  it('configured parakeet: deliberate whisper-only decision, picks best with no notice', () => {
+  it('configured parakeet: selects whisper WITH an engine-substitution notice', () => {
     const listed = [m('small'), m('large-v3-turbo-q5_0')];
     const r = pickDefaultModel(listed, 'parakeet', 'parakeet-tdt-0.6b-v3-int8');
     expect(r.key).toBe('whisper:large-v3-turbo-q5_0');
-    expect(r.fallbackNotice).toBeNull();
+    expect(r.fallbackNotice).toContain('Parakeet');
+    expect(r.fallbackNotice).toContain('Whisper');
+    expect(r.fallbackNotice).toContain('timestamp');
   });
 
   it('empty model list: nothing selectable, no notice', () => {

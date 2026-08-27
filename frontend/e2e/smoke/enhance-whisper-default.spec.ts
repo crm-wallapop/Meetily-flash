@@ -62,8 +62,11 @@ test.describe('enhance model default (whisper-only)', () => {
     await expect(combo).toBeVisible({ timeout: 10_000 });
     await expect(combo).toContainText(/Whisper:/, { timeout: 10_000 });
     await expect(combo).not.toContainText(/Parakeet:/);
-    // Deliberate whisper-only decision, not a fallback: no notice.
-    await expect(page.getByRole('note')).toHaveCount(0);
+    // Configured-vs-selected divergence is NEVER silent, even when the
+    // substitution is the deliberate whisper-only policy.
+    const note = page.getByRole('note');
+    await expect(note).toContainText('Parakeet', { timeout: 10_000 });
+    await expect(note).toContainText('Whisper');
   });
 
   test('configured whisper model missing: quality-ordered fallback with visible notice', async ({ page }) => {
