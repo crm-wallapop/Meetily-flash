@@ -6,7 +6,6 @@ import { Button } from './ui/button';
 import { Label } from './ui/label';
 import { Eye, EyeOff, Lock, Unlock } from 'lucide-react';
 import { ModelManager } from './WhisperModelManager';
-import { ParakeetModelManager } from './ParakeetModelManager';
 
 
 export interface TranscriptModelProps {
@@ -26,15 +25,26 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [showApiKey, setShowApiKey] = useState<boolean>(false);
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
-    const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
+    // Parakeet configs are migrated for display: the engine is no longer a
+    // selectable option (batch transcription is Whisper-only — Parakeet rows
+    // carry no token timestamps and break speaker alignment). The user picks
+    // a Whisper model to complete the migration; nothing is persisted until
+    // they do.
+    const isLegacyParakeetConfig = transcriptModelConfig.provider === 'parakeet';
+    type UiProvider = Exclude<TranscriptModelProps['provider'], 'parakeet'>;
+    // The legacy branch guarantees the result is never 'parakeet'.
+    const effectiveProvider = (isLegacyParakeetConfig
+        ? 'localWhisper'
+        : transcriptModelConfig.provider) as UiProvider;
+    const [uiProvider, setUiProvider] = useState<UiProvider>(effectiveProvider);
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
-        setUiProvider(transcriptModelConfig.provider);
-    }, [transcriptModelConfig.provider]);
+        setUiProvider(effectiveProvider);
+    }, [effectiveProvider]);
 
     useEffect(() => {
-        if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet') {
+        if (transcriptModelConfig.provider === 'localWhisper') {
             setApiKey(null);
         }
     }, [transcriptModelConfig.provider]);
@@ -52,7 +62,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     };
     const modelOptions = {
         localWhisper: [], // Model selection handled by ModelManager component
-        parakeet: [], // Model selection handled by ParakeetModelManager component
         deepgram: ['nova-2-phonecall'],
         elevenLabs: ['eleven_multilingual_v2'],
         groq: ['llama-3.3-70b-versatile'],
@@ -81,20 +90,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         }
     };
 
-    const handleParakeetModelSelect = (modelName: string) => {
-        // Always update config when model is selected, regardless of current provider
-        // This ensures the model is set when user switches back
-        setTranscriptModelConfig({
-            ...transcriptModelConfig,
-            provider: 'parakeet', // Ensure provider is set correctly
-            model: modelName
-        });
-        // Close modal after selection
-        if (onModelSelect) {
-            onModelSelect();
-        }
-    };
-
     return (
         <div>
             <div>
@@ -110,9 +105,9 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                             <Select
                                 value={uiProvider}
                                 onValueChange={(value) => {
-                                    const provider = value as TranscriptModelProps['provider'];
+                                    const provider = value as UiProvider;
                                     setUiProvider(provider);
-                                    if (provider !== 'localWhisper' && provider !== 'parakeet') {
+                                    if (provider !== 'localWhisper') {
                                         fetchApiKey(provider);
                                     }
                                 }}
@@ -121,7 +116,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     <SelectValue placeholder="Select provider" />
                                 </SelectTrigger>
                                 <SelectContent>
-                                    <SelectItem value="parakeet">⚡ Parakeet (Recommended - Real-time / Accurate)</SelectItem>
                                     <SelectItem value="localWhisper">🏠 Local Whisper (High Accuracy)</SelectItem>
                                     {/* <SelectItem value="deepgram">☁️ Deepgram (Backup)</SelectItem>
                                     <SelectItem value="elevenLabs">☁️ ElevenLabs</SelectItem>
@@ -130,7 +124,14 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 </SelectContent>
                             </Select>
 
-                            {uiProvider !== 'localWhisper' && uiProvider !== 'parakeet' && (
+                            {isLegacyParakeetConfig && (
+                                <p className="text-xs text-amber-600 dark:text-amber-400" role="note">
+                                    Parakeet is no longer supported — it emits no word timestamps, which
+                                    speaker alignment requires. Select a Whisper model below.
+                                </p>
+                            )}
+
+                            {uiProvider !== 'localWhisper' && (
                                 <Select
                                     value={transcriptModelConfig.model}
                                     onValueChange={(value) => {
@@ -162,15 +163,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                         </div>
                     )}
 
-                    {uiProvider === 'parakeet' && (
-                        <div className="mt-6">
-                            <ParakeetModelManager
-                                selectedModel={transcriptModelConfig.provider === 'parakeet' ? transcriptModelConfig.model : undefined}
-                                onModelSelect={handleParakeetModelSelect}
-                                autoSave={true}
-                            />
-                        </div>
-                    )}
 
 
                     {requiresApiKey && (
