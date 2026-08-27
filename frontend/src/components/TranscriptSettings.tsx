@@ -14,6 +14,8 @@ export interface TranscriptModelProps {
     apiKey?: string | null;
 }
 
+type UiProvider = Exclude<TranscriptModelProps['provider'], 'parakeet'>;
+
 export interface TranscriptSettingsProps {
     transcriptModelConfig: TranscriptModelProps;
     setTranscriptModelConfig: (config: TranscriptModelProps) => void;
@@ -25,23 +27,20 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [showApiKey, setShowApiKey] = useState<boolean>(false);
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
-    // Parakeet configs are migrated for display: the engine is no longer a
-    // selectable option (batch transcription is Whisper-only — Parakeet rows
-    // carry no token timestamps and break speaker alignment). The user picks
-    // a Whisper model to complete the migration; nothing is persisted until
-    // they do.
-    const isLegacyParakeetConfig = transcriptModelConfig.provider === 'parakeet';
-    type UiProvider = Exclude<TranscriptModelProps['provider'], 'parakeet'>;
-    // The legacy branch guarantees the result is never 'parakeet'.
-    const effectiveProvider = (isLegacyParakeetConfig
-        ? 'localWhisper'
-        : transcriptModelConfig.provider) as UiProvider;
-    const [uiProvider, setUiProvider] = useState<UiProvider>(effectiveProvider);
+    // Parakeet was removed as a transcription engine (migration
+    // 20260827_migrate_parakeet_transcript_config rewrote persisted configs;
+    // batch transcription is Whisper-only). localWhisper is the only local
+    // engine this page offers.
+    const [uiProvider, setUiProvider] = useState<UiProvider>(
+        transcriptModelConfig.provider === 'parakeet' ? 'localWhisper' : transcriptModelConfig.provider as UiProvider
+    );
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
-        setUiProvider(effectiveProvider);
-    }, [effectiveProvider]);
+        setUiProvider(
+            transcriptModelConfig.provider === 'parakeet' ? 'localWhisper' : transcriptModelConfig.provider as UiProvider
+        );
+    }, [transcriptModelConfig.provider]);
 
     useEffect(() => {
         if (transcriptModelConfig.provider === 'localWhisper') {
@@ -123,13 +122,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     <SelectItem value="openai">☁️ OpenAI</SelectItem> */}
                                 </SelectContent>
                             </Select>
-
-                            {isLegacyParakeetConfig && (
-                                <p className="text-xs text-amber-600 dark:text-amber-400" role="note">
-                                    Parakeet is no longer supported — it emits no word timestamps, which
-                                    speaker alignment requires. Select a Whisper model below.
-                                </p>
-                            )}
 
                             {uiProvider !== 'localWhisper' && (
                                 <Select
