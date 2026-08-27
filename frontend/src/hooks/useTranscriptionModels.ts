@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { pickDefaultModel } from './modelSelection';
 
 export interface RawModelInfo {
   name: string;
@@ -32,6 +33,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [selectedModelKey, setSelectedModelKey] = useState<string>('');
   const [loadingModels, setLoadingModels] = useState(false);
+  const [fallbackNotice, setFallbackNotice] = useState<string | null>(null);
   // Track whether the user has manually changed the model selection
   const userSelectedRef = useRef(false);
 
@@ -88,27 +90,18 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     const listed = whisperModels.length > 0 ? whisperModels : allModels;
     setAvailableModels(listed);
 
-    // Set default model based on user's saved configuration
-    const configuredProvider = transcriptModelConfig?.provider || '';
-    const configuredModel = transcriptModelConfig?.model || '';
-
-    // Try to match the configured model
-    // Note: 'localWhisper' in config maps to 'whisper' provider in model list
-    const configuredMatch = listed.find(
-      (m) =>
-        configuredProvider === 'localWhisper' && m.provider === 'whisper' && m.name === configuredModel
+    // Default selection: configured Whisper model if available, else the
+    // best available by quality order — never silently. A fallback from the
+    // configured model surfaces as fallbackNotice in the dialog.
+    const pick = pickDefaultModel(
+      listed,
+      transcriptModelConfig?.provider,
+      transcriptModelConfig?.model,
     );
-
-    // Only set default model if user hasn't manually selected one
-    if (!userSelectedRef.current) {
-      if (configuredMatch) {
-        // Use the configured model if available
-        setSelectedModelKey(`${configuredMatch.provider}:${configuredMatch.name}`);
-      } else if (listed.length > 0) {
-        // Fall back to first available Whisper model
-        setSelectedModelKey(`${listed[0].provider}:${listed[0].name}`);
-      }
+    if (!userSelectedRef.current && pick.key) {
+      setSelectedModelKey(pick.key);
     }
+    setFallbackNotice(pick.fallbackNotice);
 
     setLoadingModels(false);
   }, [transcriptModelConfig]);
@@ -120,6 +113,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
 
   return {
     availableModels,
+    fallbackNotice,
     selectedModelKey,
     setSelectedModelKey: setSelectedModelKeyWithTracking,
     loadingModels,

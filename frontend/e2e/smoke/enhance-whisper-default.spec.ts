@@ -62,5 +62,53 @@ test.describe('enhance model default (whisper-only)', () => {
     await expect(combo).toBeVisible({ timeout: 10_000 });
     await expect(combo).toContainText(/Whisper:/, { timeout: 10_000 });
     await expect(combo).not.toContainText(/Parakeet:/);
+    // Deliberate whisper-only decision, not a fallback: no notice.
+    await expect(page.getByRole('note')).toHaveCount(0);
+  });
+
+  test('configured whisper model missing: quality-ordered fallback with visible notice', async ({ page }) => {
+    page.on('dialog', (d) => d.dismiss());
+    await page.addInitScript(TAURI_MOCK_INIT_SCRIPT);
+    await page.addInitScript(SMOKE_DEFAULTS_INIT_SCRIPT);
+    await page.addInitScript(SMOKE_MEETING_DETAILS_INIT_SCRIPT);
+
+    // Configured model is large-v3 but only small is on disk. The old code
+    // silently took the first listed model; now it must pick by quality
+    // order and tell the user what happened.
+    await page.addInitScript(`
+      (function () {
+        var d = window.__tauriMockDispatcher;
+        if (!d) return;
+        d.register('api_get_transcript_config', function () {
+          return { provider: 'localWhisper', model: 'large-v3' };
+        });
+        d.register('whisper_get_available_models', function () {
+          return [
+            { name: 'small', size_mb: 466, status: 'Available' },
+            { name: 'large-v3-turbo-q5_0', size_mb: 574, status: 'Available' },
+          ];
+        });
+        d.register('parakeet_get_available_models', function () { return []; });
+      })();
+    `);
+
+    await page.goto(MEETING_URL);
+    await page.waitForFunction(
+      () => (window as unknown as { __tauriCoreMockActive?: boolean }).__tauriCoreMockActive === true,
+      { timeout: 15_000 },
+    );
+
+    const enhance = page.getByTitle('Retranscribe to enhance your recorded audio');
+    await expect(enhance).toBeVisible({ timeout: 20_000 });
+    await enhance.click();
+
+    const combo = page.getByRole('combobox').filter({ hasText: /Whisper:|Parakeet:/ });
+    await expect(combo).toBeVisible({ timeout: 10_000 });
+    // Quality order: turbo-q5_0 outranks small even though small is listed first.
+    await expect(combo).toContainText('large-v3-turbo-q5_0', { timeout: 10_000 });
+    // The fallback is never silent.
+    const note = page.getByRole('note');
+    await expect(note).toContainText("large-v3", { timeout: 10_000 });
+    await expect(note).toContainText('large-v3-turbo-q5_0');
   });
 });

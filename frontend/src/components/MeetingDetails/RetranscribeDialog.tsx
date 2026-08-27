@@ -67,6 +67,7 @@ export function RetranscribeDialog({
   // Use centralized model fetching hook
   const {
     availableModels,
+    fallbackNotice,
     selectedModelKey,
     setSelectedModelKey,
     loadingModels,
@@ -354,6 +355,11 @@ export function RetranscribeDialog({
                   ))}
                 </SelectContent>
               </Select>
+              {fallbackNotice && (
+                <p className="text-xs text-amber-600 dark:text-amber-400" role="note">
+                  {fallbackNotice}
+                </p>
+              )}
               <p className="text-xs text-muted-foreground">
                 Choose a transcription model
               </p>
