@@ -8,7 +8,6 @@
 #![cfg(target_os = "windows")]
 
 use std::collections::VecDeque;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,7 +16,6 @@ use crate::ports::meeting_detector::{BrowserWindow, DetectorObservation, Meeting
 use crate::ports::meeting_title_extractor::MeetingTitleExtractorPort;
 
 use super::browser_process::{is_browser_process, process_name_for_pid, BROWSER_PROCESSES};
-use super::google_cidrs::is_in_turn_cidrs;
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -215,89 +213,6 @@ pub fn enumerate_browser_windows() -> Vec<BrowserWindow> {
     ENUM_RESULTS.with(|r| r.lock().unwrap().clone()) // thread_local — unwrap safe
 }
 
-// ── Network socket scanning ────────────────────────────────────────────────
-
-/// Returns `true` if any browser process has an active TCP connection to a
-/// Google TURN relay server.
-///
-/// TURN connections exist only during a live WebRTC call. The Meet lobby page
-/// connects to general Google IPs (HTTPS) but never to TURN relay ranges. This
-/// makes TURN presence a reliable "still in call" signal that drops as soon as
-/// the user hangs up, even if the window title stays the same (Edge collapsed
-/// tab group) and even though the lobby page also has Google TCP connections.
-pub fn has_turn_connection() -> bool {
-    check_turn_tcp4_connections() || check_turn_tcp6_connections()
-}
-
-fn check_turn_tcp4_connections() -> bool {
-    use windows::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, MIB_TCP_STATE_ESTAB, MIB_TCPTABLE_OWNER_PID,
-        TCP_TABLE_OWNER_PID_ALL,
-    };
-    use windows::Win32::Networking::WinSock::AF_INET;
-
-    unsafe {
-        let mut size: u32 = 0;
-        let _ = GetExtendedTcpTable(None, &mut size, false, AF_INET.0 as u32, TCP_TABLE_OWNER_PID_ALL, 0);
-        if size == 0 { return false; }
-
-        let mut buf = vec![0u8; size as usize];
-        let ret = GetExtendedTcpTable(Some(buf.as_mut_ptr() as *mut _), &mut size, false, AF_INET.0 as u32, TCP_TABLE_OWNER_PID_ALL, 0);
-        if ret != 0 { return false; }
-
-        let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
-        let count = table.dwNumEntries as usize;
-        let rows = std::slice::from_raw_parts(table.table.as_ptr(), count);
-
-        for row in rows {
-            if row.dwState != MIB_TCP_STATE_ESTAB.0 as u32 { continue; }
-            let remote_ip = IpAddr::V4(Ipv4Addr::from(u32::from_be(row.dwRemoteAddr)));
-            if is_in_turn_cidrs(remote_ip) && is_browser_process(row.dwOwningPid) {
-                return true;
-            }
-        }
-        false
-    }
-}
-
-fn check_turn_tcp6_connections() -> bool {
-    use windows::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, MIB_TCP6TABLE_OWNER_PID, MIB_TCP_STATE_ESTAB,
-        TCP_TABLE_OWNER_PID_ALL,
-    };
-    use windows::Win32::Networking::WinSock::AF_INET6;
-
-    unsafe {
-        let mut size: u32 = 0;
-        let _ = GetExtendedTcpTable(None, &mut size, false, AF_INET6.0 as u32, TCP_TABLE_OWNER_PID_ALL, 0);
-        if size == 0 { return false; }
-
-        let mut buf = vec![0u8; size as usize];
-        let ret = GetExtendedTcpTable(Some(buf.as_mut_ptr() as *mut _), &mut size, false, AF_INET6.0 as u32, TCP_TABLE_OWNER_PID_ALL, 0);
-        if ret != 0 { return false; }
-
-        let table = &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID);
-        let count = table.dwNumEntries as usize;
-        let rows = std::slice::from_raw_parts(table.table.as_ptr(), count);
-
-        for row in rows {
-            if row.dwState != MIB_TCP_STATE_ESTAB.0 as u32 { continue; }
-            let remote = &row.ucRemoteAddr;
-            let raw_ip = IpAddr::V6(Ipv6Addr::from(*remote));
-            // Unwrap IPv4-mapped addresses (::ffff:x.x.x.x) so dual-stack hosts
-            // are matched against the IPv4 CIDR table where the ranges live.
-            let ip = match raw_ip {
-                IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(raw_ip),
-                other => other,
-            };
-            if is_in_turn_cidrs(ip) && is_browser_process(row.dwOwningPid) {
-                return true;
-            }
-        }
-        false
-    }
-}
-
 // ── WASAPI browser capture detection ──────────────────────────────────────
 
 // Raw binding that returns the CoInitializeEx HRESULT as a plain i32, preserving
@@ -419,7 +334,6 @@ pub fn has_browser_capture_session() -> bool {
 /// Gated `#[cfg(test)]` so release builds compile this struct out entirely.
 #[cfg(test)]
 pub(crate) struct DetectorProbes {
-    pub has_turn: Box<dyn Fn() -> bool + Send + Sync>,
     pub has_conn: Box<dyn Fn() -> bool + Send + Sync>,
     pub has_capture: Box<dyn Fn() -> bool + Send + Sync>,
     pub browser_windows: Box<dyn Fn() -> Vec<BrowserWindow> + Send + Sync>,
@@ -433,11 +347,6 @@ pub struct WindowsMeetingDetector {
     first_poll_done: bool,
     connection_first_seen_at: Option<Instant>,
     pub focus_history: FocusHistory,
-    /// True once a TURN relay connection has been observed for the current call.
-    /// Reset by `notify_exit()` (called by the use case after `MeetingEnded`) so
-    /// back-to-back calls are detectable. `pub(crate)` so adapter tests can set it
-    /// directly without going through a real TURN connection.
-    pub(crate) turn_established: bool,
     /// Previous value of `has_browser_capture_session`. `None` before the first poll.
     /// Used to emit an `info`-level log on every `bc` transition so smoke tests can
     /// measure the exact WASAPI-drop lag after "Leave call" without needing `RUST_LOG=debug`.
@@ -460,6 +369,13 @@ pub struct WindowsMeetingDetector {
     /// draft recreated the detector-turn-latch trap of commit 693ff90). `pub(crate)` so
     /// adapter tests can read it.
     pub(crate) exit_stable_latch: Option<bool>,
+    /// Set by `notify_exit()` after a MeetingEnded; cleared once `has_conn` is
+    /// observed absent. While set, `connection_first_seen_at` is NOT re-stamped
+    /// even though `has_conn` is true — without this, a persistent background
+    /// connection (e.g. a browser tab on a GCP-hosted service matching
+    /// TURN_V4_CIDRS) re-enters the state machine immediately after every
+    /// MeetingEnded, producing the 20 s detected→ended notification loop.
+    post_exit_suppress_reentry: bool,
     /// The wired call-signaling adapter (vendor-neutral gate). v1: MeetSignalingAdapter.
     signaling: Arc<dyn CallSignalingPort>,
     /// The wired title extractor (best-effort decoration). v1: MeetTitleExtractor.
@@ -487,10 +403,10 @@ impl WindowsMeetingDetector {
             first_poll_done: false,
             connection_first_seen_at: None,
             focus_history,
-            turn_established: false,
             last_bc: None,
             bc_true_since: None,
             exit_stable_latch: None,
+            post_exit_suppress_reentry: false,
             signaling,
             title_extractor,
             #[cfg(test)]
@@ -535,9 +451,6 @@ impl WindowsMeetingDetector {
 
 impl MeetingDetectorPort for WindowsMeetingDetector {
     fn notify_exit(&mut self) {
-        // Reset the sticky TURN flag so the next call (potentially UDP-only)
-        // goes through the full join/exit detection flow again (D7).
-        self.turn_established = false;
         // Reset the locked-first-drop latch + run-length timer so the next call decides
         // stability afresh. A transient-prone previous call must not poison the next;
         // an immutable latch must not survive across calls (design D4).
@@ -548,6 +461,12 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
         // that forces immediate re-entry after MeetingEnded — the root cause of the
         // 20s "Meeting ended" notification loop the user reported.
         self.connection_first_seen_at = None;
+        // Arm post-exit suppression: if this same signal is still (or again) present
+        // on subsequent polls WITHOUT ever dropping, it is background traffic, not a
+        // new call — hold C_FSA at None until a genuine `!has_conn` poll re-arms
+        // entry. Without this, a persistent TURN-CIDR connection oscillates
+        // detected→ended every debounce period.
+        self.post_exit_suppress_reentry = true;
     }
 
     fn current_state(&mut self) -> DetectorObservation {
@@ -567,12 +486,6 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
         // tab switch makes windows disappear for several seconds while the user is
         // still in the call and both network signals stay true. Gating exit on windows
         // caused false `meeting-ended` events whenever focus moved away from the Meet tab.
-        #[cfg(test)]
-        let turn = self.probes.as_ref()
-            .map_or_else(has_turn_connection, |p| (p.has_turn)());
-        #[cfg(not(test))]
-        let turn = has_turn_connection();
-
         // Compute WASAPI capture state unconditionally for two uses:
         //   • entry conjunction (UDP phase below): signaling_active && bc
         //   • exit signal in observation.has_browser_capture_session (asymmetric D2):
@@ -615,29 +528,17 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
             self.last_bc = Some(bc);
         }
 
-        // Latch TURN-established only when a TURN relay coincides with an active
-        // browser capture session. `bc` is the in-call discriminator the detector
-        // already relies on for UDP entry/exit — non-Meet GCP traffic (Gmail, Drive)
-        // has no capture session, so this stops it from poisoning is_turn_exit.
-        if turn && bc {
-            self.turn_established = true;
-        }
-
-        // Entry signal: `turn || (signaling_active && bc)` unconditionally. The prior
-        // `else if turn_established { false }` arm is removed — its rationale
-        // ("prevent the exit debounce from starting") was stale: exit has used
-        // `bc` (not has_conn) since the asymmetric-D2 redesign. The arm only
-        // ever blocked entry, and forcing entry false while latched was a
-        // self-reinforcing deadlock (notify_exit only fires on InCall→Idle,
-        // which requires entry, which the arm prevented). See Decision 1.
-        let has_conn = if turn {
-            log::debug!("detector poll: has_turn_connection=true");
-            true
-        } else {
-            // UDP/join phase: TURN relay not yet seen. AND both signals for entry so that:
-            // • join is detected when signaling_active && bc both true after getUserMedia opens, and
-            // • the conjunction is discriminating enough to avoid false-positive entry.
-            // Exit detection uses bc alone via has_browser_capture_session in the observation.
+        // Entry signal: `signaling_active && bc`. The former TURN arm was removed
+        // with the TCP socket scan (2026-08-26): TURN_V4_CIDRS overlaps general
+        // Google Cloud hosting (34.64.0.0/10 alone is 16.7M general-GCP addresses;
+        // 35.190/35.191/130.211 are Cloud Load-Balancer frontends), so a browser
+        // tab idling on ANY GCP-hosted service produced a persistent "TURN" hit
+        // that fired entry without a call — auto-starting a recording and then
+        // oscillating detected→ended every ~20 s. Real Meet media is UDP and never
+        // appears in the TCP table anyway, so the scan contributed nothing but
+        // false positives. `bc` remains the in-call discriminator: no capture
+        // session means no call, regardless of what the socket table shows.
+        let has_conn = {
             #[cfg(test)]
             let signaling_active = self.probes.as_ref()
                 .map_or_else(|| self.signaling.is_call_signaling_active(), |p| (p.has_conn)());
@@ -676,15 +577,19 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
                 self.bc_true_since = Some(self.now());
             }
         } else if has_conn && self.connection_first_seen_at.is_none() {
-            self.connection_first_seen_at = Some(self.now());
+            // Post-exit suppression: notify_exit() cleared C_FSA, but if the underlying
+            // signal NEVER dropped (persistent background GCP connection), re-stamping
+            // on the very next poll makes it look like a brand-new call and the state
+            // machine re-enters immediately — the detected→ended notification loop.
+            // Hold C_FSA at None until `!has_conn` has been observed at least once
+            // (a genuine drop), which is what distinguishes the next real join.
+            if !self.post_exit_suppress_reentry {
+                self.connection_first_seen_at = Some(self.now());
+            }
         } else if !has_conn {
             self.connection_first_seen_at = None;
+            self.post_exit_suppress_reentry = false;
         }
-
-        // True when TURN was established for this call and has just dropped.
-        // Tells the state machine to use the short TURN debounce (4 s) instead of
-        // the 15 s UDP debounce, restoring the ~5 s exit latency for TCP TURN calls.
-        let is_turn_exit = !turn && self.turn_established;
 
         // Titles the wired extractor recognises from the enumerated browser windows.
         // Per-window extraction (D9 item 3): each window is offered to the extractor;
@@ -701,7 +606,6 @@ impl MeetingDetectorPort for WindowsMeetingDetector {
             has_browser_capture_session: bc,
             connection_first_seen_at: self.connection_first_seen_at,
             default_title: String::new(),
-            is_turn_exit,
             stable_capture: self.exit_stable_latch.unwrap_or(false),
         };
 
@@ -798,7 +702,6 @@ mod tests {
             has_browser_capture_session: true,
             connection_first_seen_at: None,
             default_title: String::new(),
-            is_turn_exit: false,
             stable_capture: false,
         };
         let title =
@@ -819,7 +722,6 @@ mod tests {
             has_browser_capture_session: false,
             connection_first_seen_at: None,
             default_title: String::new(),
-            is_turn_exit: false,
             stable_capture: false,
         };
         let title =
@@ -868,207 +770,29 @@ mod tests {
         })
     }
 
-    // ── detector-turn-latch-deadlock — adversarial RED tests ───────────────
-    //
-    // These three tests assert the post-fix invariants and FAIL on the pre-fix
-    // code (the entry-suppression arm + the turn-only latch set).
-
-    // Task 1.1 — Deadlock regression: a latched turn_established flag must NOT
-    // block detection of a subsequent real UDP call (signaling_active && bc both true). The
-    // pre-fix else-if turn_established arm forces has_conn=false here.
+    // Task 1.3 — Entry formula invariant: has_meet_connection must equal
+    // `signaling_active && bc` across the full probe matrix. 2026-08-26: the TURN
+    // arm was removed with the TCP socket scan — see the entry-signal comment in
+    // current_state() for the false-positive history.
     #[test]
-    fn latched_turn_flag_does_not_block_subsequent_udp_call_entry() {
-        let probes = DetectorProbes {
-            has_turn:    Box::new(|| false), // TURN gone (UDP call)
-            has_conn:    Box::new(|| true),  // Meet TCP active
-            has_capture: Box::new(|| true),  // browser mic capture active
-            browser_windows: probe_windows(&["Meet - standup"]),
-        };
-        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
-        // Simulate the poisoned state: a prior browser→GCP connection latched
-        // the flag in a previous poll. This is the deadlock scenario.
-        det.turn_established = true;
-
-        let obs = det.current_state();
-        assert!(obs.has_meet_connection,
-            "a latched turn_established flag must NOT suppress entry when a real UDP call (signaling_active && bc) is active");
-    }
-
-    // Task 1.2 — Spurious-latch non-poison: TURN active but NO browser capture
-    // (background GCP traffic, no call) must NOT latch turn_established, so a
-    // later UDP call is not misclassified as a TURN exit (4s debounce).
-    #[test]
-    fn turn_without_browser_capture_does_not_latch() {
-        // Phase 1: TURN=true but bc=false (background GCP, no call).
-        let probes_gcp = DetectorProbes {
-            has_turn:    Box::new(|| true),
-            has_conn:    Box::new(|| false),
-            has_capture: Box::new(|| false),
-            browser_windows: probe_windows(&[]),
-        };
-        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_gcp);
-        // Poll several times to give the latch every chance to (wrongly) set.
-        for _ in 0..3 {
-            let _ = det.current_state();
-        }
-        assert!(!det.turn_established,
-            "turn_established must NOT set on TURN-without-capture (background GCP traffic)");
-
-        // Phase 2: user joins a real UDP call (TURN=false, signaling_active && bc true).
-        det.probes = Some(DetectorProbes {
-            has_turn:    Box::new(|| false),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(|| true),
-            browser_windows: probe_windows(&["Meet - standup"]),
-        });
-        let obs = det.current_state();
-        assert!(obs.has_meet_connection, "the UDP call must be detected");
-        assert!(!obs.is_turn_exit,
-            "is_turn_exit must be false — the prior GCP traffic must not poison the exit debounce");
-    }
-
-    // Task 1.3 — Entry formula invariant: with turn_established latched, the
-    // entry signal has_meet_connection must equal `turn || (signaling_active && bc)` across
-    // the full probe matrix. The latch must never change the entry formula.
-    #[test]
-    fn entry_formula_invariant_holds_across_probe_matrix_when_latched() {
-        for &turn in &[false, true] {
-            for &mc in &[false, true] {
-                for &bc in &[false, true] {
-                    let probes = DetectorProbes {
-                        has_turn:    Box::new(move || turn),
-                        has_conn:    Box::new(move || mc),
-                        has_capture: Box::new(move || bc),
-                        browser_windows: probe_windows(&["Meet - standup"]),
-                    };
-                    let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
-                    // Latch is set (simulating a prior TURN call). The entry
-                    // formula must still be `turn || (signaling_active && bc)`.
-                    det.turn_established = true;
-                    let obs = det.current_state();
-                    let expected = turn || (mc && bc);
-                    assert_eq!(
-                        obs.has_meet_connection, expected,
-                        "turn={turn} mc={mc} bc={bc}: has_meet_connection must equal turn || (signaling_active && bc), got {}",
-                        obs.has_meet_connection
-                    );
-                }
+    fn entry_formula_invariant_holds_across_probe_matrix() {
+        for &mc in &[false, true] {
+            for &bc in &[false, true] {
+                let probes = DetectorProbes {
+                    has_conn:    Box::new(move || mc),
+                    has_capture: Box::new(move || bc),
+                    browser_windows: probe_windows(&["Meet - standup"]),
+                };
+                let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
+                let obs = det.current_state();
+                let expected = mc && bc;
+                assert_eq!(
+                    obs.has_meet_connection, expected,
+                    "mc={mc} bc={bc}: has_meet_connection must equal signaling_active && bc, got {}",
+                    obs.has_meet_connection
+                );
             }
         }
-    }
-
-    // (b) notify_exit resets turn_established so the next UDP call is detectable.
-    //     Post-detector-turn-latch-deadlock: the suppression arm is gone, so
-    //     has_conn is true both before and after notify_exit when signaling_active && bc are
-    //     both true. The notify_exit → detectable-again assertion (the real
-    //     purpose of this test) stays; only the stale "before = false" assertion
-    //     (which encoded the deadlock) is corrected to true.
-    #[test]
-    fn notify_exit_resets_turn_established_for_next_udp_detection() {
-        let probes = DetectorProbes {
-            has_turn:    Box::new(|| false),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(|| true),
-            browser_windows: probe_windows(&["Meet - standup"]),
-        };
-        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
-        det.turn_established = true;
-
-        // Before notify_exit: suppression arm gone, signaling_active && bc both true → has_conn=true
-        let obs = det.current_state();
-        assert!(obs.has_meet_connection,
-            "post-fix: turn_established=true no longer suppresses entry when signaling_active && bc are true");
-
-        det.notify_exit();
-
-        // After notify_exit: turn_established=false, UDP probes both true → has_conn=true
-        let obs = det.current_state();
-        assert!(obs.has_meet_connection,
-            "after notify_exit(), UDP call should be detectable again");
-    }
-
-    // (b2) is_turn_exit computation: after TURN goes away on a call where it was
-    // established, current_state() must return is_turn_exit=true so the state
-    // machine can use the fast 4s debounce. This is the adapter-level twin of
-    // the state machine tests 2.10 / 2.10b — it tests the computation, not the
-    // state machine's response to it.
-    #[test]
-    fn turn_exit_flag_set_when_turn_drops_after_being_established() {
-        let probes_turn_active = DetectorProbes {
-            has_turn:    Box::new(|| true),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(|| true),
-            browser_windows: probe_windows(&["Meet - standup"]),
-        };
-        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_turn_active);
-
-        // Poll 1: TURN active — turn_established becomes true, is_turn_exit must be false.
-        let obs1 = det.current_state();
-        assert!(!obs1.is_turn_exit, "is_turn_exit must be false while TURN is active");
-        assert!(det.turn_established, "turn_established must be set after first TURN-active poll");
-
-        // Poll 2: TURN drops — is_turn_exit must now be true.
-        det.probes = Some(DetectorProbes {
-            has_turn:    Box::new(|| false),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(|| true),
-            browser_windows: probe_windows(&["Meet - standup"]),
-        });
-        let obs2 = det.current_state();
-        assert!(obs2.is_turn_exit,
-            "is_turn_exit must be true when TURN drops after being established (turn_established=true && !turn)");
-
-        // Poll 3 (after notify_exit): turn_established is reset — is_turn_exit must be false again.
-        det.notify_exit();
-        let obs3 = det.current_state();
-        assert!(!obs3.is_turn_exit,
-            "is_turn_exit must be false after notify_exit() resets turn_established");
-    }
-
-    // Regression guard for the self-heal trap (commit 715c810, reverted 693ff90).
-    // The real Chrome exit sequence is: TURN relay drops first (~1s), then WASAPI
-    // browser-capture releases ~2s later. A self-heal that clears turn_established
-    // on (!turn && !bc) fires on THIS poll — flipping is_turn_exit false mid-exit
-    // and bumping the debounce 4s->15s, because step_detector recomputes the
-    // duration every poll. turn_established must stay latched until notify_exit.
-    #[test]
-    fn turn_latch_survives_bc_drop_during_exit() {
-        let probes_active = DetectorProbes {
-            has_turn:    Box::new(|| true),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(|| true),
-            browser_windows: probe_windows(&["Meet - standup"]),
-        };
-        let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes_active);
-
-        // Poll 1: TURN + capture active — latch sets.
-        let obs1 = det.current_state();
-        assert!(!obs1.is_turn_exit);
-        assert!(det.turn_established);
-
-        // Poll 2: TURN drops, WASAPI capture still active (~2s lag) — is_turn_exit true.
-        det.probes = Some(DetectorProbes {
-            has_turn:    Box::new(|| false),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(|| true),
-            browser_windows: probe_windows(&["Meet - standup"]),
-        });
-        let obs2 = det.current_state();
-        assert!(obs2.is_turn_exit, "TURN drop must set is_turn_exit while bc lags");
-
-        // Poll 3: WASAPI releases capture (turn=false, bc=false) — the self-heal
-        // trap poll. is_turn_exit MUST stay true; turn_established must NOT clear.
-        det.probes = Some(DetectorProbes {
-            has_turn:    Box::new(|| false),
-            has_conn:    Box::new(|| true),
-            has_capture: Box::new(|| false),
-            browser_windows: probe_windows(&["Meet - standup"]),
-        });
-        let obs3 = det.current_state();
-        assert!(det.turn_established,
-            "turn_established must survive the bc-drop poll (self-heal trap)");
-        assert!(obs3.is_turn_exit,
-            "is_turn_exit must stay true across the WASAPI bc-drop mid-exit");
     }
 
     // (d) D15 / C-NEW-2: browser window minimized at startup — first poll sees empty
@@ -1080,7 +804,6 @@ mod tests {
     #[test]
     fn d15_minimized_window_at_startup_does_not_bypass_preexisting_check() {
         let probes_poll1 = DetectorProbes {
-            has_turn:    Box::new(|| false),
             has_conn:    Box::new(|| true),
             has_capture: Box::new(|| true),
             browser_windows: Box::new(|| vec![]),  // minimized at startup — empty
@@ -1097,7 +820,6 @@ mod tests {
 
         // Poll 2: window now visible (user un-minimized / switched back to Meet tab)
         det.probes = Some(DetectorProbes {
-            has_turn:    Box::new(|| false),
             has_conn:    Box::new(|| true),
             has_capture: Box::new(|| true),
             browser_windows: probe_windows(&["Meet - standup"]),
@@ -1137,32 +859,17 @@ mod tests {
     }
 
     // (c) Otter.ai scenario: persistent browser mic keeps WASAPI active across calls.
-    //     Post-detector-turn-latch-deadlock: a latched turn_established flag no longer
-    //     blocks entry. With signaling_active && bc both true, has_meet_connection is true (entry not
-    //     suppressed); after notify_exit() it is still true. The pre-fix version of this
-    //     test asserted the deadlock ("must block UDP detection"); that assertion encoded
-    //     the bug as desired behaviour. The Otter.ai lobby false-positive (HTTPS + WASAPI
-    //     from another app) is the pre-existing known limitation at canonical-spec line 107
-    //     — it is not latch-suppressed (notify_exit resets the latch at Idle, the same
-    //     state the lobby scenario starts from).
+    //     With signaling_active && bc both true, has_meet_connection is true and stays
+    //     true after notify_exit() — the lobby false-positive class (HTTPS + WASAPI
+    //     from another app) remains a known limitation at canonical-spec line 107.
     #[test]
-    fn otter_ai_persistent_mic_blocked_until_notify_exit() {
+    fn otter_ai_persistent_mic_not_blocked_after_notify_exit() {
         let probes = DetectorProbes {
-            has_turn:    Box::new(|| false),  // TURN gone after TCP exit
             has_conn:    Box::new(|| true),   // lobby HTTPS still active
             has_capture: Box::new(|| true),  // Otter.ai keeps WASAPI open
             browser_windows: probe_windows(&["Meet - standup"]),
         };
         let mut det = WindowsMeetingDetector::with_probes(empty_history(), probes);
-        det.turn_established = true;
-
-        // Post-fix invariant: a latched flag does NOT block entry when a real UDP
-        // call (signaling_active && bc) is active. (signaling_active=true, bc=true → has_conn=true.)
-        for i in 0..3 {
-            let obs = det.current_state();
-            assert!(obs.has_meet_connection,
-                "poll {i}: a latched turn_established must not suppress entry for a real UDP call (signaling_active && bc)");
-        }
 
         det.notify_exit();
 
@@ -1172,14 +879,18 @@ mod tests {
             "after notify_exit(), persistent Otter.ai WASAPI does not block next call");
     }
 
-    // Regression for the 20s oscillation loop: notify_exit MUST reset
-    // connection_first_seen_at. Without it, the state machine sees
-    // `not_preexisting=true` from a stale stamp and re-enters InCall immediately
-    // after MeetingEnded, producing repeated "Meeting ended" notifications.
+    // Regression for the 20s oscillation loop (SUPERSEDED 2026-08-26). The
+    // original fix (f09f1e7) reset connection_first_seen_at on notify_exit —
+    // necessary but not sufficient: when the underlying signal never drops
+    // (background GCP/GCLB traffic matching TURN_V4_CIDRS), the next poll
+    // re-stamps immediately and the machine re-enters, reproducing the storm.
+    // The invariant is now: after notify_exit, re-stamping requires an observed
+    // `!has_conn` poll first. Covered behaviorally by
+    // `persistent_signal_after_exit_does_not_reenter` (storm shape) and pinned
+    // here in its genuine-drop variant: a signal that DOES drop may stamp again.
     #[test]
     fn notify_exit_resets_connection_first_seen_at() {
         let probes = DetectorProbes {
-            has_turn:    Box::new(|| false),
             has_conn:    Box::new(|| true),
             has_capture: Box::new(|| true),
             browser_windows: probe_windows(&["Meet - standup"]),
@@ -1198,14 +909,35 @@ mod tests {
         assert!(det.connection_first_seen_at.is_none(),
             "notify_exit must reset connection_first_seen_at to None");
 
-        // Next poll: stamp is fresh (re-stamped at the new poll instant, not the
-        // old one — the point is that it is no longer the stale pre-existing
-        // stamp, so the state machine re-evaluates from scratch).
+        // Post-exit polls with the signal STILL present must NOT re-stamp —
+        // that re-stamp is the storm's re-entry mechanism.
+        for _ in 0..2 {
+            let _ = det.current_state();
+            assert!(det.connection_first_seen_at.is_none(),
+                "persistent post-exit signal must not re-stamp (would re-enter immediately)");
+        }
+
+        // Only after the signal genuinely drops may the next connection stamp
+        // as new — that edge is what distinguishes the next real join.
+        det.probes = Some(DetectorProbes {
+            has_conn:    Box::new(|| false),
+            has_capture: Box::new(|| false),
+            browser_windows: probe_windows(&[]),
+        });
+        let dropped = det.current_state();
+        assert!(!dropped.has_meet_connection);
+        assert!(det.connection_first_seen_at.is_none());
+
+        det.probes = Some(DetectorProbes {
+            has_conn:    Box::new(|| true),
+            has_capture: Box::new(|| true),
+            browser_windows: probe_windows(&["Meet - standup"]),
+        });
         let obs2 = det.current_state();
         assert!(obs2.connection_first_seen_at.is_some(),
-            "post-notify_exit poll must re-stamp connection_first_seen_at");
+            "post-drop reconnection must stamp connection_first_seen_at");
         assert!(obs2.connection_first_seen_at.unwrap() >= first_seen,
-            "post-notify_exit stamp must be at or after the pre-notify_exit stamp");
+            "re-join stamp must be at or after the pre-notify_exit stamp");
     }
 
     // ── meeting-udp-confidence-debounce — adversarial RED tests ─────────────
@@ -1218,10 +950,8 @@ mod tests {
 
     /// Test harness: a detector whose `bc` signal is an `AtomicBool` and whose clock
     /// is an `Arc<Mutex<Instant>>` advanced by `advance()`. Lets ≥ STABLE_CONFIDENCE_WINDOW
-    /// runs be driven deterministically without real sleeps. `turn` sets the TURN probe
-    /// (true for device-disconnect scenarios where TURN stays alive mid-call).
+    /// runs be driven deterministically without real sleeps.
     fn latched_detector(
-        turn: bool,
         bc_initial: bool,
     ) -> (
         WindowsMeetingDetector,
@@ -1234,7 +964,6 @@ mod tests {
         let bc_for_probe = Arc::clone(&bc_flag);
         let clock_for_probe = Arc::clone(&clock);
         let probes = DetectorProbes {
-            has_turn: Box::new(move || turn),
             has_conn: Box::new(|| true),
             has_capture: Box::new(move || bc_for_probe.load(Ordering::SeqCst)),
             browser_windows: probe_windows(&["Meet - standup"]),
@@ -1257,7 +986,7 @@ mod tests {
     // pre-change code: the drop self-latches false (bc_drop_observed_this_call).
     #[test]
     fn first_drop_after_window_latches_stable_true() {
-        let (mut det, bc, clock) = latched_detector(false, true);
+        let (mut det, bc, clock) = latched_detector(true);
         let _ = det.current_state();
         advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(1));
         set_bc(&bc, false);
@@ -1272,7 +1001,7 @@ mod tests {
     // cleared the latch on the false→true edge, flipping a running 4 s exit to 15 s.
     #[test]
     fn flicker_during_debounce_does_not_flip_latch() {
-        let (mut det, bc, clock) = latched_detector(false, true);
+        let (mut det, bc, clock) = latched_detector(true);
         let _ = det.current_state();
         advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(5));
         set_bc(&bc, false);
@@ -1297,7 +1026,7 @@ mod tests {
     // Some(false) → stable_capture false → 15 s debounce.
     #[test]
     fn short_stable_run_then_drop_is_15s() {
-        let (mut det, bc, clock) = latched_detector(false, true);
+        let (mut det, bc, clock) = latched_detector(true);
         let _ = det.current_state();
         advance(&clock, Duration::from_secs(5)); // < 20 s window
         set_bc(&bc, false);
@@ -1312,7 +1041,7 @@ mod tests {
     // cannot change it (immutability). The old "transient ⟹ 15 s" rule is relaxed.
     #[test]
     fn recovered_transient_after_window_still_exits_4s() {
-        let (mut det, bc, clock) = latched_detector(false, true);
+        let (mut det, bc, clock) = latched_detector(true);
         let _ = det.current_state();
         advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(5));
         set_bc(&bc, false); // first drop (the "transient"): latch Some(true)
@@ -1339,7 +1068,7 @@ mod tests {
     // debounce window).
     #[test]
     fn latch_held_stable_across_consecutive_false_polls() {
-        let (mut det, bc, clock) = latched_detector(false, true);
+        let (mut det, bc, clock) = latched_detector(true);
         let _ = det.current_state();
         advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(1));
         set_bc(&bc, false);
@@ -1355,7 +1084,7 @@ mod tests {
     // classified afresh (no inheritance of the prior call's stability assessment).
     #[test]
     fn notify_exit_clears_latch_for_next_call() {
-        let (mut det, bc, clock) = latched_detector(false, true);
+        let (mut det, bc, clock) = latched_detector(true);
         let _ = det.current_state();
         advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(1));
         set_bc(&bc, false);
@@ -1382,7 +1111,7 @@ mod tests {
     // true→false edge and no latch must be set. bc_true_since stays continuous.
     #[test]
     fn rapid_leave_rejoin_within_wasapi_lag_no_spurious_drop() {
-        let (mut det, _bc, clock) = latched_detector(false, true);
+        let (mut det, _bc, clock) = latched_detector(true);
         let _ = det.current_state();
         let since_after_first = det.bc_true_since;
         assert!(since_after_first.is_some(), "first-poll bc=true stamps bc_true_since");
@@ -1399,31 +1128,28 @@ mod tests {
     // Task 1.8 (shark C1, rewritten) — A WASAPI device loss mid-call drives bc
     // false even though the user has not left (the enumerated device vanished).
     // This IS a true→false drop, so the latch fires and classifies by run length —
-    // NOT by whether it was a "real leave". TURN relay stays alive so is_turn_exit
-    // == false throughout. Two variants: ≥window disconnect → Some(true);
-    // <window → Some(false).
+    // NOT by whether it was a "real leave". Two variants: ≥window disconnect →
+    // Some(true); <window → Some(false).
     #[test]
     fn device_disconnect_mid_call_classified_by_run_length() {
         // Variant A: long run before the disconnect → Some(true).
         {
-            let (mut det, bc, clock) = latched_detector(true, true);
+            let (mut det, bc, clock) = latched_detector(true);
             let _ = det.current_state();
             advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(5));
             set_bc(&bc, false); // device lost
             let obs = det.current_state();
-            assert!(!obs.is_turn_exit, "TURN alive → device loss is not a TURN exit");
-            assert_eq!(det.exit_stable_latch, Some(true), "≥window disconnect → stable");
+                        assert_eq!(det.exit_stable_latch, Some(true), "≥window disconnect → stable");
             assert!(obs.stable_capture);
         }
         // Variant B: short run before the disconnect → Some(false).
         {
-            let (mut det, bc, clock) = latched_detector(true, true);
+            let (mut det, bc, clock) = latched_detector(true);
             let _ = det.current_state();
             advance(&clock, Duration::from_secs(3)); // < window
             set_bc(&bc, false);
             let obs = det.current_state();
-            assert!(!obs.is_turn_exit);
-            assert_eq!(det.exit_stable_latch, Some(false), "<window disconnect → unstable");
+                        assert_eq!(det.exit_stable_latch, Some(false), "<window disconnect → unstable");
             assert!(!obs.stable_capture);
         }
     }
@@ -1434,7 +1160,7 @@ mod tests {
     // Some(false) (conservative).
     #[test]
     fn mid_call_app_start_measures_short_run() {
-        let (mut det, bc, clock) = latched_detector(false, true);
+        let (mut det, bc, clock) = latched_detector(true);
         let _ = det.current_state();
         assert!(det.bc_true_since.is_some());
         advance(&clock, Duration::from_millis(1));
@@ -1451,7 +1177,7 @@ mod tests {
     fn window_boundary_pins_gte() {
         // Exactly at window → true.
         {
-            let (mut det, bc, clock) = latched_detector(false, true);
+            let (mut det, bc, clock) = latched_detector(true);
             let _ = det.current_state();
             advance(&clock, STABLE_CONFIDENCE_WINDOW);
             set_bc(&bc, false);
@@ -1460,7 +1186,7 @@ mod tests {
         }
         // Window − ε → false.
         {
-            let (mut det, bc, clock) = latched_detector(false, true);
+            let (mut det, bc, clock) = latched_detector(true);
             let _ = det.current_state();
             advance(&clock, STABLE_CONFIDENCE_WINDOW - Duration::from_millis(1));
             set_bc(&bc, false);
@@ -1469,7 +1195,7 @@ mod tests {
         }
         // Window + ε → true.
         {
-            let (mut det, bc, clock) = latched_detector(false, true);
+            let (mut det, bc, clock) = latched_detector(true);
             let _ = det.current_state();
             advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_millis(1));
             set_bc(&bc, false);
@@ -1484,7 +1210,7 @@ mod tests {
     // is the crash-path safety net; notify_exit covers the normal path).
     #[test]
     fn fresh_detector_after_crash_has_no_inherited_latch() {
-        let (mut prior, bc, clock) = latched_detector(false, true);
+        let (mut prior, bc, clock) = latched_detector(true);
         let _ = prior.current_state();
         advance(&clock, STABLE_CONFIDENCE_WINDOW + Duration::from_secs(1));
         set_bc(&bc, false);
@@ -1493,7 +1219,6 @@ mod tests {
         // `prior` is dropped here (simulated crash) — no notify_exit.
 
         let fresh = WindowsMeetingDetector::with_probes(empty_history(), DetectorProbes {
-            has_turn: Box::new(|| false),
             has_conn: Box::new(|| false),
             has_capture: Box::new(|| false),
             browser_windows: Box::new(|| vec![]),
@@ -1510,7 +1235,7 @@ mod tests {
     // the None→false first-poll path.
     #[test]
     fn first_poll_false_then_stable_run_measured_from_edge() {
-        let (mut det, bc, clock) = latched_detector(false, false); // bc starts false
+        let (mut det, bc, clock) = latched_detector(false); // bc starts false
         let obs = det.current_state();
         assert!(det.bc_true_since.is_none(), "first-poll bc=false → bc_true_since stays None");
         assert!(!obs.stable_capture);
@@ -1546,7 +1271,7 @@ mod tests {
         fn locked_latch_invariant_holds(
             runs in prop::collection::vec((1u32..16u32, any::<bool>()), 1..20)
         ) {
-            let (mut det, bc, clock) = latched_detector(false, false);
+            let (mut det, bc, clock) = latched_detector(false);
             let poll_interval = Duration::from_secs(2);
             let mut latched_value: Option<bool> = None;
 
@@ -1607,7 +1332,6 @@ mod tests {
         let bc_for_probe = Arc::clone(&bc_flag);
         let clock_for_probe = Arc::clone(&clock);
         let probes = DetectorProbes {
-            has_turn: Box::new(|| false),
             has_conn: Box::new(|| true),
             has_capture: Box::new(move || bc_for_probe.load(Ordering::SeqCst)),
             browser_windows: Box::new(|| {
@@ -1623,7 +1347,6 @@ mod tests {
         let settings = DetectorSettings {
             debounce_duration: Duration::from_millis(400),           // LONG
             stable_udp_debounce_duration: Duration::from_millis(60), // SHORT
-            turn_debounce_duration: Duration::from_millis(400),
         };
         let task = spawn_detector(
             det,
@@ -1685,7 +1408,6 @@ mod tests {
         let bc_for_probe = Arc::clone(&bc_flag);
         let clock_for_probe = Arc::clone(&clock);
         let probes = DetectorProbes {
-            has_turn: Box::new(|| false),
             has_conn: Box::new(|| true),
             has_capture: Box::new(move || bc_for_probe.load(Ordering::SeqCst)),
             browser_windows: probe_windows(&["Meet - real-clock"]),
@@ -1741,5 +1463,128 @@ mod tests {
             }
             std::thread::sleep(poll_interval);
         }
+    }
+
+    // ── Regression: 2026-08-26 false-positive recording + 20 s ended-storm ──
+
+    /// Shared flags for these regression tests: signaling / capture, each an
+    /// AtomicBool so polls can flip signals mid-sequence.
+    struct SignalFlags {
+        sig: Arc<AtomicBool>,
+        bc: Arc<AtomicBool>,
+    }
+
+    impl SignalFlags {
+        fn new(sig: bool, bc: bool) -> Self {
+            Self {
+                sig: Arc::new(AtomicBool::new(sig)),
+                bc: Arc::new(AtomicBool::new(bc)),
+            }
+        }
+
+        fn set_sig(&self, v: bool) {
+            self.sig.store(v, Ordering::SeqCst);
+        }
+
+        fn set_bc(&self, v: bool) {
+            self.bc.store(v, Ordering::SeqCst);
+        }
+
+        fn detector(&self) -> WindowsMeetingDetector {
+            let s = Arc::clone(&self.sig);
+            let b = Arc::clone(&self.bc);
+            let probes = DetectorProbes {
+                has_conn: Box::new(move || s.load(Ordering::SeqCst)),
+                has_capture: Box::new(move || b.load(Ordering::SeqCst)),
+                browser_windows: Box::new(|| vec![]),
+            };
+            WindowsMeetingDetector::with_probes(empty_history(), probes)
+        }
+    }
+
+    /// Bug 1 (2026-08-26) — entry must require BOTH signals. The original defect
+    /// fired entry on a bare TCP connection to a "TURN relay" CIDR that actually
+    /// overlaps general Google Cloud hosting — no capture session anywhere.
+    /// With the socket scan decommissioned, this pins the surviving invariant:
+    /// signaling alone (e.g. a Google-IP HTTPS connection from any tab) must
+    /// never read as a call without an active browser capture session.
+    #[test]
+    fn signaling_without_capture_is_not_a_call() {
+        let flags = SignalFlags::new(true, false);
+        let mut det = flags.detector();
+        let obs = det.current_state();
+        assert!(
+            !obs.has_meet_connection,
+            "signaling connection without browser capture is background traffic"
+        );
+        assert!(
+            det.connection_first_seen_at.is_none(),
+            "no first-seen stamp must be taken for background traffic"
+        );
+    }
+
+    /// Complement — signaling WITH active capture is in-call evidence.
+    #[test]
+    fn signaling_with_capture_is_a_call() {
+        let flags = SignalFlags::new(true, true);
+        let mut det = flags.detector();
+        // Poll 1 stamps as pre-existing; poll 2 would be a new connection. Here we
+        // only assert the conjunction passes: has_conn reads true either way.
+        let _ = det.current_state();
+        let obs = det.current_state();
+        assert!(obs.has_meet_connection, "signaling && bc → in-call evidence");
+    }
+
+    /// Bug 2 — the 20 s detected→ended notification loop. After MeetingEnded +
+    /// notify_exit(), a signal that NEVER dropped must not re-stamp
+    /// connection_first_seen_at (which D15 treats as a brand-new call).
+    /// Re-entry becomes eligible only after the signal is observed absent once.
+    #[test]
+    fn persistent_signal_after_exit_does_not_reenter() {
+        let flags = SignalFlags::new(false, false);
+        let mut det = flags.detector();
+
+        // Poll 1: idle.
+        let _ = det.current_state();
+        assert!(det.connection_first_seen_at.is_none());
+
+        // Call appears (UDP phase: signaling && capture).
+        flags.set_sig(true);
+        flags.set_bc(true);
+        let obs = det.current_state();
+        assert!(obs.has_meet_connection);
+        let seen = det.connection_first_seen_at.expect("new connection stamped");
+        assert!(seen > det.detector_start, "stamped after start → entry-eligible");
+
+        // MeetingEnded fires → notify_exit resets the gate.
+        det.notify_exit();
+        assert!(det.connection_first_seen_at.is_none());
+
+        // The signal persists unchanged across subsequent polls (the storm shape):
+        // C_FSA must STAY None so step_detector's D15 gate blocks re-entry. Asserts
+        // observable state only (C_FSA / has_meet_connection — no new fields).
+        for _ in 0..3 {
+            let obs = det.current_state();
+            assert!(
+                det.connection_first_seen_at.is_none(),
+                "persistent post-exit signal must not re-stamp as a new call (obs.has_meet_connection={})",
+                obs.has_meet_connection
+            );
+        }
+
+        // Genuine drop observed → suppression must clear so the next real join is
+        // detectable again.
+        flags.set_sig(false);
+        flags.set_bc(false);
+        let obs = det.current_state();
+        assert!(!obs.has_meet_connection);
+
+        // Next real join stamps fresh and is entry-eligible again.
+        flags.set_sig(true);
+        flags.set_bc(true);
+        let obs = det.current_state();
+        assert!(obs.has_meet_connection);
+        let seen2 = det.connection_first_seen_at.expect("next real join stamped");
+        assert!(seen2 > det.detector_start, "fresh join is entry-eligible again");
     }
 }

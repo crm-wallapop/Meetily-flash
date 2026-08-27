@@ -56,8 +56,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use app_lib::detection::windows::{
-    enumerate_browser_windows, has_turn_connection, FocusHistory,
-    WindowsMeetingDetector,
+    enumerate_browser_windows, FocusHistory, WindowsMeetingDetector,
 };
 use app_lib::detection::signaling::meet::MeetSignalingAdapter;
 use app_lib::detection::titles::meet::MeetTitleExtractor;
@@ -101,7 +100,6 @@ fn state_label(s: &DetectorState) -> &'static str {
 ///   - If a Chrome/Edge Meet tab is open, at least one window appears.
 ///   - If the Google Meet PWA is running, a window with a title starting
 ///     `"Google Meet - Meet "` (em dash U+2014 expected after "Meet") must appear.
-///   - `has_turn_connection` should be `true` only while inside a live call.
 #[test]
 #[ignore]
 fn enumerate_browser_windows_smoke() {
@@ -121,9 +119,7 @@ fn enumerate_browser_windows_smoke() {
     }
 
     let signaling = MeetSignalingAdapter::new().is_call_signaling_active();
-    let turn = has_turn_connection();
     println!("\n  signaling_active    (broad Google IPs) : {signaling}");
-    println!("  has_turn_connection  (TURN relay IPs)   : {turn}");
 
     if windows.is_empty() {
         println!("\n  NOTE: no Meet windows — open Chrome/Edge at meet.google.com first.");
@@ -184,13 +180,12 @@ fn detector_60s_smoke() {
 
         let win_titles: Vec<&str> = obs.browser_windows.iter().map(|w| w.title.as_str()).collect();
         println!(
-            "  [{:02}] t={:5.1}s  {}  has_conn={}  turn={}  windows={}",
+            "  [{:02}] t={:5.1}s  {}  has_conn={}  windows={}",
             i + 1,
             elapsed.as_secs_f32(),
             state_label(&next_state),
             obs.has_meet_connection,
-            has_turn_connection(),
-            if win_titles.is_empty() {
+                        if win_titles.is_empty() {
                 "[]".to_string()
             } else {
                 format!("{:?}", win_titles)

@@ -39,7 +39,10 @@ pub mod playback_monitor; // NEW: Playback device detection for BT warnings
 pub mod transcription;
 
 // Shared utilities for import and retranscription
-pub(crate) mod common;
+// (doc-hidden pub so the live enhance+speakers harness can drive the exact
+// production save helpers without a Tauri AppHandle)
+#[doc(hidden)]
+pub mod common;
 
 // Shared constants
 pub mod constants;

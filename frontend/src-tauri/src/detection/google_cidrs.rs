@@ -37,16 +37,6 @@ static GOOGLE_V4_CIDRS: &[&str] = &[
     "130.211.0.0/22",
 ];
 
-/// TURN/relay-server-only CIDRs — a strict subset of GOOGLE_V4_CIDRS.
-/// These ranges host WebRTC relay servers and are only active during a live call;
-/// the Meet lobby page never connects to them. Used for "still in call" detection.
-static TURN_V4_CIDRS: &[&str] = &[
-    "34.64.0.0/10",
-    "35.190.0.0/17",
-    "35.191.0.0/16",
-    "130.211.0.0/22",
-];
-
 /// Representative Google-owned IPv6 CIDR ranges.
 static GOOGLE_V6_CIDRS: &[&str] = &[
     "2001:4860::/32",
@@ -75,13 +65,6 @@ fn google_v6_nets() -> &'static Vec<Ipv6Net> {
     })
 }
 
-fn turn_v4_nets() -> &'static Vec<Ipv4Net> {
-    static V4: OnceLock<Vec<Ipv4Net>> = OnceLock::new();
-    V4.get_or_init(|| {
-        TURN_V4_CIDRS.iter().filter_map(|s| Ipv4Net::from_str(s).ok()).collect()
-    })
-}
-
 // ── Public API ────────────────────────────────────────────────────────────
 
 /// Returns `true` if `ip` falls within any of the hardcoded Google media CIDR ranges.
@@ -89,16 +72,6 @@ pub fn is_in_google_cidrs(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => google_v4_nets().iter().any(|net| net.contains(&v4)),
         IpAddr::V6(v6) => google_v6_nets().iter().any(|net| net.contains(&v6)),
-    }
-}
-
-/// Returns `true` if `ip` is a Google TURN/relay server.
-/// TURN connections only exist during an active Meet call, not on the lobby page.
-pub fn is_in_turn_cidrs(ip: IpAddr) -> bool {
-    match ip {
-        // TURN servers are IPv4; skip IPv6 to avoid false positives from general Google infra.
-        IpAddr::V4(v4) => turn_v4_nets().iter().any(|net| net.contains(&v4)),
-        IpAddr::V6(_) => false,
     }
 }
 
@@ -142,25 +115,4 @@ mod tests {
         assert!(!is_in_google_cidrs(cloudflare_v6));
     }
 
-    #[test]
-    fn turn_cidrs_are_subset_of_google_cidrs() {
-        // A TURN IP must also match the broad Google check.
-        let turn_ip = IpAddr::V4(Ipv4Addr::new(34, 100, 0, 1)); // 34.64.0.0/10
-        assert!(is_in_turn_cidrs(turn_ip));
-        assert!(is_in_google_cidrs(turn_ip));
-    }
-
-    #[test]
-    fn non_turn_google_ip_does_not_match_turn() {
-        // 74.125.x.x is a general Google range (signaling/HTTPS), not TURN.
-        let signaling_ip = IpAddr::V4(Ipv4Addr::new(74, 125, 0, 1));
-        assert!(is_in_google_cidrs(signaling_ip));
-        assert!(!is_in_turn_cidrs(signaling_ip));
-    }
-
-    #[test]
-    fn turn_cidrs_ipv6_always_false() {
-        let google_v6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0, 0, 0, 0, 0, 1));
-        assert!(!is_in_turn_cidrs(google_v6));
-    }
 }

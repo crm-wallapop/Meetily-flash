@@ -3,8 +3,7 @@
 use crate::api::TranscriptSegment;
 use crate::audio::decoder::{decode_audio_file, decode_audio_file_with_progress};
 use crate::audio::vad::get_speech_chunks_with_progress;
-use crate::config::{DEFAULT_WHISPER_MODEL, DEFAULT_PARAKEET_MODEL};
-use crate::parakeet_engine::ParakeetEngine;
+use crate::config::DEFAULT_WHISPER_MODEL;
 use crate::state::AppState;
 use crate::whisper_engine::WhisperEngine;
 use anyhow::{anyhow, Result};
@@ -284,7 +283,6 @@ pub async fn start_import<R: Runtime>(
     // Reset cancellation flag
     IMPORT_CANCELLED.store(false, Ordering::SeqCst);
 
-    let use_parakeet = provider.as_deref() == Some("parakeet");
     let result = run_import(
         app.clone(),
         source_path,
@@ -296,7 +294,7 @@ pub async fn start_import<R: Runtime>(
     .await;
 
     // Unload the engine after the batch job (success, failure, or cancellation)
-    super::common::unload_engine_after_batch(use_parakeet).await;
+    super::common::unload_engine_after_batch().await;
 
     // Guard will automatically clear flag on drop
     // No need for manual: IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -347,8 +345,8 @@ async fn run_import<R: Runtime>(
         title, source_path, language, model, provider
     );
 
-    // Determine which provider to use (default to whisper)
-    let use_parakeet = provider.as_deref() == Some("parakeet");
+    // Transcription always uses Whisper; `provider` is accepted for API
+    // compatibility and ignored.
 
     emit_progress(&app, "copying", 5, "Creating meeting folder...");
 
@@ -527,13 +525,8 @@ async fn run_import<R: Runtime>(
     emit_progress(&app, "transcribing", 30, "Loading transcription engine...");
 
     // Initialize the appropriate engine
-    let whisper_engine = if !use_parakeet && total_segments > 0 {
+    let whisper_engine = if total_segments > 0 {
         Some(get_or_init_whisper(&app, model.as_deref()).await?)
-    } else {
-        None
-    };
-    let parakeet_engine = if use_parakeet && total_segments > 0 {
-        Some(get_or_init_parakeet(&app, model.as_deref()).await?)
     } else {
         None
     };
@@ -571,42 +564,6 @@ async fn run_import<R: Runtime>(
     // so we fall through to saving an empty-transcript meeting as intended.
     if processable_count == 0 {
         // nothing to transcribe
-    } else if use_parakeet {
-        // Parakeet is not designed for concurrent use; process sequentially.
-        let engine = parakeet_engine.as_ref().ok_or_else(|| anyhow!("Parakeet engine not initialised"))?;
-        for (i, segment) in processable_segments.iter().enumerate() {
-            if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-                let _ = std::fs::remove_dir_all(&meeting_folder);
-                return Err(anyhow!("Import cancelled"));
-            }
-            let progress = 30 + ((i as f32 / processable_count.max(1) as f32) * 50.0) as u32;
-            let segment_duration_sec =
-                (segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0;
-            emit_progress(
-                &app,
-                "transcribing",
-                progress,
-                &format!(
-                    "Transcribing segment {} of {} ({:.1}s)...",
-                    i + 1,
-                    processable_count,
-                    segment_duration_sec
-                ),
-            );
-            if segment.samples.len() < 1600 {
-                debug!("Skipping short segment {} with {} samples", i, segment.samples.len());
-                continue;
-            }
-            let text = engine
-                .transcribe_audio(segment.samples.clone())
-                .await
-                .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms, None));
-                total_confidence += 0.9f32;
-            }
-        }
     } else {
         // Whisper: on Vulkan builds, run 2 segments concurrently to overlap CPU mel computation
         // for segment N+1 with GPU attention inference for segment N (~20-30% speedup).
@@ -648,7 +605,7 @@ async fn run_import<R: Runtime>(
                         );
                     }
                     let (text, conf, _, token_ts) = engine
-                        .transcribe_audio_with_confidence(samples, language)
+                        .transcribe_audio_with_confidence(samples, language, start_ms as i64)
                         .await
                         .map_err(|e| {
                             anyhow!("Whisper transcription failed on segment {}: {}", i, e)
@@ -881,7 +838,7 @@ async fn get_or_init_whisper<R: Runtime>(
         Some(e) => {
             let target_model = match requested_model {
                 Some(model) => model.to_string(),
-                None => get_configured_model(app, "whisper").await?,
+                None => get_configured_model(app).await?,
             };
 
             let current_model = e.get_current_model().await;
@@ -911,54 +868,8 @@ async fn get_or_init_whisper<R: Runtime>(
     }
 }
 
-/// Get or initialize the Parakeet engine
-async fn get_or_init_parakeet<R: Runtime>(
-    app: &AppHandle<R>,
-    requested_model: Option<&str>,
-) -> Result<Arc<ParakeetEngine>> {
-    use crate::parakeet_engine::commands::PARAKEET_ENGINE;
-
-    let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().cloned()
-    };
-
-    match engine {
-        Some(e) => {
-            let target_model = match requested_model {
-                Some(model) => model.to_string(),
-                None => get_configured_model(app, "parakeet").await?,
-            };
-
-            let current_model = e.get_current_model().await;
-            let needs_load = match &current_model {
-                Some(loaded) => loaded != &target_model,
-                None => true,
-            };
-
-            if needs_load {
-                info!(
-                    "Loading Parakeet model '{}' (current: {:?})",
-                    target_model, current_model
-                );
-
-                if let Err(e) = e.discover_models().await {
-                    warn!("Model discovery error (continuing): {}", e);
-                }
-
-                e.load_model(&target_model)
-                    .await
-                    .map_err(|e| anyhow!("Failed to load model '{}': {}", target_model, e))?;
-            }
-
-            Ok(e)
-        }
-        None => Err(anyhow!("Parakeet engine not initialized")),
-    }
-}
-
-/// Get the configured model from database
-async fn get_configured_model<R: Runtime>(app: &AppHandle<R>, provider_type: &str) -> Result<String> {
+/// Get the configured Whisper model from the database, falling back to the default
+async fn get_configured_model<R: Runtime>(app: &AppHandle<R>) -> Result<String> {
     let app_state = app
         .try_state::<AppState>()
         .ok_or_else(|| anyhow!("App state not available"))?;
@@ -972,24 +883,13 @@ async fn get_configured_model<R: Runtime>(app: &AppHandle<R>, provider_type: &st
 
     match result {
         Some((provider, model)) => {
-            if (provider_type == "whisper" && (provider == "localWhisper" || provider == "whisper"))
-                || (provider_type == "parakeet" && provider == "parakeet")
-            {
+            if provider == "localWhisper" || provider == "whisper" {
                 Ok(model)
             } else {
-                // Return default model for the requested type
-                Ok(if provider_type == "parakeet" {
-                    DEFAULT_PARAKEET_MODEL.to_string()
-                } else {
-                    DEFAULT_WHISPER_MODEL.to_string()
-                })
+                Ok(DEFAULT_WHISPER_MODEL.to_string())
             }
         }
-        None => Ok(if provider_type == "parakeet" {
-            DEFAULT_PARAKEET_MODEL.to_string()
-        } else {
-            DEFAULT_WHISPER_MODEL.to_string()
-        }),
+        None => Ok(DEFAULT_WHISPER_MODEL.to_string()),
     }
 }
 

@@ -4,8 +4,7 @@ use crate::audio::decoder::decode_audio_file;
 use crate::audio::vad::get_speech_chunks_with_progress;
 use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json};
 use super::constants::AUDIO_EXTENSIONS;
-use crate::config::{DEFAULT_WHISPER_MODEL, DEFAULT_PARAKEET_MODEL};
-use crate::parakeet_engine::ParakeetEngine;
+use crate::config::DEFAULT_WHISPER_MODEL;
 use crate::state::AppState;
 use crate::whisper_engine::WhisperEngine;
 use anyhow::{anyhow, Result};
@@ -291,8 +290,10 @@ where
     Ok((all_transcripts, total_confidence))
 }
 
-/// Read the configured transcription provider from the DB ("parakeet", "localWhisper", etc.).
-/// Falls back to "whisper" if the setting is absent or the DB is unreachable.
+/// Read the configured transcription provider from the DB.
+/// Batch transcription is Whisper-only regardless of the stored value, so this
+/// exists purely to log what a stale config held; it always resolves to
+/// "whisper" (falls back even when the DB is unreachable).
 async fn resolve_provider_from_db<R: Runtime>(app: &AppHandle<R>) -> String {
     let Some(app_state) = app.try_state::<crate::state::AppState>() else {
         warn!("resolve_provider_from_db: app state unavailable, defaulting to whisper");
@@ -307,8 +308,10 @@ async fn resolve_provider_from_db<R: Runtime>(app: &AppHandle<R>) -> String {
                 None
             });
     let provider = result.map(|(p,)| p).unwrap_or_else(|| "whisper".to_string());
-    info!("resolve_provider_from_db: using provider '{}'", provider);
-    provider
+    if provider != "localWhisper" && provider != "whisper" {
+        info!("resolve_provider_from_db: stale configured provider '{}' ignored - batch transcription is whisper-only", provider);
+    }
+    "whisper".to_string()
 }
 
 /// Start retranscription of a meeting's audio
@@ -326,18 +329,18 @@ pub async fn start_retranscription<R: Runtime>(
     // Reset cancellation flag
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
 
-    // When the caller doesn't specify a provider, read it from the DB so
-    // the correct engine is used regardless of what was configured for live
-    // transcription.  Defaults to "whisper" if the setting is missing.
+    // When the caller doesn't specify a provider, read it from the DB (for
+    // logging only - resolve_provider_from_db forces whisper). Recordings
+    // produce no live transcripts (stop saves audio + an empty meeting row;
+    // the queue runs this batch job afterwards).
     let resolved_provider = match provider {
         Some(ref p) => p.clone(),
         None => resolve_provider_from_db(&app).await,
     };
-    let use_parakeet = resolved_provider == "parakeet";
     let result = run_retranscription(app.clone(), meeting_id.clone(), meeting_folder_path, language, model, Some(resolved_provider)).await;
 
     // Unload the engine after the batch job (success, failure, or cancellation)
-    super::common::unload_engine_after_batch(use_parakeet).await;
+    super::common::unload_engine_after_batch().await;
 
     // Guard will automatically clear flag on drop
     // No need for manual: RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -424,9 +427,6 @@ async fn run_retranscription<R: Runtime>(
     let folder_path = PathBuf::from(&meeting_folder_path);
     let audio_path = find_audio_file(&folder_path)?;
 
-    // Determine which provider to use (default to whisper)
-    let use_parakeet = provider.as_deref() == Some("parakeet");
-
     info!(
         "Starting retranscription for meeting {} with language {:?}, model {:?}, provider {:?}",
         meeting_id, language, model, provider
@@ -476,7 +476,7 @@ async fn run_retranscription<R: Runtime>(
         return Err(anyhow!("Retranscription cancelled"));
     }
 
-    // Use VAD to find natural speech boundaries (same approach as live transcription)
+    // Use VAD to find natural speech boundaries.
     // IMPORTANT: Run VAD in a blocking task to avoid blocking the async runtime
     // For large files (35+ minutes), VAD processing can take several minutes
     let app_for_vad = app.clone();
@@ -543,16 +543,7 @@ async fn run_retranscription<R: Runtime>(
     emit_progress(&app, &meeting_id, "transcribing", 25, "Loading transcription engine...");
 
     // Initialize the appropriate engine once (not per-segment)
-    let whisper_engine = if !use_parakeet {
-        Some(get_or_init_whisper(&app, model.as_deref()).await?)
-    } else {
-        None
-    };
-    let parakeet_engine = if use_parakeet {
-        Some(get_or_init_parakeet(&app, model.as_deref()).await?)
-    } else {
-        None
-    };
+    let whisper_engine = Some(get_or_init_whisper(&app, model.as_deref()).await?);
 
     // Split very long segments at silence boundaries for better transcription quality.
     // Hard cuts at arbitrary sample positions lose words at boundaries. Instead, scan
@@ -596,27 +587,17 @@ async fn run_retranscription<R: Runtime>(
         &processable_segments,
         checkpoint_pool.as_ref().ok_or_else(|| anyhow!("App state not available for checkpoint pool"))?,
         |i, segment| {
-            let parakeet_engine = parakeet_engine.clone();
             let whisper_engine = whisper_engine.clone();
             let language = language.clone();
-            let use_parakeet = use_parakeet;
             let samples = segment.samples.clone();
+            let segment_offset_ms = segment.start_timestamp_ms as i64;
             async move {
-                if use_parakeet {
-                    let engine = parakeet_engine.as_ref().unwrap();
-                    let text = engine
-                        .transcribe_audio(samples)
-                        .await
-                        .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-                    Ok((text, 0.9f32, None))
-                } else {
-                    let engine = whisper_engine.as_ref().unwrap();
-                    let (text, conf, _, token_ts) = engine
-                        .transcribe_audio_with_confidence(samples, language)
-                        .await
-                        .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-                    Ok((text, conf, token_ts))
-                }
+                let engine = whisper_engine.as_ref().unwrap();
+                let (text, conf, _, token_ts) = engine
+                    .transcribe_audio_with_confidence(samples, language, segment_offset_ms)
+                    .await
+                    .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
+                Ok((text, conf, token_ts))
             }
         },
         |done, total| {
@@ -883,12 +864,11 @@ async fn get_configured_whisper_model<R: Runtime>(app: &AppHandle<R>) -> Result<
             info!("Found transcript config: provider={}, model={}", provider, model);
 
             // Return the stored model name when the DB row is for a Whisper provider.
-            // If the user has since switched to Parakeet, the model column holds a Parakeet
-            // model name — passing that to the Whisper engine would be wrong, so fall back
-            // to DEFAULT_WHISPER_MODEL.  The queue path never reaches here (provider is
-            // resolved by resolve_provider_from_db before branching); this fallback only
-            // fires for explicit-Whisper calls from the retranscription UI when the user
-            // has no Whisper model stored.
+            // A stale non-Whisper row means no valid model is stored — passing that
+            // name to the Whisper engine would be wrong, so surface a user-readable
+            // error instead of failing later with a cryptic "model not found" during
+            // load. The startup DB migration rewrites legacy rows, so this only
+            // fires for hand-edited or restored pre-migration databases.
             if provider == "localWhisper" || provider == "whisper" {
                 Ok(model)
             } else {
@@ -905,106 +885,6 @@ async fn get_configured_whisper_model<R: Runtime>(app: &AppHandle<R>) -> Result<
             // Default to configured Whisper model if no config exists
             warn!("No transcript config found, using default model '{}'", DEFAULT_WHISPER_MODEL);
             Ok(DEFAULT_WHISPER_MODEL.to_string())
-        }
-    }
-}
-
-/// Get or initialize the Parakeet engine, auto-loading the model if needed
-async fn get_or_init_parakeet<R: Runtime>(
-    app: &AppHandle<R>,
-    requested_model: Option<&str>,
-) -> Result<Arc<ParakeetEngine>> {
-    use crate::parakeet_engine::commands::PARAKEET_ENGINE;
-
-    let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().cloned()
-    };
-
-    match engine {
-        Some(e) => {
-            // Determine which model to use
-            let target_model = match requested_model {
-                Some(model) => model.to_string(),
-                None => get_configured_parakeet_model(app).await?,
-            };
-
-            // Check if the correct model is already loaded
-            let current_model = e.get_current_model().await;
-            let needs_load = match &current_model {
-                Some(loaded) => loaded != &target_model,
-                None => true,
-            };
-
-            if needs_load {
-                info!(
-                    "Loading Parakeet model '{}' (current: {:?})",
-                    target_model, current_model
-                );
-
-                // Discover available models first
-                info!("Discovering available Parakeet models...");
-                if let Err(discover_err) = e.discover_models().await {
-                    warn!("Error during Parakeet model discovery (continuing anyway): {}", discover_err);
-                }
-
-                match e.load_model(&target_model).await {
-                    Ok(_) => {
-                        info!("Parakeet model '{}' loaded successfully", target_model);
-                        Ok(e)
-                    }
-                    Err(load_err) => {
-                        error!("Failed to load Parakeet model '{}': {}", target_model, load_err);
-                        Err(anyhow!("Failed to load Parakeet model '{}': {}", target_model, load_err))
-                    }
-                }
-            } else {
-                info!("Parakeet model '{}' already loaded", target_model);
-                Ok(e)
-            }
-        }
-        None => Err(anyhow!("Parakeet engine not initialized")),
-    }
-}
-
-/// Get the configured Parakeet model name from the database
-async fn get_configured_parakeet_model<R: Runtime>(app: &AppHandle<R>) -> Result<String> {
-    debug!("Getting configured Parakeet model from database...");
-
-    let app_state = app
-        .try_state::<AppState>()
-        .ok_or_else(|| {
-            error!("App state not available");
-            anyhow!("App state not available")
-        })?;
-
-    // Query the transcript settings from the database
-    let result: Option<(String, String)> = sqlx::query_as(
-        "SELECT provider, model FROM transcript_settings WHERE id = '1'"
-    )
-    .fetch_optional(app_state.db_manager.pool())
-    .await
-    .map_err(|e| {
-        error!("Failed to query transcript config: {}", e);
-        anyhow!("Failed to query transcript config: {}", e)
-    })?;
-
-    match result {
-        Some((provider, model)) => {
-            info!("Found transcript config: provider={}, model={}", provider, model);
-
-            if provider == "parakeet" {
-                Ok(model)
-            } else {
-                // Default to configured Parakeet model
-                warn!("Configured provider is not Parakeet, using default model");
-                Ok(DEFAULT_PARAKEET_MODEL.to_string())
-            }
-        },
-        None => {
-            // Default to configured Parakeet model if no config exists
-            warn!("No transcript config found, using default Parakeet model");
-            Ok(DEFAULT_PARAKEET_MODEL.to_string())
         }
     }
 }

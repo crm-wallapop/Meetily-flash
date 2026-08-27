@@ -9,7 +9,7 @@ import { SMOKE_DEFAULTS_INIT_SCRIPT } from './_defaults';
 //   fix moves setCompleted to BEFORE the slow verifyModelStatus await so the
 //   existing guard (if completed) blocks the auto-save before the debounce can
 //   fire with the mount-time default. This spec forces the race window open by
-//   delaying parakeet_init past the 1s debounce, then asserts the clobbering
+//   delaying whisper_init past the 1s debounce, then asserts the clobbering
 //   command never reaches the invoke call log.
 //
 // What this spec CANNOT assert (covered elsewhere):
@@ -18,7 +18,7 @@ import { SMOKE_DEFAULTS_INIT_SCRIPT } from './_defaults';
 //     race (single fast invoke, no auto-save); it's transitively fixed once the
 //     store stops being clobbered.
 
-// Delay parakeet_init past the 1s auto-save debounce to force the race window
+// Delay whisper_init past the 1s auto-save debounce to force the race window
 // open. Without this, verifyModelStatus resolves instantly (unregistered probes
 // throw + get caught) and the test would pass even on the buggy code.
 const SLOW_PROBES_INIT_SCRIPT = `
@@ -26,15 +26,15 @@ const SLOW_PROBES_INIT_SCRIPT = `
   'use strict';
   var d = window.__tauriMockDispatcher;
   if (!d) return;
-  d.register('parakeet_init', function () {
+  d.register('whisper_init', function () {
     return new Promise(function (resolve) {
       setTimeout(function () {
-        window.__smokeParakeetInitDone = true;
+        window.__smokeWhisperInitDone = true;
         resolve();
       }, 3000);
     });
   });
-  d.register('parakeet_has_available_models', function () { return true; });
+  d.register('whisper_has_available_models', function () { return true; });
   d.register('builtin_ai_get_available_summary_model', function () { return 'test-model'; });
 })();
 `;
@@ -79,14 +79,14 @@ test.describe('onboarding persistence smoke (fix-onboarding-completed-clobber)',
       { timeout: 15_000 },
     );
 
-    // Wait for the slow parakeet_init to resolve. The 1s auto-save debounce
+    // Wait for the slow whisper_init to resolve. The 1s auto-save debounce
     // fires well before this point (at t=1s vs init resolving at t=2s), so if
     // the bug were present the clobbering invoke would already be in the log.
     await expect
       .poll(
         () =>
           page.evaluate(
-            () => (window as unknown as { __smokeParakeetInitDone?: boolean }).__smokeParakeetInitDone === true,
+            () => (window as unknown as { __smokeWhisperInitDone?: boolean }).__smokeWhisperInitDone === true,
           ),
         { timeout: 15_000 },
       )

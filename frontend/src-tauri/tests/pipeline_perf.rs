@@ -106,7 +106,11 @@ async fn bench_transcription_pipeline() {
         let dur_s = seg.samples.len() as f64 / 16000.0;
         let seg_t = Instant::now();
         let (text, conf, _, _) = engine
-            .transcribe_audio_with_confidence(seg.samples.clone(), Some(language.clone()))
+            .transcribe_audio_with_confidence(
+                seg.samples.clone(),
+                Some(language.clone()),
+                seg.start_timestamp_ms as i64,
+            )
             .await
             .expect("transcription failed");
         let seg_ms = seg_t.elapsed().as_millis();

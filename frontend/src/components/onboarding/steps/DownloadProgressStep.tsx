@@ -7,8 +7,9 @@ import { OnboardingContainer } from '../OnboardingContainer';
 import { useOnboarding } from '@/contexts/OnboardingContext';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
+import { DEFAULT_WHISPER_MODEL } from '@/constants/modelDefaults';
 
-const PARAKEET_MODEL = 'parakeet-tdt-0.6b-v3-int8';
+const WHISPER_MODEL = DEFAULT_WHISPER_MODEL;
 
 type DownloadStatus = 'waiting' | 'downloading' | 'completed' | 'error';
 
@@ -26,8 +27,8 @@ export function DownloadProgressStep() {
     goNext,
     selectedSummaryModel,
     setSelectedSummaryModel,
-    parakeetDownloaded,
-    setParakeetDownloaded,
+    whisperDownloaded,
+    setWhisperDownloaded,
     summaryModelDownloaded,
     setSummaryModelDownloaded,
     startBackgroundDownloads,
@@ -37,11 +38,11 @@ export function DownloadProgressStep() {
   const [recommendedModel, setRecommendedModel] = useState<string>('gemma3:1b');
   const [isMac, setIsMac] = useState(false);
 
-  const [parakeetState, setParakeetState] = useState<DownloadState>({
-    status: parakeetDownloaded ? 'completed' : 'waiting',
-    progress: parakeetDownloaded ? 100 : 0,
+  const [whisperState, setWhisperState] = useState<DownloadState>({
+    status: whisperDownloaded ? 'completed' : 'waiting',
+    progress: whisperDownloaded ? 100 : 0,
     downloadedMb: 0,
-    totalMb: 670,
+    totalMb: 1549, // large-v3-turbo f16
     speedMbps: 0,
   });
 
@@ -75,11 +76,11 @@ export function DownloadProgressStep() {
       return;
     }
 
-    console.log('[DownloadProgressStep] Retrying Parakeet download');
+    console.log('[DownloadProgressStep] Retrying transcription model download');
     retryingRef.current = true;
 
     // Reset error state
-    setParakeetState((prev) => ({
+    setWhisperState((prev) => ({
       ...prev,
       status: 'waiting',
       error: undefined,
@@ -89,11 +90,11 @@ export function DownloadProgressStep() {
     }));
 
     try {
-      await invoke('parakeet_retry_download', { modelName: PARAKEET_MODEL });
+      await invoke('whisper_download_model', { modelName: WHISPER_MODEL });
       // Progress events will update state
     } catch (error) {
       console.error('[DownloadProgressStep] Retry failed:', error);
-      setParakeetState((prev) => ({
+      setWhisperState((prev) => ({
         ...prev,
         status: 'error',
         error: error instanceof Error ? error.message : 'Retry failed',
@@ -217,7 +218,8 @@ export function DownloadProgressStep() {
     startDownloads();
   }, []);
 
-  // Listen to Parakeet download progress
+  // Listen to transcription model download progress (generic `model-download-*`
+  // events emitted by the whisper engine; filtered by modelName)
   useEffect(() => {
     const unlistenProgress = listen<{
       modelName: string;
@@ -226,10 +228,10 @@ export function DownloadProgressStep() {
       total_mb?: number;
       speed_mbps?: number;
       status?: string;
-    }>('parakeet-model-download-progress', (event) => {
+    }>('model-download-progress', (event) => {
       const { modelName, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
-      if (modelName === PARAKEET_MODEL) {
-        setParakeetState((prev) => ({
+      if (modelName === WHISPER_MODEL) {
+        setWhisperState((prev) => ({
           ...prev,
           status: status === 'completed' ? 'completed' : 'downloading',
           progress,
@@ -239,26 +241,26 @@ export function DownloadProgressStep() {
         }));
 
         if (status === 'completed' || progress >= 100) {
-          setParakeetDownloaded(true);
+          setWhisperDownloaded(true);
         }
       }
     });
 
     const unlistenComplete = listen<{ modelName: string }>(
-      'parakeet-model-download-complete',
+      'model-download-complete',
       (event) => {
-        if (event.payload.modelName === PARAKEET_MODEL) {
-          setParakeetState((prev) => ({ ...prev, status: 'completed', progress: 100 }));
-          setParakeetDownloaded(true);
+        if (event.payload.modelName === WHISPER_MODEL) {
+          setWhisperState((prev) => ({ ...prev, status: 'completed', progress: 100 }));
+          setWhisperDownloaded(true);
         }
       }
     );
 
     const unlistenError = listen<{ modelName: string; error: string }>(
-      'parakeet-model-download-error',
+      'model-download-error',
       (event) => {
-        if (event.payload.modelName === PARAKEET_MODEL) {
-          setParakeetState((prev) => ({
+        if (event.payload.modelName === WHISPER_MODEL) {
+          setWhisperState((prev) => ({
             ...prev,
             status: 'error',
             error: event.payload.error,
@@ -348,11 +350,11 @@ export function DownloadProgressStep() {
   }, []);
 
   const startDownloads = async () => {
-    // Always download Parakeet and Gemma; speaker models are best-effort
-    if (!parakeetDownloaded || !summaryModelDownloaded) {
+    // Always download the Whisper and Gemma models; speaker models are best-effort
+    if (!whisperDownloaded || !summaryModelDownloaded) {
       try {
-        if (!parakeetDownloaded) {
-          setParakeetState((prev) => ({ ...prev, status: 'downloading' }));
+        if (!whisperDownloaded) {
+          setWhisperState((prev) => ({ ...prev, status: 'downloading' }));
         }
         if (!summaryModelDownloaded) {
           setGemmaState((prev) => ({ ...prev, status: 'downloading' }));
@@ -360,8 +362,8 @@ export function DownloadProgressStep() {
         await startBackgroundDownloads(true);  // Always download both
       } catch (error) {
         console.error('Failed to start downloads:', error);
-        if (!parakeetDownloaded) {
-          setParakeetState((prev) => ({ ...prev, status: 'error', error: String(error) }));
+        if (!whisperDownloaded) {
+          setWhisperState((prev) => ({ ...prev, status: 'error', error: String(error) }));
         }
       }
     }
@@ -390,18 +392,18 @@ export function DownloadProgressStep() {
   const handleContinue = async () => {
     // Verify actual model availability (catches state drift)
     try {
-      await invoke('parakeet_init');
-      const actuallyAvailable = await invoke<boolean>('parakeet_has_available_models');
+      await invoke('whisper_init');
+      const actuallyAvailable = await invoke<boolean>('whisper_has_available_models');
 
-      if (actuallyAvailable && !parakeetDownloaded) {
+      if (actuallyAvailable && !whisperDownloaded) {
         console.log('[DownloadProgressStep] Model available but state not updated');
-        setParakeetDownloaded(true);
-        setParakeetState((prev) => ({
+        setWhisperDownloaded(true);
+        setWhisperState((prev) => ({
           ...prev,
           status: 'completed',
           progress: 100,
         }));
-      } else if (!actuallyAvailable && parakeetState.status === 'error') {
+      } else if (!actuallyAvailable && whisperState.status === 'error') {
         toast.error('Transcription engine required', {
           description: 'Please retry the download before continuing.',
         });
@@ -412,7 +414,7 @@ export function DownloadProgressStep() {
     }
 
     // Check if downloads are complete for toast notification
-    const downloadsComplete = parakeetState.status === 'completed' &&
+    const downloadsComplete = whisperState.status === 'completed' &&
       gemmaState.status === 'completed';
 
     // Show toast if downloads still in progress
@@ -552,8 +554,8 @@ export function DownloadProgressStep() {
           {renderDownloadCard(
             'Transcription Engine',
             <Mic className="w-5 h-5 text-gray-600" />,
-            parakeetState,
-            '~670 MB'
+            whisperState,
+            '~1.5 GB'
           )}
 
           {renderDownloadCard(
@@ -572,9 +574,9 @@ export function DownloadProgressStep() {
           )}
         </div>
 
-        {/* Info Message - Only show when Parakeet is downloaded */}
+        {/* Info Message - Only show when the transcription model is downloaded */}
         <AnimatePresence>
-          {parakeetDownloaded && !summaryModelDownloaded && (
+          {whisperDownloaded && !summaryModelDownloaded && (
             <motion.div
               initial={{ opacity: 0, y: -10 }}
               animate={{ opacity: 1, y: 0 }}
@@ -599,10 +601,10 @@ export function DownloadProgressStep() {
         <div className="w-full max-w-xs">
           <Button
             onClick={handleContinue}
-            disabled={!parakeetDownloaded || isCompleting}
+            disabled={!whisperDownloaded || isCompleting}
             className="w-full h-11 bg-gray-900 hover:bg-gray-800 text-white disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {(isCompleting || !parakeetDownloaded) ? (
+            {(isCompleting || !whisperDownloaded) ? (
               <Loader2 className="w-4 h-4 mr-2 animate-spin" />
             ) : (
               'Continue'

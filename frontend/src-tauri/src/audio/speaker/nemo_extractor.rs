@@ -2,8 +2,8 @@
 //! `SpeakerEmbeddingExtractor`).
 //!
 //! WHY this exists: sherpa-onnx-sys 1.13.4 statically bundles ONNX Runtime 1.17.1
-//! (C-API ≤17) while the project's `ort = "2.0.0-rc.10"` dep (needed for Parakeet
-//! AND pyannote) brings C-API 27 — the two runtimes cannot coexist in one process
+//! (C-API ≤17) while the project's `ort = "2.0.0-rc.10"` dep (needed for nemo AND
+//! pyannote) brings C-API 27 — the two runtimes cannot coexist in one process
 //! (STATUS_ACCESS_VIOLATION on the global C-API symbol table; verified by the
 //! `pyannote_sherpa_load_crux` probe). Part B therefore ports nemo_titanet
 //! extraction to `ort` and removes sherpa-onnx entirely: one runtime for the

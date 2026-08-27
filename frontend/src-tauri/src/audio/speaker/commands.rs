@@ -945,7 +945,8 @@ async fn resolve_effective_cap_for_meeting(pool: &SqlitePool, meeting_id: &str) 
     }
 }
 
-fn enforce_max_speakers_cap(
+/// pub for the cde5c264 probe integration tests (production parity checks).
+pub fn enforce_max_speakers_cap(
     centroids: &mut std::collections::HashMap<u32, Vec<f32>>,
     segments: &mut Vec<SpeakerSegment>,
     cap: usize,

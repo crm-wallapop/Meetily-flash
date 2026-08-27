@@ -6,14 +6,22 @@ import { Button } from './ui/button';
 import { Label } from './ui/label';
 import { Eye, EyeOff, Lock, Unlock } from 'lucide-react';
 import { ModelManager } from './WhisperModelManager';
-import { ParakeetModelManager } from './ParakeetModelManager';
 
 
 export interface TranscriptModelProps {
-    provider: 'localWhisper' | 'parakeet' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+    provider: 'localWhisper' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
     model: string;
     apiKey?: string | null;
 }
+
+type UiProvider = TranscriptModelProps['provider'];
+
+// Stored configs may hold legacy/normalized values this page has no select
+// entry for (e.g. the backend resolves unknowns to plain "whisper"). Display
+// them as localWhisper instead of indexing modelOptions with a missing key.
+const KNOWN_UI_PROVIDERS: UiProvider[] = ['localWhisper', 'deepgram', 'elevenLabs', 'groq', 'openai'];
+const asUiProvider = (provider: string): UiProvider =>
+    (KNOWN_UI_PROVIDERS as string[]).includes(provider) ? (provider as UiProvider) : 'localWhisper';
 
 export interface TranscriptSettingsProps {
     transcriptModelConfig: TranscriptModelProps;
@@ -26,15 +34,15 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [showApiKey, setShowApiKey] = useState<boolean>(false);
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
-    const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
+    const [uiProvider, setUiProvider] = useState<UiProvider>(asUiProvider(transcriptModelConfig.provider));
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
-        setUiProvider(transcriptModelConfig.provider);
+        setUiProvider(asUiProvider(transcriptModelConfig.provider));
     }, [transcriptModelConfig.provider]);
 
     useEffect(() => {
-        if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet') {
+        if (transcriptModelConfig.provider === 'localWhisper') {
             setApiKey(null);
         }
     }, [transcriptModelConfig.provider]);
@@ -52,7 +60,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     };
     const modelOptions = {
         localWhisper: [], // Model selection handled by ModelManager component
-        parakeet: [], // Model selection handled by ParakeetModelManager component
         deepgram: ['nova-2-phonecall'],
         elevenLabs: ['eleven_multilingual_v2'],
         groq: ['llama-3.3-70b-versatile'],
@@ -81,20 +88,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         }
     };
 
-    const handleParakeetModelSelect = (modelName: string) => {
-        // Always update config when model is selected, regardless of current provider
-        // This ensures the model is set when user switches back
-        setTranscriptModelConfig({
-            ...transcriptModelConfig,
-            provider: 'parakeet', // Ensure provider is set correctly
-            model: modelName
-        });
-        // Close modal after selection
-        if (onModelSelect) {
-            onModelSelect();
-        }
-    };
-
     return (
         <div>
             <div>
@@ -110,9 +103,9 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                             <Select
                                 value={uiProvider}
                                 onValueChange={(value) => {
-                                    const provider = value as TranscriptModelProps['provider'];
+                                    const provider = value as UiProvider;
                                     setUiProvider(provider);
-                                    if (provider !== 'localWhisper' && provider !== 'parakeet') {
+                                    if (provider !== 'localWhisper') {
                                         fetchApiKey(provider);
                                     }
                                 }}
@@ -121,7 +114,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     <SelectValue placeholder="Select provider" />
                                 </SelectTrigger>
                                 <SelectContent>
-                                    <SelectItem value="parakeet">⚡ Parakeet (Recommended - Real-time / Accurate)</SelectItem>
                                     <SelectItem value="localWhisper">🏠 Local Whisper (High Accuracy)</SelectItem>
                                     {/* <SelectItem value="deepgram">☁️ Deepgram (Backup)</SelectItem>
                                     <SelectItem value="elevenLabs">☁️ ElevenLabs</SelectItem>
@@ -130,7 +122,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 </SelectContent>
                             </Select>
 
-                            {uiProvider !== 'localWhisper' && uiProvider !== 'parakeet' && (
+                            {uiProvider !== 'localWhisper' && (
                                 <Select
                                     value={transcriptModelConfig.model}
                                     onValueChange={(value) => {
@@ -162,15 +154,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                         </div>
                     )}
 
-                    {uiProvider === 'parakeet' && (
-                        <div className="mt-6">
-                            <ParakeetModelManager
-                                selectedModel={transcriptModelConfig.provider === 'parakeet' ? transcriptModelConfig.model : undefined}
-                                onModelSelect={handleParakeetModelSelect}
-                                autoSave={true}
-                            />
-                        </div>
-                    )}
 
 
                     {requiresApiKey && (

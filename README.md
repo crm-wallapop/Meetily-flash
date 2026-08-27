@@ -51,7 +51,7 @@ What's different from upstream:
 - **Batch pipeline instead of live.** Once a meeting ends, the recording runs through transcription, speaker diarization, and voice fingerprinting. Drops taxing real-time processing in favor of a pipeline you can pause/resume.
 - **Speaker diarization with temporal-coherence smoothing.** Speaker labels are stabilized across the recording, so they don't flicker turn to turn.
 - **Voice fingerprinting** to identify speakers across meetings.
-- **Faster transcription engine** (enabled Vulkan support for Parakeet/Whisper, roughly 4x). The original pipeline was CPU-bound and didn't use integrated GPU for faster performance.
+- **Faster transcription engine** (enabled Vulkan support for Whisper, roughly 4x). The original pipeline was CPU-bound and didn't use integrated GPU for faster performance.
 - **Cross-platform automated smoke tests** (Vitest + Playwright E2E). The suite runs on Windows, macOS, and Linux with no cloud dependencies, and a checked-in pre-push hook runs the unit suite plus a branch-scoped smoke spec before a push reaches the remote. See [`openspec/specs/automated-smoke-tests`](openspec/specs/automated-smoke-tests).
 - **Hexagonal (ports & adapters) architecture** for testability. The frontend is split into small modules with clear boundaries, and anything that touches the outside world, like audio capture, is being moved behind an interface you can swap out, so the core logic can be tested without a real microphone. See [`openspec/changes/hexagonal-port-traits`](openspec/changes/hexagonal-port-traits).
 
@@ -152,7 +152,7 @@ pnpm install
 
 ### 🎯 Local Transcription
 
-Transcribe meetings entirely on your device using **Whisper** or **Parakeet** models. No cloud required.
+Transcribe meetings entirely on your device using **Whisper** models. No cloud required.
 
 <p align="center">
     <img src="docs/home.png" width="650" style="border-radius: 10px;" alt="Meetily Demo" />
@@ -272,8 +272,6 @@ MIT License - Feel free to use this project for your own purposes.
 - We borrowed some code from [Whisper.cpp](https://github.com/ggerganov/whisper.cpp).
 - We borrowed some code from [Screenpipe](https://github.com/mediar-ai/screenpipe).
 - We borrowed some code from [transcribe-rs](https://crates.io/crates/transcribe-rs).
-- Thanks to **NVIDIA** for developing the **Parakeet** model.
-- Thanks to [istupakov](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) for providing the **ONNX conversion** of the Parakeet model.
 
 ## Star History
 

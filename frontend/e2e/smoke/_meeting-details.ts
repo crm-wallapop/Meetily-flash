@@ -116,9 +116,37 @@ export const SMOKE_MEETING_DETAILS_INIT_SCRIPT = `
     window.__smokeSpeakerCalls.push({ cmd: 'revert_speaker_label', meetingId: args.meetingId, speakerLabel: args.speakerLabel });
     return 0;
   });
+  // Track if reset_speaker_labels should reject
+  window.__smokeResetSpeakerLabelsShouldReject = false;
+  window.__smokeResetSpeakerLabelsRejectValue = null;
+  
+  // reset_speaker_labels returns a Promise to simulate real Tauri async IPC.
+  // Real commands take time to complete, giving React a chance to paint the
+  // disabled state before the command resolves. The delay (via setTimeout)
+  // lets setIsRediarizing(true) flush to the DOM before the rejection callback
+  // clears the state. A 0ms delay is too fast for Playwright to observe the
+  // disabled state between React microtask flushes.
   d.register('reset_speaker_labels', function (args) {
     window.__smokeSpeakerCalls.push({ cmd: 'reset_speaker_labels', meetingId: args.meetingId });
-    return window.__smokeRediarizeResult.segments_labeled;
+    if (window.__smokeResetSpeakerLabelsShouldReject) {
+      // Clear flag immediately so retries can reconfigure it
+      window.__smokeResetSpeakerLabelsShouldReject = false;
+      var msg = window.__smokeResetSpeakerLabelsRejectValue || 'Mock reset_speaker_labels failure';
+      window.__smokeResetSpeakerLabelsRejectValue = null;
+      return new Promise(function (_, reject) {
+        setTimeout(function () { reject(new Error(msg)); }, 50);
+      });
+    }
+    return new Promise(function (resolve) {
+      setTimeout(function () { resolve(window.__smokeRediarizeResult.segments_labeled); }, 50);
+    });
+  });
+  
+  // Helper for tests to configure reset_speaker_labels to reject
+  d.register('__test_configure_reset_speaker_labels_error', function (args) {
+    window.__smokeResetSpeakerLabelsShouldReject = !!args.shouldReject;
+    window.__smokeResetSpeakerLabelsRejectValue = args.rejectValue || null;
+    return null;
   });
   d.register('set_segment_speaker', function (args) {
     window.__smokeSpeakerCalls.push({ cmd: 'set_segment_speaker', transcriptId: args.transcriptId, speakerLabel: args.speakerLabel });
@@ -145,7 +173,7 @@ export const SMOKE_MEETING_DETAILS_INIT_SCRIPT = `
   d.register('whisper_get_available_models', function () {
     return [{ name: 'small', size_mb: 466, status: 'Available' }];
   });
-  d.register('parakeet_get_available_models', function () { return []; });
+  
 })();
 `;
 

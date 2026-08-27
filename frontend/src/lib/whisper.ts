@@ -189,7 +189,7 @@ export function getModelPerformanceBadge(modelName: string): { label: string; co
   }
 }
 
-// Helper function to get concise tagline for model (similar to Parakeet style)
+// Helper function to get concise tagline for model
 export function getModelTagline(modelName: string, speed: ProcessingSpeed, accuracy: ModelAccuracy): string {
   const isQuantized = isQuantizedModel(modelName);
   const baseName = getModelBaseName(modelName);

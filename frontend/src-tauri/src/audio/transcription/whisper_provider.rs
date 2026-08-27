@@ -26,7 +26,10 @@ impl TranscriptionProvider for WhisperProvider {
     ) -> std::result::Result<TranscriptResult, TranscriptionError> {
         match self
             .engine
-            .transcribe_audio_with_confidence(audio, language)
+            // Provider trait has no chunk-offset concept; callers that consume
+            // token timestamps go through the batch paths, which pass the real
+            // segment offset themselves.
+            .transcribe_audio_with_confidence(audio, language, 0)
             .await
         {
             Ok((text, confidence, is_partial, token_ts)) => Ok(TranscriptResult {

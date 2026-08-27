@@ -22,13 +22,12 @@ pub struct DetectorObservation {
     /// frontend as candidate recording names. Empty when no vendor match.
     pub candidate_titles: Vec<String>,
     /// Entry signal fed to the `Idle → InCall` transition. The VALUE is vendor-neutral —
-    /// `has_conn = turn || (signaling_active && has_browser_capture_session)`, where
+    /// `has_meet_connection = signaling_active && has_browser_capture_session`, where
     /// `signaling_active` is the OR of wired `CallSignalingPort` adapters (v1: Meet's
     /// Google-CIDR check). The field NAME is retained as `has_meet_connection` for
     /// canonical-spec continuity; the rename is deferred to the second-vendor change.
-    /// Not used for exit detection — see `has_browser_capture_session`. For active TURN
-    /// relay connections the adapter sets this `true` without consulting WASAPI, so the
-    /// invariant "mc implies bc" does not hold on the TURN path.
+    /// Not used for exit detection — see `has_browser_capture_session`. Because entry
+    /// requires capture, the invariant "mc implies bc" holds.
     pub has_meet_connection: bool,
     /// Exit signal: a browser process holds an `AudioSessionStateActive` WASAPI capture
     /// session (D2 asymmetric). Stays true throughout a Meet call; drops within ~1-2 s of
@@ -44,13 +43,6 @@ pub struct DetectorObservation {
     /// populated — the timestamp fallback guarantees a non-empty string even when no
     /// browser window is visible.
     pub default_title: String,
-    /// Set to `true` when a TURN relay was established for this call and has just dropped
-    /// (`turn_established = true && !turn`). Enables fast 4 s debounce for TCP TURN exit
-    /// so that TURN calls restore their original ~5 s exit latency instead of the 15 s
-    /// debounce required for UDP calls (which have ~10 s WASAPI transients).
-    /// Resets to `false` when TURN returns (transient blip), allowing the debounce timer
-    /// to be cleared. `false` on all other paths.
-    pub is_turn_exit: bool,
     /// Adaptive UDP-exit discriminator. Decided ONCE per call, at the first
     /// `has_browser_capture_session()` `true → false` drop, from the length of the
     /// unbroken `true` run immediately preceding that drop: `true` iff that run was ≥
@@ -62,9 +54,14 @@ pub struct DetectorObservation {
     /// mid-debounce (the prior recovery-based design recreated the self-heal trap of
     /// commit 693ff90). The pure `step_detector` selects the UDP debounce from this
     /// flag: 4 s when `true` (stable-mic common case), 15 s when `false`
-    /// (transient-prone / short run). Ignored on the TURN path (`is_turn_exit` gates
-    /// there). Mirrors the `is_turn_exit` plumbing: adapter-set bool consumed by the
-    /// pure use case, no trait-method change.
+    /// (transient-prone / short run).
+    ///
+    /// 2026-08-26: replaced the TURN-exit fast path (`is_turn_exit`). The TCP
+    /// "TURN relay" scan never saw real Meet calls (media is UDP, invisible to
+    /// the TCP table) and its CIDR ranges overlapped general Google Cloud
+    /// hosting, producing false-positive detections. Exit latency for typical
+    /// calls is unchanged: the stable-capture latch already grants the same 4 s
+    /// debounce after ~20 s of continuous capture.
     pub stable_capture: bool,
 }
 
@@ -77,7 +74,6 @@ impl Default for DetectorObservation {
             has_browser_capture_session: false,
             connection_first_seen_at: None,
             default_title: String::new(),
-            is_turn_exit: false,
             stable_capture: false,
         }
     }
@@ -87,8 +83,8 @@ impl Default for DetectorObservation {
 pub trait MeetingDetectorPort {
     fn current_state(&mut self) -> DetectorObservation;
     /// Called by the use case immediately after a `MeetingEnded` event is emitted.
-    /// Adapters that maintain per-call sticky state (e.g. `turn_established`) reset
-    /// it here so back-to-back calls are detectable. Default is a no-op so existing
+    /// Adapters that maintain per-call sticky state (exit latches, first-seen
+    /// suppression) reset it here so back-to-back calls are detectable. Default is a no-op so existing
     /// implementations compile unchanged.
     fn notify_exit(&mut self) {}
 }
@@ -110,7 +106,6 @@ mod tests {
             has_browser_capture_session: true,
             connection_first_seen_at: None,
             default_title: "Weekly sync".to_string(),
-            is_turn_exit: false,
             stable_capture: false,
         };
         let cloned = obs.clone();
