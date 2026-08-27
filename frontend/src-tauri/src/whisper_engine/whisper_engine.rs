@@ -635,12 +635,13 @@ impl WhisperEngine {
             total_confidence += segment_confidence;
             segment_count += 1;
 
-            let cleaned_text = segment_text.trim();
+            let cleaned_text =
+                crate::audio::speaker::token_timestamps::strip_eot_markers(&segment_text);
             if !cleaned_text.is_empty() {
                 if !result.is_empty() {
                     result.push(' ');
                 }
-                result.push_str(cleaned_text);
+                result.push_str(&cleaned_text);
             }
         }
 
@@ -813,12 +814,13 @@ impl WhisperEngine {
             }
 
             // Clean and append segment text
-            let cleaned_text = segment_text.trim();
+            let cleaned_text =
+                crate::audio::speaker::token_timestamps::strip_eot_markers(&segment_text);
             if !cleaned_text.is_empty() {
                 if !result.is_empty() {
                     result.push(' ');
                 }
-                result.push_str(cleaned_text);
+                result.push_str(&cleaned_text);
             }
         }
 

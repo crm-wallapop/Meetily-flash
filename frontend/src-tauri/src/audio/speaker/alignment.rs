@@ -115,6 +115,9 @@ fn align_with_tokens(
     let mut current_words: Vec<&TokenWord> = Vec::new();
 
     for token in tokens {
+        if crate::audio::speaker::token_timestamps::is_eot_marker(&token.word) {
+            continue;
+        }
         let speaker = speaker_at_time(diarization, token.start_ms)
             .map(|s| s.speaker_id)
             .unwrap_or(u32::MAX);
@@ -322,6 +325,40 @@ mod tests {
         assert_eq!(result[0].speaker, "Speaker 1");
         assert_eq!(result[1].text, "No that's wrong");
         assert_eq!(result[1].speaker, "Speaker 2");
+    }
+
+    // ── EOT sentinel tokens never become words or groups ─────────────
+
+    #[test]
+    fn token_alignment_skips_eot_tokens() {
+        let t = transcript_with_tokens(
+            "t1",
+            "Hello world",
+            0,
+            2000,
+            vec![
+                token("Hello", 0, 500),
+                token("[_EOT_]", 500, 500),
+                token("_EOT_", 500, 500),
+                token("world", 1000, 1500),
+            ],
+        );
+        let result = align_with_tokens(&t, t.token_words.as_ref().unwrap(), &[seg(0, 5000, 0)]);
+        assert_eq!(result.len(), 1, "EOT must not split the group");
+        assert_eq!(result[0].text, "Hello world");
+    }
+
+    #[test]
+    fn token_alignment_all_eot_tokens_yield_nothing() {
+        let t = transcript_with_tokens(
+            "t1",
+            "[_EOT_]",
+            0,
+            500,
+            vec![token("[_EOT_]", 100, 100)],
+        );
+        let result = align_with_tokens(&t, t.token_words.as_ref().unwrap(), &[seg(0, 5000, 0)]);
+        assert!(result.is_empty(), "EOT-only token stream must produce no rows, got {:?}", result);
     }
 
     // ── 2.4: Single-speaker segment is not split ──────────────────────

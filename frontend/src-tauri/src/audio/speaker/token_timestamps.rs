@@ -1,5 +1,20 @@
 use crate::audio::speaker::alignment::TokenWord;
 
+/// whisper.cpp's end-of-turn sentinel. It carries no speech and its timestamps
+/// are boundary-degenerate, so it is filtered at every consumption point.
+pub fn is_eot_marker(text: &str) -> bool {
+    matches!(text.trim(), "_EOT_" | "[_EOT_]")
+}
+
+/// Remove embedded EOT markers from whisper segment text.
+pub fn strip_eot_markers(text: &str) -> String {
+    text.replace("[_EOT_]", " ")
+        .replace("_EOT_", " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Extract per-token word timestamps from a Whisper state's segments.
 /// Returns a JSON string of TokenWord array, or None if no timestamps available.
 pub fn extract_token_timestamps(
@@ -27,7 +42,7 @@ pub fn extract_token_timestamps(
             };
 
             let text = text.trim();
-            if text.is_empty() {
+            if text.is_empty() || is_eot_marker(text) {
                 continue;
             }
 
@@ -104,6 +119,24 @@ mod tests {
     #[test]
     fn invalid_json_returns_none() {
         assert!(offset_token_timestamps("not json", 5).is_none());
+    }
+
+    #[test]
+    fn detects_eot_marker_forms() {
+        assert!(is_eot_marker("_EOT_"));
+        assert!(is_eot_marker("[_EOT_]"));
+        assert!(is_eot_marker(" [_EOT_] "));
+        assert!(!is_eot_marker("hello"));
+        assert!(!is_eot_marker(""));
+        assert!(!is_eot_marker("[_EOT_] extra"));
+    }
+
+    #[test]
+    fn strip_eot_markers_removes_embedded_and_standalone() {
+        assert_eq!(strip_eot_markers("hello [_EOT_] world"), "hello world");
+        assert_eq!(strip_eot_markers("[_EOT_]"), "");
+        assert_eq!(strip_eot_markers("start _EOT_ end"), "start end");
+        assert_eq!(strip_eot_markers("no markers here"), "no markers here");
     }
 
     #[test]
