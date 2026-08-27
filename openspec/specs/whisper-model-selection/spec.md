@@ -40,8 +40,12 @@ Realtime transcription during recording is not supported — the `audio-recordin
 - **WHEN** a recording is transcribed post-meeting, or an audio file is imported, with Whisper as the active provider
 - **THEN** each transcript row in the database has `token_timestamps` populated with a JSON array of word-level timing
 
-#### Scenario: Parakeet provider leaves token timestamps null
+### Requirement: Whisper is the only transcription provider
 
-- **WHEN** Parakeet is the active transcription provider
-- **THEN** transcript rows have `token_timestamps = NULL`
+Whisper SHALL be the only transcription engine. A stale `transcript_settings.provider` value (e.g., a pre-migration Parakeet row restored from a backup) SHALL NOT select any other engine; the startup migration `20260827000000_migrate_parakeet_transcript_config.sql` rewrites such rows to Whisper, and the batch path resolves to Whisper regardless.
+
+#### Scenario: Stale non-Whisper config does not change the engine
+
+- **WHEN** the stored transcript config names a provider other than `localWhisper`
+- **THEN** transcription still runs with Whisper and logs the ignored stale value
 

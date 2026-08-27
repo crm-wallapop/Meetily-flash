@@ -163,7 +163,7 @@ Flash attention SHALL be enabled for Metal, CUDA, and Vulkan. It SHALL be disabl
 
 ### Requirement: Recording start is synchronous — no pre-flight model checks
 
-The recording-start path SHALL NOT perform any asynchronous Tauri IPC calls before invoking `start_recording`. In particular, the Parakeet model-readiness checks (`parakeet_init`, `parakeet_has_available_models`, `parakeet_get_available_models`) SHALL NOT be called at recording-start time. Transcription model readiness is irrelevant to the recording-start path because transcription happens post-recording via the Whisper retranscription pipeline, not via Parakeet.
+The recording-start path SHALL NOT perform any asynchronous Tauri IPC calls before invoking `start_recording`. In particular, no transcription model-readiness checks (`whisper_init`, `whisper_has_available_models`, `whisper_get_available_models`) SHALL be called at recording-start time. Transcription model readiness is irrelevant to the recording-start path because transcription happens post-recording via the batch transcription queue.
 
 #### Scenario: Start button responds immediately on click
 

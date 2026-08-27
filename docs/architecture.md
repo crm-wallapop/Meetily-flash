@@ -36,12 +36,13 @@ There is exactly **one** transcription path and it is **batch-only**:
   plus an empty meeting row ("no live segments at stop").
 - The background transcription queue then runs the same
   `run_retranscription` used by the Enhance dialog.
-- The engine is **Whisper-only** (`resolve_provider_from_db` forces it): Parakeet
-  rows carry no token timestamps, which degrades speaker-alignment to
-  proportional word-count slicing. Whisper rows carry token timestamps and
-  split word-exactly.
-- The `transcript_settings.provider` value and the Parakeet engine plumbing
-  are inert for transcription; do not infer a live path from them.
+- The engine is **Whisper-only**: only Whisper rows carry token timestamps,
+  which let speaker alignment split text word-exactly; anything else degrades
+  to proportional word-count slicing. Parakeet was removed as an engine
+  entirely (its persisted configs are migrated at startup by
+  `20260827000000_migrate_parakeet_transcript_config.sql`).
+- There is no second engine and no live transcription path; do not infer one
+  from stale config values.
 
 ## Component Details
 
@@ -54,6 +55,6 @@ There is exactly **one** transcription path and it is **batch-only**:
 
 *   **Tauri Core:** The heart of the application, responsible for managing the window, handling events, and exposing the Rust core to the frontend.
 *   **Audio Engine:** Captures audio from the microphone and system, processes it, and prepares it for transcription.
-*   **Transcription Engine:** Uses local speech-to-text models (Whisper or Parakeet) to transcribe the captured audio. It can be accelerated with a GPU.
+*   **Transcription Engine:** Uses local Whisper speech-to-text models to transcribe the captured audio. It can be accelerated with a GPU.
 *   **Database:** A local SQLite database that stores meeting metadata, transcripts, and summaries.
 *   **Summary Engine:** Generates meeting summaries using various Large Language Models (LLMs), including local models via Ollama.

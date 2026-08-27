@@ -2,13 +2,13 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { isOllamaNotInstalledError } from '../lib/utils';
 import {
   getModelIcon,
-  getStatusColor as getParakeetStatusColor,
+  getStatusColor as getWhisperStatusColor,
   formatFileSize,
   isQuantizedModel,
   getModelPerformanceBadge,
   getRecommendedModel,
   type ModelStatus,
-} from '../lib/parakeet';
+} from '../lib/whisper';
 import {
   isModelAvailable,
   isModelDownloading,
@@ -52,7 +52,7 @@ describe('isOllamaNotInstalledError', () => {
 });
 
 // ---------------------------------------------------------------------------
-// parakeet helpers
+// whisper model helpers
 // ---------------------------------------------------------------------------
 describe('getModelIcon', () => {
   it('returns fire emoji for High accuracy', () => expect(getModelIcon('High')).toBe('🔥'));
@@ -60,23 +60,23 @@ describe('getModelIcon', () => {
   it('returns rocket emoji for Decent accuracy', () => expect(getModelIcon('Decent')).toBe('🚀'));
 });
 
-describe('getParakeetStatusColor', () => {
+describe('getWhisperStatusColor', () => {
   it('returns green for Available', () => {
-    expect(getParakeetStatusColor('Available')).toBe('green');
+    expect(getWhisperStatusColor('Available')).toBe('green');
   });
 
   it('returns gray for Missing', () => {
-    expect(getParakeetStatusColor('Missing')).toBe('gray');
+    expect(getWhisperStatusColor('Missing')).toBe('gray');
   });
 
   it('returns blue for Downloading object', () => {
     const status: ModelStatus = { Downloading: 50 };
-    expect(getParakeetStatusColor(status)).toBe('blue');
+    expect(getWhisperStatusColor(status)).toBe('blue');
   });
 
   it('returns red for Error object', () => {
     const status: ModelStatus = { Error: 'disk full' };
-    expect(getParakeetStatusColor(status)).toBe('red');
+    expect(getWhisperStatusColor(status)).toBe('red');
   });
 });
 
@@ -88,25 +88,29 @@ describe('formatFileSize', () => {
 });
 
 describe('isQuantizedModel', () => {
-  it('detects int8 in name', () => expect(isQuantizedModel('parakeet-tdt-0.6b-v3-int8')).toBe(true));
-  it('returns false for FP32 model', () => expect(isQuantizedModel('parakeet-tdt-0.6b-v3')).toBe(false));
+  it('detects q5_0 suffix in name', () => expect(isQuantizedModel('large-v3-turbo-q5_0')).toBe(true));
+  it('detects q5_1 suffix in name', () => expect(isQuantizedModel('tiny-q5_1')).toBe(true));
+  it('returns false for f16 model', () => expect(isQuantizedModel('large-v3')).toBe(false));
 });
 
 describe('getModelPerformanceBadge', () => {
-  it('FP32 returns Full Precision / blue', () => {
-    expect(getModelPerformanceBadge('FP32')).toEqual({ label: 'Full Precision', color: 'blue' });
+  it('f16 model returns Full Precision / blue', () => {
+    expect(getModelPerformanceBadge('large-v3')).toEqual({ label: 'Full Precision', color: 'blue' });
   });
-  it('Int8 returns Int8 Quantized / green', () => {
-    expect(getModelPerformanceBadge('Int8')).toEqual({ label: 'Int8 Quantized', color: 'green' });
+  it('q5_1 model returns Balanced+ / green', () => {
+    expect(getModelPerformanceBadge('tiny-q5_1')).toEqual({ label: 'Balanced+', color: 'green' });
+  });
+  it('q5_0 model returns Balanced / green', () => {
+    expect(getModelPerformanceBadge('medium-q5_0')).toEqual({ label: 'Balanced', color: 'green' });
   });
 });
 
 describe('getRecommendedModel', () => {
-  it('returns int8 model by default', () => {
-    expect(getRecommendedModel()).toContain('int8');
+  it('defaults to the balanced quantized model', () => {
+    expect(getRecommendedModel()).toBe('medium-q5_0');
   });
-  it('returns int8 model regardless of specs', () => {
-    expect(getRecommendedModel({ ram: 64, cores: 16 })).toContain('int8');
+  it('recommends large-v3 on high-spec machines', () => {
+    expect(getRecommendedModel({ ram: 16000, cores: 8 })).toBe('large-v3');
   });
 });
 

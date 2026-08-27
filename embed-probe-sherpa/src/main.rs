@@ -5,8 +5,8 @@
 //! sherpa-onnx 1.13.x statically bundles ONNX Runtime 1.17.1 (C-API ≤17), while
 //! the project's `ort = 2.0.0-rc.10` crate ships a much newer ORT (C-API 27).
 //! Loading both into one process triggers a STATUS_ACCESS_VIOLATION on Windows.
-//! The `meetily-flash` crate links BOTH (sherpa for diarization, ort for
-//! Parakeet), so it cannot be the parent process. This crate — and its sibling
+//! The `meetily-flash` crate at the time linked BOTH (sherpa for diarization,
+//! ort for its ONNX models), so it could not be the parent process. This crate — and its sibling
 //! `embed-probe-ort` — are standalone binaries with NO dependency on `app_lib`,
 //! so each loads exactly one ORT. A third process (shell script / Python) calls
 //! both binaries, then runs `compare_embeddings.py` on their JSON outputs.

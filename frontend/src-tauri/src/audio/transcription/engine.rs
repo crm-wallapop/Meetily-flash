@@ -14,7 +14,6 @@ use tauri::{AppHandle, Manager, Runtime};
 // Transcription engine abstraction to support multiple providers
 pub enum TranscriptionEngine {
     Whisper(Arc<crate::whisper_engine::WhisperEngine>),  // Direct access (backward compat)
-    Parakeet(Arc<crate::parakeet_engine::ParakeetEngine>), // Direct access (backward compat)
     Provider(Arc<dyn TranscriptionProvider>),  // Trait-based (preferred for new code)
 }
 
@@ -23,7 +22,6 @@ impl TranscriptionEngine {
     pub async fn is_model_loaded(&self) -> bool {
         match self {
             Self::Whisper(engine) => engine.is_model_loaded().await,
-            Self::Parakeet(engine) => engine.is_model_loaded().await,
             Self::Provider(provider) => provider.is_model_loaded().await,
         }
     }
@@ -32,7 +30,6 @@ impl TranscriptionEngine {
     pub async fn get_current_model(&self) -> Option<String> {
         match self {
             Self::Whisper(engine) => engine.get_current_model().await,
-            Self::Parakeet(engine) => engine.get_current_model().await,
             Self::Provider(provider) => provider.get_current_model().await,
         }
     }
@@ -41,7 +38,6 @@ impl TranscriptionEngine {
     pub fn provider_name(&self) -> &str {
         match self {
             Self::Whisper(_) => "Whisper (direct)",
-            Self::Parakeet(_) => "Parakeet (direct)",
             Self::Provider(provider) => provider.provider_name(),
         }
     }
@@ -51,79 +47,13 @@ impl TranscriptionEngine {
 // ENGINE INITIALIZATION
 // ============================================================================
 
-/// Get or initialize the appropriate transcription engine based on provider configuration
+/// Get or initialize the transcription engine based on provider configuration.
+/// Whisper is the only engine; the config's model selection drives `get_or_init_whisper`.
 pub async fn get_or_init_transcription_engine<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<TranscriptionEngine, String> {
-    // Get provider configuration from API
-    let config = match crate::api::api::api_get_transcript_config(
-        app.clone(),
-        app.clone().state(),
-        None,
-    )
-    .await
-    {
-        Ok(Some(config)) => {
-            info!(
-                "📝 Transcript config - provider: {}, model: {}",
-                config.provider, config.model
-            );
-            config
-        }
-        Ok(None) => {
-            info!("📝 No transcript config found, defaulting to parakeet");
-            crate::api::api::TranscriptConfig {
-                provider: "parakeet".to_string(),
-                model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
-                api_key: None,
-            }
-        }
-        Err(e) => {
-            warn!("⚠️ Failed to get transcript config: {}, defaulting to parakeet", e);
-            crate::api::api::TranscriptConfig {
-                provider: "parakeet".to_string(),
-                model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
-                api_key: None,
-            }
-        }
-    };
-
-    // Initialize the appropriate engine based on provider
-    match config.provider.as_str() {
-        "parakeet" => {
-            info!("🦜 Initializing Parakeet transcription engine");
-
-            // Get Parakeet engine
-            let engine = {
-                let guard = crate::parakeet_engine::commands::PARAKEET_ENGINE
-                    .lock()
-                    .unwrap();
-                guard.as_ref().cloned()
-            };
-
-            match engine {
-                Some(engine) => {
-                    // Check if model is loaded
-                    if engine.is_model_loaded().await {
-                        let model_name = engine.get_current_model().await
-                            .unwrap_or_else(|| "unknown".to_string());
-                        info!("✅ Parakeet model '{}' already loaded", model_name);
-                        Ok(TranscriptionEngine::Parakeet(engine))
-                    } else {
-                        Err("Parakeet engine initialized but no model loaded. This should not happen after validation.".to_string())
-                    }
-                }
-                None => {
-                    Err("Parakeet engine not initialized. This should not happen after validation.".to_string())
-                }
-            }
-        }
-        "localWhisper" | _ => {
-            info!("🎤 Initializing Whisper transcription engine");
-            let whisper_engine = get_or_init_whisper(app).await?;
-            Ok(TranscriptionEngine::Whisper(whisper_engine))
-        }
-    }
+    let engine = get_or_init_whisper(app).await?;
+    Ok(TranscriptionEngine::Whisper(engine))
 }
 
 /// Get or initialize transcription engine using API configuration
@@ -240,7 +170,7 @@ pub async fn get_or_init_whisper<R: Runtime>(
                     info!("Using model from API config: {}", config.model);
                     config.model
                 } else {
-                    // Non-Whisper provider (e.g., parakeet) - this function shouldn't be called
+                    // Stale/unknown provider value in config - surface it loudly
                     return Err(format!(
                         "Cannot initialize Whisper engine: Config uses '{}' provider. This is a bug in the transcription task initialization.",
                         config.provider

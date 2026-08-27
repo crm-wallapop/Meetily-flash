@@ -4,7 +4,7 @@
 //!
 //! WHY a separate path from sherpa-onnx: sherpa-onnx Rust 1.13.x statically
 //! bundles ORT 1.17.1 (C-API ≤17); pyannote-segmentation-3.0 requires C-API
-//! 24-27. The project's own `ort = 2.0.0-rc.10` (used for Parakeet) ships a
+//! 24-27. The project's own `ort = 2.0.0-rc.10` (the app's ONNX runtime) ships a
 //! much newer ORT. If this probe succeeds, Part B (finer speaker boundaries)
 //! becomes feasible via a hand-rolled pyannote pipeline on `ort`, sidestepping
 //! sherpa-onnx's stale ORT entirely. See memory
@@ -45,7 +45,9 @@ async fn pyannote_loads_and_runs_via_ort_rc10() {
         model_path.display()
     );
 
-    // Mirror parakeet_engine/model.rs:91,114-125 session config.
+    // Session config once mirrored the deleted parakeet_engine/model.rs
+    // (CPU provider + commit_from_file); kept identical so probe timings
+    // stay comparable across the engine swap.
     // ort 2.0.0-rc.10 uses commit_from_file (not with_model_from_file).
     let providers = vec![CPUExecutionProvider::default().build()];
     let session_result = Session::builder()

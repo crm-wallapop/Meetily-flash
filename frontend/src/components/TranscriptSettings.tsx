@@ -9,12 +9,12 @@ import { ModelManager } from './WhisperModelManager';
 
 
 export interface TranscriptModelProps {
-    provider: 'localWhisper' | 'parakeet' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+    provider: 'localWhisper' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
     model: string;
     apiKey?: string | null;
 }
 
-type UiProvider = Exclude<TranscriptModelProps['provider'], 'parakeet'>;
+type UiProvider = TranscriptModelProps['provider'];
 
 export interface TranscriptSettingsProps {
     transcriptModelConfig: TranscriptModelProps;
@@ -27,19 +27,11 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [showApiKey, setShowApiKey] = useState<boolean>(false);
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
-    // Parakeet was removed as a transcription engine (migration
-    // 20260827_migrate_parakeet_transcript_config rewrote persisted configs;
-    // batch transcription is Whisper-only). localWhisper is the only local
-    // engine this page offers.
-    const [uiProvider, setUiProvider] = useState<UiProvider>(
-        transcriptModelConfig.provider === 'parakeet' ? 'localWhisper' : transcriptModelConfig.provider as UiProvider
-    );
+    const [uiProvider, setUiProvider] = useState<UiProvider>(transcriptModelConfig.provider);
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
-        setUiProvider(
-            transcriptModelConfig.provider === 'parakeet' ? 'localWhisper' : transcriptModelConfig.provider as UiProvider
-        );
+        setUiProvider(transcriptModelConfig.provider);
     }, [transcriptModelConfig.provider]);
 
     useEffect(() => {

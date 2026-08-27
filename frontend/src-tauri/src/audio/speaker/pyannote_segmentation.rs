@@ -375,8 +375,8 @@ fn secs_to_frames(secs: f64) -> usize {
     (secs / FRAME_SHIFT_SECS).round() as usize
 }
 
-/// In-process pyannote-segmentation-3.0 boundary source (second `ort::Session`
-/// alongside Parakeet + nemo_titanet — one ORT runtime for the whole app).
+/// In-process pyannote-segmentation-3.0 boundary source (`ort::Session`
+/// alongside nemo_titanet — one ORT runtime for the whole app).
 pub struct PyannoteSegmentation {
     session: Mutex<Session>,
     audio_input_name: String,

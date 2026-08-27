@@ -1,7 +1,7 @@
 // audio/transcription/provider.rs
 //
 // Defines the unified TranscriptionProvider trait and common types for all
-// transcription engines (Whisper, Parakeet, future providers).
+// transcription engines (Whisper and future providers).
 
 use async_trait::async_trait;
 
@@ -46,7 +46,7 @@ pub struct TranscriptResult {
     pub token_timestamps: Option<String>,
 }
 
-/// Trait for transcription providers (Whisper, Parakeet, future providers)
+/// Trait for transcription providers (Whisper and future providers)
 #[async_trait]
 pub trait TranscriptionProvider: Send + Sync {
     /// Transcribe audio samples to text
