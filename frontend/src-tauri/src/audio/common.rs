@@ -25,7 +25,7 @@ pub(crate) async fn unload_engine_after_batch() {
 
 /// Create transcript segments from transcription results.
 /// Each tuple is (text, start_ms, end_ms, token_timestamps) from VAD timestamps.
-pub(crate) fn create_transcript_segments(transcripts: &[(String, f64, f64, Option<String>)]) -> Vec<TranscriptSegment> {
+#[doc(hidden)] pub fn create_transcript_segments(transcripts: &[(String, f64, f64, Option<String>)]) -> Vec<TranscriptSegment> {
     transcripts
         .iter()
         .map(|(text, start_ms, end_ms, token_ts)| {
@@ -47,7 +47,7 @@ pub(crate) fn create_transcript_segments(transcripts: &[(String, f64, f64, Optio
 }
 
 /// Write transcripts.json to a meeting folder (atomic write with temp file)
-pub(crate) fn write_transcripts_json(folder: &Path, segments: &[TranscriptSegment]) -> Result<()> {
+#[doc(hidden)] pub fn write_transcripts_json(folder: &Path, segments: &[TranscriptSegment]) -> Result<()> {
     let transcript_path = folder.join("transcripts.json");
     let temp_path = folder.join(".transcripts.json.tmp");
 
@@ -85,7 +85,7 @@ pub(crate) fn write_transcripts_json(folder: &Path, segments: &[TranscriptSegmen
 /// Scans for 100ms windows with minimal RMS energy within +/-3 seconds of each target
 /// split point. If no clear silence is found, falls back to a 1-second overlap split
 /// to avoid cutting words at boundaries.
-pub(crate) fn split_segment_at_silence(
+#[doc(hidden)] pub fn split_segment_at_silence(
     segment: &crate::audio::vad::SpeechSegment,
     max_samples: usize,
 ) -> Vec<crate::audio::vad::SpeechSegment> {
