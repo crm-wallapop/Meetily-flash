@@ -307,8 +307,20 @@ async fn resolve_provider_from_db<R: Runtime>(app: &AppHandle<R>) -> String {
                 None
             });
     let provider = result.map(|(p,)| p).unwrap_or_else(|| "whisper".to_string());
-    info!("resolve_provider_from_db: using provider '{}'", provider);
-    provider
+    // Whisper-only batch transcription (user decision 2026-08-27): Parakeet
+    // rows carry no token timestamps, so diarization alignment falls back to
+    // proportional word-count slicing and cuts sentences mid-word at speaker
+    // changes. Whisper rows carry token timestamps and split word-exactly.
+    // The DB provider setting is still read (so the log reflects what the user
+    // had configured) but never selects Parakeet for batch jobs.
+    if provider != "whisper" {
+        warn!(
+            "resolve_provider_from_db: configured provider '{}' does not emit token timestamps - using whisper",
+            provider
+        );
+    }
+    info!("resolve_provider_from_db: using provider 'whisper'");
+    "whisper".to_string()
 }
 
 /// Start retranscription of a meeting's audio

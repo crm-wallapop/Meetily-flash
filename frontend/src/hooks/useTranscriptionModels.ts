@@ -77,7 +77,16 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
       console.error('Failed to fetch Parakeet models:', err);
     }
 
-    setAvailableModels(allModels);
+    // Whisper-only listing (user decision 2026-08-27): Enhance is the
+    // diarization boundary source, and Parakeet rows carry no token
+    // timestamps — alignment then falls back to proportional word-count
+    // slicing and cuts sentences mid-word at speaker changes. Whisper rows
+    // carry token timestamps and split word-exactly via align_with_tokens.
+    // Parakeet stays listed only when no Whisper model exists locally (a
+    // dead dropdown is worse than a token-less fallback).
+    const whisperModels = allModels.filter((m) => m.provider === 'whisper');
+    const listed = whisperModels.length > 0 ? whisperModels : allModels;
+    setAvailableModels(listed);
 
     // Set default model based on user's saved configuration
     const configuredProvider = transcriptModelConfig?.provider || '';
@@ -85,10 +94,9 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
 
     // Try to match the configured model
     // Note: 'localWhisper' in config maps to 'whisper' provider in model list
-    const configuredMatch = allModels.find(
+    const configuredMatch = listed.find(
       (m) =>
-        (configuredProvider === 'localWhisper' && m.provider === 'whisper' && m.name === configuredModel) ||
-        (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel)
+        configuredProvider === 'localWhisper' && m.provider === 'whisper' && m.name === configuredModel
     );
 
     // Only set default model if user hasn't manually selected one
@@ -96,9 +104,9 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
       if (configuredMatch) {
         // Use the configured model if available
         setSelectedModelKey(`${configuredMatch.provider}:${configuredMatch.name}`);
-      } else if (allModels.length > 0) {
-        // Fall back to first available model
-        setSelectedModelKey(`${allModels[0].provider}:${allModels[0].name}`);
+      } else if (listed.length > 0) {
+        // Fall back to first available Whisper model
+        setSelectedModelKey(`${listed[0].provider}:${listed[0].name}`);
       }
     }
 
