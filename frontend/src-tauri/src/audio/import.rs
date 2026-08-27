@@ -605,7 +605,7 @@ async fn run_import<R: Runtime>(
                         );
                     }
                     let (text, conf, _, token_ts) = engine
-                        .transcribe_audio_with_confidence(samples, language)
+                        .transcribe_audio_with_confidence(samples, language, start_ms as i64)
                         .await
                         .map_err(|e| {
                             anyhow!("Whisper transcription failed on segment {}: {}", i, e)

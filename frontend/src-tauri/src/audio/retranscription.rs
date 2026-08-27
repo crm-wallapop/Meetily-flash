@@ -590,10 +590,11 @@ async fn run_retranscription<R: Runtime>(
             let whisper_engine = whisper_engine.clone();
             let language = language.clone();
             let samples = segment.samples.clone();
+            let segment_offset_ms = segment.start_timestamp_ms as i64;
             async move {
                 let engine = whisper_engine.as_ref().unwrap();
                 let (text, conf, _, token_ts) = engine
-                    .transcribe_audio_with_confidence(samples, language)
+                    .transcribe_audio_with_confidence(samples, language, segment_offset_ms)
                     .await
                     .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
                 Ok((text, conf, token_ts))

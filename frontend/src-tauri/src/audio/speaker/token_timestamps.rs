@@ -62,9 +62,49 @@ pub fn extract_token_timestamps(
     serde_json::to_string(&words).ok()
 }
 
+/// Shift token timestamps from whisper-window time into meeting-absolute time.
+///
+/// whisper.cpp reports token t0/t1 relative to the start of the 30-second
+/// window it just processed, but the diarization aligner looks words up
+/// against meeting-absolute speaker segments. Every batch chunk (one VAD
+/// segment) must therefore add its own `start_timestamp_ms` before the JSON
+/// is persisted. Returns None unchanged; an empty word list stays empty.
+pub fn offset_token_timestamps(json: &str, offset_ms: i64) -> Option<String> {
+    let mut words: Vec<TokenWord> = serde_json::from_str(json).ok()?;
+    for w in &mut words {
+        w.start_ms += offset_ms;
+        w.end_ms += offset_ms;
+    }
+    serde_json::to_string(&words).ok()
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::audio::speaker::alignment::TokenWord;
+
+    #[test]
+    fn offset_shifts_every_word_by_the_chunk_start() {
+        let json = r#"[{"word":"Hello","start_ms":0,"end_ms":500},
+                       {"word":"world","start_ms":500,"end_ms":1500}]"#;
+        let out = offset_token_timestamps(json, 41_000).expect("offset ok");
+        let parsed: Vec<TokenWord> = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed[0].start_ms, 41_000);
+        assert_eq!(parsed[0].end_ms, 41_500);
+        assert_eq!(parsed[1].start_ms, 41_500);
+        assert_eq!(parsed[1].end_ms, 42_500);
+    }
+
+    #[test]
+    fn offset_preserves_none_and_empty() {
+        assert!(offset_token_timestamps("null", 100).is_none());
+        assert_eq!(offset_token_timestamps("[]", 100).as_deref(), Some("[]"));
+    }
+
+    #[test]
+    fn invalid_json_returns_none() {
+        assert!(offset_token_timestamps("not json", 5).is_none());
+    }
 
     #[test]
     fn serialize_token_words() {

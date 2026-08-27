@@ -520,8 +520,20 @@ impl WhisperEngine {
         repeated_words as f32 / total_words
     }
     
-    /// Transcribe audio with streaming support for partial results and adaptive quality
-    pub async fn transcribe_audio_with_confidence(&self, audio_data: Vec<f32>, language: Option<String>) -> Result<(String, f32, bool, Option<String>)> {
+    /// Transcribe audio with streaming support for partial results and adaptive quality.
+    ///
+    /// `segment_offset_ms` is the chunk's start position on the meeting
+    /// timeline: token timestamps come out of whisper.cpp relative to its
+    /// 30-second window, and the diarization aligner needs them
+    /// meeting-absolute, so they are shifted by this offset before being
+    /// returned. Callers that don't know the offset (and don't consume token
+    /// timestamps) may pass 0.
+    pub async fn transcribe_audio_with_confidence(
+        &self,
+        audio_data: Vec<f32>,
+        language: Option<String>,
+        segment_offset_ms: i64,
+    ) -> Result<(String, f32, bool, Option<String>)> {
         let ctx_lock = self.current_context.read().await;
         let ctx = ctx_lock.as_ref()
             .ok_or_else(|| anyhow!("No model loaded. Please load a model first."))?;
@@ -641,7 +653,13 @@ impl WhisperEngine {
             0.0
         };
 
-        let token_timestamps = extract_token_timestamps(&state, num_segments);
+        let token_timestamps = extract_token_timestamps(&state, num_segments)
+            .and_then(|json| {
+                crate::audio::speaker::token_timestamps::offset_token_timestamps(
+                    &json,
+                    segment_offset_ms,
+                )
+            });
 
         Ok((cleaned_result, avg_confidence, is_partial, token_timestamps))
     }
