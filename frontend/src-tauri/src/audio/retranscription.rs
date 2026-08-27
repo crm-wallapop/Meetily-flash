@@ -338,9 +338,11 @@ pub async fn start_retranscription<R: Runtime>(
     // Reset cancellation flag
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
 
-    // When the caller doesn't specify a provider, read it from the DB so
-    // the correct engine is used regardless of what was configured for live
-    // transcription.  Defaults to "whisper" if the setting is missing.
+    // When the caller doesn't specify a provider, read it from the DB.
+    // This is the ONLY transcription path: recordings produce no live
+    // transcripts (stop saves audio + an empty meeting row; the queue runs
+    // this batch job afterwards). resolve_provider_from_db then forces
+    // whisper regardless of the setting (see the note there).  Defaults to "whisper" if the setting is missing.
     let resolved_provider = match provider {
         Some(ref p) => p.clone(),
         None => resolve_provider_from_db(&app).await,

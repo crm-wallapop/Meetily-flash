@@ -25,6 +25,24 @@ graph TD
     B -- Manages --> F
 ```
 
+## Transcription Pipeline (batch-only)
+
+> Authoritative as of 2026-08-27. If code/comments contradict this section,
+> this section wins — some comments predate the batch pivot.
+
+There is exactly **one** transcription path and it is **batch-only**:
+
+- Recording produces **no live transcripts**. Stop-time saves the audio file
+  plus an empty meeting row ("no live segments at stop").
+- The background transcription queue then runs the same
+  `run_retranscription` used by the Enhance dialog.
+- The engine is **Whisper-only** (`resolve_provider_from_db` forces it): Parakeet
+  rows carry no token timestamps, which degrades speaker-alignment to
+  proportional word-count slicing. Whisper rows carry token timestamps and
+  split word-exactly.
+- The `transcript_settings.provider` value and the Parakeet engine plumbing
+  are inert for transcription; do not infer a live path from them.
+
 ## Component Details
 
 ### Frontend (Next.js)
