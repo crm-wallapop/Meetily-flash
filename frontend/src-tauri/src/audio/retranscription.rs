@@ -490,7 +490,7 @@ async fn run_retranscription<R: Runtime>(
         return Err(anyhow!("Retranscription cancelled"));
     }
 
-    // Use VAD to find natural speech boundaries (same approach as live transcription)
+    // Use VAD to find natural speech boundaries.
     // IMPORTANT: Run VAD in a blocking task to avoid blocking the async runtime
     // For large files (35+ minutes), VAD processing can take several minutes
     let app_for_vad = app.clone();

@@ -285,7 +285,7 @@ impl WhisperEngine {
                 // Enable flash attention for Metal, CUDA, and Vulkan. All three backends have
                 // verified fp16 shader implementations.
                 //
-                // Vulkan was temporarily disabled after garbled live transcription observed
+                // Vulkan was temporarily disabled after garbled transcription output was observed
                 // 2026-05-12 on Intel Arc iGPU. Diagnosed 2026-05-13: both flash_attn=true and
                 // flash_attn=false produce identical hallucinations on loud non-speech noise
                 // (-6 dBFS white noise → "(water splashing)" in both cases). Root cause was VAD
