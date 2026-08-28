@@ -78,6 +78,98 @@ test.describe('speaker-diarization smoke (section 15 backfill)', () => {
     });
   });
 
+  // ── New tests for the Speakers button timeout & error recovery fix ──
+
+  test('15.3b — Speakers button stays disabled while diarization is in flight (no double-click)', async ({ page }) => {
+    await bootstrap(page, [
+      { id: 't1', text: 'Speaker zero talking.', timestamp: '00:00:01', audio_start_time: 0, speaker: 'Speaker 0' },
+    ]);
+
+    const speakersBtn = page.getByTitle('Re-run speaker detection on this meeting');
+    await expect(speakersBtn).toBeVisible({ timeout: 20_000 });
+    await speakersBtn.click();
+
+    // Button must be disabled immediately after click (handleRediarize sets isRediarizing=true)
+    await expect(speakersBtn).toBeDisabled({ timeout: 5_000 });
+    // And must remain disabled while we wait for the diarization-complete event
+    // (which we deliberately do NOT emit — simulating a long-running diarization)
+    await expect(speakersBtn).toBeDisabled({ timeout: 10_000 });
+  });
+
+  test('15.3c — Speakers button re-enables and shows error toast when reset_speaker_labels rejects', async ({ page }) => {
+    await bootstrap(page, [
+      { id: 't1', text: 'Speaker zero talking.', timestamp: '00:00:01', audio_start_time: 0, speaker: 'Speaker 0' },
+    ]);
+
+    // Configure the mock to reject on the next reset_speaker_labels call
+    await page.evaluate(() => {
+      (window as unknown as { __tauriMockDispatcher: (cmd: string, args?: unknown) => Promise<unknown> })
+        .__tauriMockDispatcher('__test_configure_reset_speaker_labels_error', {
+          shouldReject: true,
+          rejectValue: 'Backend diarization pipeline failed',
+        });
+    });
+
+    const speakersBtn = page.getByTitle('Re-run speaker detection on this meeting');
+    await expect(speakersBtn).toBeVisible({ timeout: 20_000 });
+    await speakersBtn.click();
+
+    // Button must be disabled while processing
+    await expect(speakersBtn).toBeDisabled({ timeout: 5_000 });
+
+    // The command rejects → error toast shown, button re-enabled
+    await expect(page.getByText('Re-diarization failed')).toBeVisible({ timeout: 10_000 });
+    await expect(speakersBtn).toBeEnabled({ timeout: 10_000 });
+  });
+
+  test('15.3d — Speakers button can be retried after a rejection (button re-enables)', async ({ page }) => {
+    await bootstrap(page, [
+      { id: 't1', text: 'Speaker zero talking.', timestamp: '00:00:01', audio_start_time: 0, speaker: 'Speaker 0' },
+    ]);
+
+    // Configure the mock to reject on the first call, succeed on the second
+    await page.evaluate(() => {
+      (window as unknown as { __tauriMockDispatcher: (cmd: string, args?: unknown) => Promise<unknown> })
+        .__tauriMockDispatcher('__test_configure_reset_speaker_labels_error', {
+          shouldReject: true,
+          rejectValue: 'First attempt failed',
+        });
+    });
+
+    const speakersBtn = page.getByTitle('Re-run speaker detection on this meeting');
+    await expect(speakersBtn).toBeVisible({ timeout: 20_000 });
+    await speakersBtn.click();
+
+    // First attempt rejects
+    await expect(page.getByText('Re-diarization failed')).toBeVisible({ timeout: 10_000 });
+    await expect(speakersBtn).toBeEnabled({ timeout: 10_000 });
+
+    // Re-configure mock to succeed
+    await page.evaluate(() => {
+      (window as unknown as { __tauriMockDispatcher: (cmd: string, args?: unknown) => Promise<unknown> })
+        .__tauriMockDispatcher('__test_configure_reset_speaker_labels_error', {
+          shouldReject: false,
+        });
+    });
+
+    // Retry — button should disable again, then succeed
+    await speakersBtn.click();
+    await expect(speakersBtn).toBeDisabled({ timeout: 5_000 });
+
+    // Emit the diarization-complete event the real backend would send
+    await page.evaluate(() => {
+      (window as unknown as { __tauriMockEventBus: { emit: (e: string, p: unknown) => void } })
+        .__tauriMockEventBus.emit('diarization-complete', {
+          meeting_id: 'meet-summary-001',
+          speaker_count: 2,
+          segments_labeled: 8,
+        });
+    });
+
+    await expect(page.getByText('Detected 2 speakers')).toBeVisible({ timeout: 10_000 });
+    await expect(speakersBtn).toBeEnabled({ timeout: 10_000 });
+  });
+
   test('15.6 — speaker color is deterministic by speaker (same name → same color, distinct names → distinct)', async ({ page }) => {
     await bootstrap(page, [
       { id: 't1', text: 'First turn.', timestamp: '00:00:01', audio_start_time: 0, speaker: 'Speaker 0' },
